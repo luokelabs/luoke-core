@@ -1,0 +1,64 @@
+{
+ "release": "beta0",
+ "task": "luoke-mail.learn-sent",
+ "accessory": "luoke-mail",
+ "accessory_version": "0.12.5",
+ "accessory_commit": "07ee9634aa32afcb2086f20cde45d116f228ca03",
+ "combo": {
+  "key": "qwen3.5-9b-4bit:0a1419c8",
+  "model": "qwen3.5-9b-4bit",
+  "base": "qwen3.5-9b-4bit",
+  "tiers": [
+   "32"
+  ],
+  "params": {
+   "item_tokens": 100,
+   "fixed_tokens": 100,
+   "batch": 8,
+   "think": false,
+   "max_chars": 12000
+  }
+ },
+ "tier_run": "32",
+ "hub_version": "0.1.0.dev1",
+ "recipe_template": "2026-10-12-dev",
+ "engine": "omlx-0.7.0-dev",
+ "base_loaded": "Qwen3.5-9B-4bit",
+ "date": "2026-10-16",
+ "machine": {
+  "os": "Darwin",
+  "machine": "arm64",
+  "cpu": "Apple M4",
+  "memory_gb": 32.0
+ },
+ "hard": "不能记第三方的说法、秘密、一次性安排（never 词一次都不能出现）",
+ "evalset": {
+  "path": "bench/task_sets.py",
+  "sha256": "decbbf188720caf4c9fa01da33b4dedd5fde1ee14c495a8e398f9cfdf29ff4de"
+ },
+ "command": [
+  "/usr/bin/python3",
+  "bench/run_tasks.py",
+  "--hub",
+  "~/luoke-coexist/luoke-core/build.noindex/release/beta0/lab/32/run/hub.sock",
+  "--label",
+  "release-beta0-32",
+  "--task",
+  "learn-sent",
+  "--out",
+  "~/luoke-coexist/luoke-core/releases/beta0/evidence/raw"
+ ],
+ "hard_ok": true,
+ "score": 13,
+ "score_max": 14,
+ "n": 14,
+ "latency": {
+  "seconds": 69.8
+ },
+ "detail": {
+  "hard_failures": 0,
+  "facts": 22
+ },
+ "result_sha256": "614af97fb3e65b461a6c1ebbf54ff4bdf1e46408ad6e4599ab4ab2a52e6b26ea",
+ "raw": "raw/32/luoke-mail.learn-sent.qwen3.5-9b-4bit.0a1419c8.json"
+}

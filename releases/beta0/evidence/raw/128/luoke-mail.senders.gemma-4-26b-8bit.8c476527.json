@@ -1,0 +1,289 @@
+{
+ "task": "luoke-mail.senders",
+ "accessory": "luoke-mail/0.12.5",
+ "label": "release-beta0-128",
+ "model": "omlx-0.7.0-dev+gemma-4-26b-8bit",
+ "base_url": "unix:~/Codes/luoke/luoke-core/build.noindex/release/beta0/lab/128/run/hub.sock",
+ "machine": {
+  "os": "Darwin",
+  "machine": "arm64",
+  "cpu": "Apple M5 Max",
+  "memory_gb": 128.0
+ },
+ "python": "3.9.6",
+ "date": "2026-10-16",
+ "set_sha256": "7bd4c5c54130abe843528de3da15e410bcc818931f34ce36da4cd784947c6add",
+ "score": {
+  "n": 25,
+  "ok": 25,
+  "hard_n": 13,
+  "hard_failures": 0,
+  "unanswered": 0,
+  "unsub_found": 11,
+  "unsub_n": 12,
+  "seconds": 5.1,
+  "passes": true
+ },
+ "items": [
+  {
+   "sender": "service@cmbchina.example",
+   "expect": [
+    "transactional"
+   ],
+   "hard": true,
+   "kind": "transactional",
+   "ok": true,
+   "hard_failure": false
+  },
+  {
+   "sender": "notice@icbc.example",
+   "expect": [
+    "transactional"
+   ],
+   "hard": true,
+   "kind": "transactional",
+   "ok": true,
+   "hard_failure": false
+  },
+  {
+   "sender": "service@alipay.example",
+   "expect": [
+    "transactional"
+   ],
+   "hard": true,
+   "kind": "transactional",
+   "ok": true,
+   "hard_failure": false
+  },
+  {
+   "sender": "order@jd.example",
+   "expect": [
+    "transactional"
+   ],
+   "hard": true,
+   "kind": "transactional",
+   "ok": true,
+   "hard_failure": false
+  },
+  {
+   "sender": "billing@cloud.example",
+   "expect": [
+    "transactional"
+   ],
+   "hard": true,
+   "kind": "transactional",
+   "ok": true,
+   "hard_failure": false
+  },
+  {
+   "sender": "renew@domains.example",
+   "expect": [
+    "transactional"
+   ],
+   "hard": true,
+   "kind": "transactional",
+   "ok": true,
+   "hard_failure": false
+  },
+  {
+   "sender": "bill@sgcc.example",
+   "expect": [
+    "transactional"
+   ],
+   "hard": true,
+   "kind": "transactional",
+   "ok": true,
+   "hard_failure": false
+  },
+  {
+   "sender": "no-reply@accounts.google.example",
+   "expect": [
+    "security"
+   ],
+   "hard": true,
+   "kind": "security",
+   "ok": true,
+   "hard_failure": false
+  },
+  {
+   "sender": "noreply@github.example",
+   "expect": [
+    "security"
+   ],
+   "hard": true,
+   "kind": "security",
+   "ok": true,
+   "hard_failure": false
+  },
+  {
+   "sender": "noreply@cloud.example",
+   "expect": [
+    "security"
+   ],
+   "hard": true,
+   "kind": "security",
+   "ok": true,
+   "hard_failure": false
+  },
+  {
+   "sender": "hr@corp.example",
+   "expect": [
+    "transactional",
+    "personal"
+   ],
+   "hard": true,
+   "kind": "transactional",
+   "ok": true,
+   "hard_failure": false
+  },
+  {
+   "sender": "zhangwei@mail.example",
+   "expect": [
+    "personal"
+   ],
+   "hard": true,
+   "kind": "personal",
+   "ok": true,
+   "hard_failure": false
+  },
+  {
+   "sender": "li@law.example",
+   "expect": [
+    "personal",
+    "transactional",
+    "other"
+   ],
+   "hard": true,
+   "kind": "personal",
+   "ok": true,
+   "hard_failure": false
+  },
+  {
+   "sender": "news@shop.example",
+   "expect": [
+    "marketing"
+   ],
+   "hard": false,
+   "kind": "marketing",
+   "ok": true,
+   "hard_failure": false
+  },
+  {
+   "sender": "news@skyair.example",
+   "expect": [
+    "marketing"
+   ],
+   "hard": false,
+   "kind": "marketing",
+   "ok": true,
+   "hard_failure": false
+  },
+  {
+   "sender": "promo@gym.example",
+   "expect": [
+    "marketing"
+   ],
+   "hard": false,
+   "kind": "marketing",
+   "ok": true,
+   "hard_failure": false
+  },
+  {
+   "sender": "digest@aiweekly.example",
+   "expect": [
+    "newsletter"
+   ],
+   "hard": false,
+   "kind": "newsletter",
+   "ok": true,
+   "hard_failure": false
+  },
+  {
+   "sender": "noreply@medium.example",
+   "expect": [
+    "newsletter",
+    "marketing"
+   ],
+   "hard": false,
+   "kind": "newsletter",
+   "ok": true,
+   "hard_failure": false
+  },
+  {
+   "sender": "daily@news.example",
+   "expect": [
+    "newsletter"
+   ],
+   "hard": false,
+   "kind": "newsletter",
+   "ok": true,
+   "hard_failure": false
+  },
+  {
+   "sender": "noreply@zhihu.example",
+   "expect": [
+    "notification",
+    "newsletter"
+   ],
+   "hard": false,
+   "kind": "notification",
+   "ok": true,
+   "hard_failure": false
+  },
+  {
+   "sender": "notify@forum.example",
+   "expect": [
+    "notification"
+   ],
+   "hard": false,
+   "kind": "notification",
+   "ok": true,
+   "hard_failure": false
+  },
+  {
+   "sender": "updates@app.example",
+   "expect": [
+    "notification",
+    "marketing",
+    "newsletter"
+   ],
+   "hard": false,
+   "kind": "notification",
+   "ok": true,
+   "hard_failure": false
+  },
+  {
+   "sender": "events@devcon.example",
+   "expect": [
+    "marketing",
+    "notification",
+    "newsletter"
+   ],
+   "hard": false,
+   "kind": "marketing",
+   "ok": true,
+   "hard_failure": false
+  },
+  {
+   "sender": "notice@sf.example",
+   "expect": [
+    "transactional",
+    "notification"
+   ],
+   "hard": false,
+   "kind": "transactional",
+   "ok": true,
+   "hard_failure": false
+  },
+  {
+   "sender": "promo@bank-offers.example",
+   "expect": [
+    "marketing"
+   ],
+   "hard": false,
+   "kind": "marketing",
+   "ok": true,
+   "hard_failure": false
+  }
+ ]
+}

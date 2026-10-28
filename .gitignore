@@ -1,0 +1,7 @@
+CLAUDE.local.md
+.DS_Store
+app/.build/
+app/build/
+app/build.noindex/
+build/
+build.noindex/

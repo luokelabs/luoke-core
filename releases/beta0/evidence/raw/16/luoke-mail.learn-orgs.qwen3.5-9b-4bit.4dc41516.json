@@ -1,0 +1,84 @@
+{
+ "task": "luoke-mail.learn-orgs",
+ "accessory": "luoke-mail/0.12.5",
+ "label": "release-beta0-16",
+ "model": "omlx-0.7.0-dev+qwen3.5-9b-4bit",
+ "base_url": "unix:~/luoke-coexist/luoke-core/build.noindex/release/beta0/lab/16/run/hub.sock",
+ "machine": {
+  "os": "Darwin",
+  "machine": "arm64",
+  "cpu": "Apple M1",
+  "memory_gb": 16.0
+ },
+ "python": "3.9.6",
+ "date": "2026-10-16",
+ "set_sha256": "230f1e0852609661cf1f63d4b1c7d9c43cf40aa35427f7360b8ec62f24de5df2",
+ "score": {
+  "n": 8,
+  "ok": 4,
+  "hard_failures": 0,
+  "facts": 5,
+  "seconds": 42.4,
+  "passes": true
+ },
+ "items": [
+  {
+   "batch": 1,
+   "facts": [
+    {
+     "topic": "账户:招商银行",
+     "text": "在招商银行有信用卡",
+     "n": [
+      1
+     ]
+    },
+    {
+     "topic": "住房:物业服务中心",
+     "text": "租住的房子由物业服务中心管理",
+     "n": [
+      2
+     ]
+    },
+    {
+     "topic": "出行:云端航空",
+     "text": "常乘坐云端航空的航班",
+     "n": [
+      3
+     ]
+    },
+    {
+     "topic": "学校:复旦大学",
+     "text": "是复旦大学校友",
+     "n": [
+      4
+     ]
+    },
+    {
+     "topic": "工作:平安保险",
+     "text": "在平安保险有保单",
+     "n": [
+      7
+     ]
+    }
+   ],
+   "expect_found": [
+    true,
+    true,
+    true,
+    true,
+    false
+   ],
+   "hard_failures": []
+  },
+  {
+   "batch": 2,
+   "facts": [],
+   "expect_found": [
+    false,
+    false,
+    false
+   ],
+   "hard_failures": []
+  }
+ ]
+}

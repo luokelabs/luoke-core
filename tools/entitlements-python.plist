@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- hardened runtime 下跑自带的 CPython：ctypes / 扩展模块要映射可执行内存 -->
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
+  <!-- 不关库校验：.app 里所有 Mach-O 都用同一个 Team ID 签；要是公证后运行报 library validation，再实测是否需要
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+  -->
+</dict>
+</plist>

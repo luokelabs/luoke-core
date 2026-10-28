@@ -1,0 +1,11 @@
+螺壳（luoke-core）
+Copyright 2026 螺壳实验室 Luoke Labs
+
+以 Apache License 2.0 发布，见 LICENSE。「螺壳」「Luoke」的名称、图标、吉祥物和 app/Resources/ui 里的品牌素材不随许可授予（Apache-2.0 第 6 条），用它们发布改版要另经同意。
+
+仓库里带的第三方代码各按自己的许可，没有改动（除注明的文件头）：
+- luoke_core/worker/vendor/embedding_gemma2/：取自 mlx-vlm，MIT（Copyright © 2025 Prince Canuma），见该目录的 README.md 和 LICENSE。
+- tools/vendor/：dmgbuild、ds_store、mac_alias，MIT，只给出版工具用、不进 螺壳.app，见 tools/vendor/README.md。
+- tools/runtime-licenses/：螺壳自带的 Python 运行时（python-build-standalone）各组件的许可原文。
+
+发布版里再分发的推理引擎（oMLX，Apache-2.0）和模型的许可，随发布附在 luokelabs/luoke-releases 的 licenses/ 里。

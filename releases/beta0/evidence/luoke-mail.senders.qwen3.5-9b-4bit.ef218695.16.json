@@ -1,0 +1,67 @@
+{
+ "release": "beta0",
+ "task": "luoke-mail.senders",
+ "accessory": "luoke-mail",
+ "accessory_version": "0.12.5",
+ "accessory_commit": "07ee9634aa32afcb2086f20cde45d116f228ca03",
+ "combo": {
+  "key": "qwen3.5-9b-4bit:ef218695",
+  "model": "qwen3.5-9b-4bit",
+  "base": "qwen3.5-9b-4bit",
+  "tiers": [
+   "16"
+  ],
+  "params": {
+   "item_tokens": 25,
+   "fixed_tokens": 60,
+   "batch": 10,
+   "think": false,
+   "max_chars": 6000
+  }
+ },
+ "tier_run": "16",
+ "hub_version": "0.1.0.dev1",
+ "recipe_template": "2026-10-12-dev",
+ "engine": "omlx-0.7.0-dev",
+ "base_loaded": "Qwen3.5-9B-4bit",
+ "date": "2026-10-16",
+ "machine": {
+  "os": "Darwin",
+  "machine": "arm64",
+  "cpu": "Apple M1",
+  "memory_gb": 16.0
+ },
+ "hard": "账单、登录提醒、个人往来不能被判成会建议退订的类别（一次都不能错）",
+ "evalset": {
+  "path": "bench/task_sets.py",
+  "sha256": "7bd4c5c54130abe843528de3da15e410bcc818931f34ce36da4cd784947c6add"
+ },
+ "command": [
+  "/usr/bin/python3",
+  "bench/run_tasks.py",
+  "--hub",
+  "~/luoke-coexist/luoke-core/build.noindex/release/beta0/lab/16/run/hub.sock",
+  "--label",
+  "release-beta0-16",
+  "--task",
+  "senders",
+  "--out",
+  "~/luoke-coexist/luoke-core/releases/beta0/evidence/raw"
+ ],
+ "hard_ok": true,
+ "score": 25,
+ "score_max": 25,
+ "n": 25,
+ "latency": {
+  "seconds": 52.2
+ },
+ "detail": {
+  "hard_n": 13,
+  "hard_failures": 0,
+  "unanswered": 0,
+  "unsub_found": 11,
+  "unsub_n": 12
+ },
+ "result_sha256": "df421bc32f643c1e00a80cb89ce9f4ebcfeac71a735774eba8fcfa7a03b41f15",
+ "raw": "raw/16/luoke-mail.senders.qwen3.5-9b-4bit.ef218695.json"
+}

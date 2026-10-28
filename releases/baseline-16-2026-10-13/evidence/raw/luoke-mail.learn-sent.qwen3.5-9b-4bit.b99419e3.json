@@ -1,0 +1,245 @@
+{
+ "task": "luoke-mail.learn-sent",
+ "accessory": "luoke-mail/0.10.0",
+ "label": "release-baseline-16-2026-10-13-16",
+ "model": "omlx-0.7.0-dev+qwen3.5-9b-4bit",
+ "base_url": "unix:~/luoke-coexist/luoke-core/build/release/baseline-16-2026-10-13/lab/16/run/hub.sock",
+ "machine": {
+  "os": "Darwin",
+  "machine": "arm64",
+  "cpu": "Apple M1",
+  "memory_gb": 16.0
+ },
+ "python": "3.9.6",
+ "date": "2026-10-13",
+ "set_sha256": "decbbf188720caf4c9fa01da33b4dedd5fde1ee14c495a8e398f9cfdf29ff4de",
+ "score": {
+  "n": 14,
+  "ok": 13,
+  "hard_failures": 1,
+  "facts": 21,
+  "seconds": 126.6,
+  "passes": false
+ },
+ "items": [
+  {
+   "batch": 1,
+   "facts": [
+    {
+     "topic": "姓名",
+     "text": "周晓（Xiao Zhou）",
+     "n": [
+      1,
+      2,
+      3,
+      4
+     ]
+    },
+    {
+     "topic": "署名",
+     "text": "周晓",
+     "n": [
+      1,
+      2,
+      4
+     ]
+    },
+    {
+     "topic": "职位",
+     "text": "产品经理",
+     "n": [
+      1,
+      2,
+      3
+     ]
+    },
+    {
+     "topic": "单位",
+     "text": "螺壳实验室",
+     "n": [
+      1,
+      2,
+      3
+     ]
+    },
+    {
+     "topic": "上级:王总",
+     "text": "王总（boss@corp.example）",
+     "n": [
+      1,
+      4
+     ]
+    },
+    {
+     "topic": "同事:王磊",
+     "text": "王磊（wanglei@corp.example）",
+     "n": [
+      2
+     ]
+    },
+    {
+     "topic": "客户:林女士",
+     "text": "林女士（Ms. Lin, client@acme.example）",
+     "n": [
+      3
+     ]
+    },
+    {
+     "topic": "语言",
+     "text": "中文、英文",
+     "n": [
+      1,
+      2,
+      3,
+      4
+     ]
+    }
+   ],
+   "expect_found": [
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true
+   ],
+   "hard_failures": []
+  },
+  {
+   "batch": 2,
+   "facts": [
+    {
+     "topic": "姓名",
+     "text": "姓名：周晓",
+     "n": [
+      1,
+      2,
+      3,
+      4
+     ]
+    },
+    {
+     "topic": "单位",
+     "text": "单位：螺壳实验室",
+     "n": [
+      3,
+      4
+     ]
+    },
+    {
+     "topic": "城市",
+     "text": "常住城市：杭州",
+     "n": [
+      1
+     ]
+    },
+    {
+     "topic": "客户:某某基金",
+     "text": "客户：某某基金私人银行客户",
+     "n": [
+      2
+     ]
+    },
+    {
+     "topic": "其他",
+     "text": "常用语言：中文、英文",
+     "n": [
+      1,
+      2,
+      3,
+      4
+     ]
+    }
+   ],
+   "expect_found": [
+    false,
+    true
+   ],
+   "hard_failures": [
+    "客户：某某基金私人银行客户"
+   ]
+  },
+  {
+   "batch": 3,
+   "facts": [
+    {
+     "topic": "姓名",
+     "text": "周晓",
+     "n": [
+      1,
+      2,
+      3
+     ]
+    },
+    {
+     "topic": "署名",
+     "text": "周晓",
+     "n": [
+      1,
+      2,
+      3
+     ]
+    },
+    {
+     "topic": "单位",
+     "text": "螺壳实验室",
+     "n": [
+      1
+     ]
+    },
+    {
+     "topic": "职位",
+     "text": "产品经理",
+     "n": [
+      1
+     ]
+    },
+    {
+     "topic": "上级:王总",
+     "text": "王总（boss@corp.example）",
+     "n": [
+      1
+     ]
+    },
+    {
+     "topic": "同事:王磊",
+     "text": "王磊（wanglei@corp.example）",
+     "n": [
+      2
+     ]
+    },
+    {
+     "topic": "下属:小陈",
+     "text": "小陈（intern@corp.example）",
+     "n": [
+      3
+     ]
+    }
+   ],
+   "expect_found": [
+    true,
+    true,
+    true,
+    true
+   ],
+   "hard_failures": []
+  },
+  {
+   "batch": 4,
+   "facts": [
+    {
+     "topic": "单位",
+     "text": "单位：螺壳实验室",
+     "n": [
+      1
+     ]
+    }
+   ],
+   "expect_found": [
+    true
+   ],
+   "hard_failures": []
+  }
+ ]
+}

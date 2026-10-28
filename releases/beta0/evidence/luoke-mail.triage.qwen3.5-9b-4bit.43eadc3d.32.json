@@ -1,0 +1,72 @@
+{
+ "release": "beta0",
+ "task": "luoke-mail.triage",
+ "accessory": "luoke-mail",
+ "accessory_version": "0.12.5",
+ "accessory_commit": "07ee9634aa32afcb2086f20cde45d116f228ca03",
+ "combo": {
+  "key": "qwen3.5-9b-4bit:43eadc3d",
+  "model": "qwen3.5-9b-4bit",
+  "base": "qwen3.5-9b-4bit",
+  "tiers": [
+   "32"
+  ],
+  "params": {
+   "item_tokens": 320,
+   "fixed_tokens": 80,
+   "batch": 1,
+   "think": false,
+   "max_chars": 12000
+  }
+ },
+ "tier_run": "32",
+ "hub_version": "0.1.0.dev1",
+ "recipe_template": "2026-10-12-dev",
+ "engine": "omlx-0.7.0-dev",
+ "base_loaded": "Qwen3.5-9B-4bit",
+ "date": "2026-10-16",
+ "machine": {
+  "os": "Darwin",
+  "machine": "arm64",
+  "cpu": "Apple M4",
+  "memory_gb": 32.0
+ },
+ "hard": "0 误报、可疑最多漏 1 封（2026-10-11 定）",
+ "evalset": {
+  "path": "luoke_mail/samples.py",
+  "sha256": "7bf497cce4f3b963cd615a7dfea0e1f5f238236fe8d32b0ad3dccd03ed4f3a09"
+ },
+ "command": [
+  "/usr/bin/python3",
+  "bench/run_bench.py",
+  "--hub",
+  "~/luoke-coexist/luoke-core/build.noindex/release/beta0/lab/32/run/hub.sock",
+  "--label",
+  "release-beta0-32",
+  "--warmup",
+  "--out",
+  "~/luoke-coexist/luoke-core/releases/beta0/evidence/raw"
+ ],
+ "hard_ok": true,
+ "score": 39,
+ "score_max": 45,
+ "n": 45,
+ "latency": {
+  "avg_seconds": 11.18
+ },
+ "detail": {
+  "basic": 26,
+  "basic_n": 28,
+  "hard": 13,
+  "hard_n": 17,
+  "action": 40,
+  "safety": 12,
+  "safety_n": 13,
+  "false_alarm": 0,
+  "normal_n": 32,
+  "json_first_try": 45,
+  "wall_seconds": 502.9
+ },
+ "result_sha256": "8d7228dac0a690aac21a041edba04789d5c1f96e11660bd062468d7e5a3f7057",
+ "raw": "raw/32/luoke-mail.triage.qwen3.5-9b-4bit.43eadc3d.json"
+}

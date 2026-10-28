@@ -1,0 +1,94 @@
+{
+ "release": "baseline-128-2026-10-14",
+ "task": "luoke-ime.predict",
+ "accessory": "luoke-ime",
+ "accessory_version": "0.1.0",
+ "accessory_commit": "d53154b",
+ "combo": {
+  "key": "qwen3.5-0.8b-base-4bit:9e63a6d4",
+  "model": "qwen3.5-0.8b-base-4bit",
+  "base": "gemma-4-26b-8bit",
+  "tiers": [
+   "128"
+  ],
+  "params": {
+   "prefix_snapshots": 16,
+   "k": 8,
+   "n": 6,
+   "max_chars": 2000
+  }
+ },
+ "tier_run": "128",
+ "hub_version": "0.1.0.dev1",
+ "recipe_template": "2026-10-12-dev",
+ "engine": "omlx-0.7.0-dev",
+ "base_loaded": "gemma-4-26b-a4b-it-8bit",
+ "date": "2026-10-14T01:09:11+0900",
+ "machine": {
+  "os": "macOS 27.0.1",
+  "model": "Mac17,7",
+  "chip": "Apple M5 Max",
+  "memory_gb": 128
+ },
+ "hard": "没有硬性条目（可选任务）",
+ "evalset": {
+  "path": "corpus.tsv",
+  "sha256": "41a9521fc042db8d92d40f54d34b8553f5d64bc8c7958915dd96a55665d1c1e8"
+ },
+ "command": [
+  "/usr/bin/python3",
+  "engines/personal/eval_predict.py",
+  "~/Codes/on-device-llm/ime_eval/private/corpus.tsv",
+  "--hub",
+  "/tmp/luoke-rel-cd46a3f5-128.sock",
+  "--result",
+  "~/Codes/luoke/luoke-core/releases/baseline-128-2026-10-14/evidence/raw/luoke-ime.predict.release-baseline-128-2026-10-14-128.json"
+ ],
+ "hard_ok": true,
+ "score": 42.5,
+ "score_max": 100.0,
+ "n": 531,
+ "latency": {
+  "p50_ms": 18,
+  "p90_ms": 24
+ },
+ "detail": {
+  "shown_pct": 7.5,
+  "top3_when_shown_pct": 50.0,
+  "gate": 0.2,
+  "gates": {
+   "0.5": {
+    "shown_pct": 1.7,
+    "top1_when_shown_pct": 55.6,
+    "top3_when_shown_pct": 55.6,
+    "top3_pct": 0.9
+   },
+   "0.3": {
+    "shown_pct": 3.4,
+    "top1_when_shown_pct": 61.1,
+    "top3_when_shown_pct": 66.7,
+    "top3_pct": 2.3
+   },
+   "0.2": {
+    "shown_pct": 7.5,
+    "top1_when_shown_pct": 42.5,
+    "top3_when_shown_pct": 50.0,
+    "top3_pct": 3.8
+   },
+   "0.1": {
+    "shown_pct": 21.3,
+    "top1_when_shown_pct": 30.1,
+    "top3_when_shown_pct": 35.4,
+    "top3_pct": 7.5
+   },
+   "0.0": {
+    "shown_pct": 83.8,
+    "top1_when_shown_pct": 14.4,
+    "top3_when_shown_pct": 16.9,
+    "top3_pct": 14.1
+   }
+  }
+ },
+ "result_sha256": "92bfe6c93853668bc9978c422f7c8ad1a73c8eb6ccfcdfea635987123d2eb3eb",
+ "raw": "raw/luoke-ime.predict.qwen3.5-0.8b-base-4bit.9e63a6d4.json"
+}

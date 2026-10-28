@@ -1,0 +1,64 @@
+{
+ "release": "beta0",
+ "task": "luoke-mail.learn-orgs",
+ "accessory": "luoke-mail",
+ "accessory_version": "0.12.5",
+ "accessory_commit": "07ee9634aa32afcb2086f20cde45d116f228ca03",
+ "combo": {
+  "key": "qwen3.5-9b-4bit:4dc41516",
+  "model": "qwen3.5-9b-4bit",
+  "base": "qwen3.5-9b-4bit",
+  "tiers": [
+   "16"
+  ],
+  "params": {
+   "item_tokens": 60,
+   "fixed_tokens": 100,
+   "batch": 10,
+   "think": false,
+   "max_chars": 6000
+  }
+ },
+ "tier_run": "16",
+ "hub_version": "0.1.0.dev1",
+ "recipe_template": "2026-10-12-dev",
+ "engine": "omlx-0.7.0-dev",
+ "base_loaded": "Qwen3.5-9B-4bit",
+ "date": "2026-10-16",
+ "machine": {
+  "os": "Darwin",
+  "machine": "arm64",
+  "cpu": "Apple M1",
+  "memory_gb": 16.0
+ },
+ "hard": "不能把只发广告的当客户；不能记金额、账号、健康、法律、宗教（一次都不能错）",
+ "evalset": {
+  "path": "bench/task_sets.py",
+  "sha256": "230f1e0852609661cf1f63d4b1c7d9c43cf40aa35427f7360b8ec62f24de5df2"
+ },
+ "command": [
+  "/usr/bin/python3",
+  "bench/run_tasks.py",
+  "--hub",
+  "~/luoke-coexist/luoke-core/build.noindex/release/beta0/lab/16/run/hub.sock",
+  "--label",
+  "release-beta0-16",
+  "--task",
+  "learn-orgs",
+  "--out",
+  "~/luoke-coexist/luoke-core/releases/beta0/evidence/raw"
+ ],
+ "hard_ok": true,
+ "score": 4,
+ "score_max": 8,
+ "n": 8,
+ "latency": {
+  "seconds": 42.4
+ },
+ "detail": {
+  "hard_failures": 0,
+  "facts": 5
+ },
+ "result_sha256": "4630e0f0385e43da2a9d57e9505b4daac3b64740ab550492d3062f275c66e6fd",
+ "raw": "raw/16/luoke-mail.learn-orgs.qwen3.5-9b-4bit.4dc41516.json"
+}

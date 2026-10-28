@@ -1,0 +1,303 @@
+{
+ "_说明": "发布脚本（tools/release.py）的评测表：每个任务用哪个配件自带的评测程序、怎么读结果、底线和容差（V1 §7）。只在实验室用，不进配方。命令里的占位：{hub} 实验室实例的 socket，{label} 这次的标签，{repo} 配件仓库，{ime_corpus} 输入法语料，{raw} 这次发布的 evidence/raw 目录（评测程序把逐条结果直接写到这里）。",
+ "luoke-mail.triage": {
+  "accessory": "luoke-mail",
+  "repo": "../luoke-mail",
+  "version": {
+   "manifest": "packaging/accessory.json"
+  },
+  "command": [
+   "/usr/bin/python3",
+   "bench/run_bench.py",
+   "--hub",
+   "{hub}",
+   "--label",
+   "{label}",
+   "--warmup",
+   "--out",
+   "{raw}"
+  ],
+  "result": "{raw}/{label}.json",
+  "summary": "mail-triage",
+  "evalset": "luoke_mail/samples.py",
+  "hard": "0 误报、可疑最多漏 1 封（2026-10-11 定）",
+  "floor": 37,
+  "tolerance": 2,
+  "_底线": "2026-10-14 定（luoke-mail 注册页「发布底线」）：三档里最弱一档的 0.11.0 分数减 2 题",
+  "depends": [
+   "luoke-mem"
+  ]
+ },
+ "luoke-ime.rerank": {
+  "accessory": "luoke-ime",
+  "repo": "../luoke-ime",
+  "version": {
+   "manifest": "Resources/App/luoke-accessory.json"
+  },
+  "command": [
+   "/usr/bin/python3",
+   "engines/xiaohe/bench.py",
+   "{ime_corpus}",
+   "--scorer",
+   "hub",
+   "--hub",
+   "{hub}",
+   "--typing",
+   "0",
+   "--result",
+   "{raw}/luoke-ime.rerank.{label}.json"
+  ],
+  "summary": "ime-result",
+  "evalset": "{ime_corpus}",
+  "hard": "没有硬性条目（可选任务）",
+  "floor": 85,
+  "tolerance": 1.5,
+  "requires": [
+   "ime_corpus"
+  ],
+  "result": "{raw}/luoke-ime.rerank.{label}.json"
+ },
+ "luoke-mail.cleanup": {
+  "accessory": "luoke-mail",
+  "repo": "../luoke-mail",
+  "version": {
+   "manifest": "packaging/accessory.json"
+  },
+  "command": [
+   "/usr/bin/python3",
+   "bench/run_tasks.py",
+   "--hub",
+   "{hub}",
+   "--label",
+   "{label}",
+   "--task",
+   "cleanup",
+   "--out",
+   "{raw}"
+  ],
+  "result": "{raw}/cleanup/{label}.json",
+  "summary": "mail-task",
+  "evalset": "bench/task_sets.py",
+  "hard": "该留的邮件不能被判成推广、订阅内容、一般通知（一次都不能错）",
+  "floor": 36,
+  "tolerance": 2,
+  "_底线": "2026-10-14 定（luoke-mail 注册页「发布底线」）：三档里最弱一档的 0.11.0 分数减 2 题",
+  "depends": [
+   "luoke-mem"
+  ]
+ },
+ "luoke-mail.senders": {
+  "accessory": "luoke-mail",
+  "repo": "../luoke-mail",
+  "version": {
+   "manifest": "packaging/accessory.json"
+  },
+  "command": [
+   "/usr/bin/python3",
+   "bench/run_tasks.py",
+   "--hub",
+   "{hub}",
+   "--label",
+   "{label}",
+   "--task",
+   "senders",
+   "--out",
+   "{raw}"
+  ],
+  "result": "{raw}/senders/{label}.json",
+  "summary": "mail-task",
+  "evalset": "bench/task_sets.py",
+  "hard": "账单、登录提醒、个人往来不能被判成会建议退订的类别（一次都不能错）",
+  "floor": 23,
+  "tolerance": 2,
+  "_底线": "2026-10-14 定（luoke-mail 注册页「发布底线」）：三档里最弱一档的 0.11.0 分数减 2 题",
+  "depends": [
+   "luoke-mem"
+  ]
+ },
+ "luoke-mail.learn-sent": {
+  "accessory": "luoke-mail",
+  "repo": "../luoke-mail",
+  "version": {
+   "manifest": "packaging/accessory.json"
+  },
+  "command": [
+   "/usr/bin/python3",
+   "bench/run_tasks.py",
+   "--hub",
+   "{hub}",
+   "--label",
+   "{label}",
+   "--task",
+   "learn-sent",
+   "--out",
+   "{raw}"
+  ],
+  "result": "{raw}/learn-sent/{label}.json",
+  "summary": "mail-task",
+  "evalset": "bench/task_sets.py",
+  "hard": "不能记第三方的说法、秘密、一次性安排（never 词一次都不能出现）",
+  "floor": 10,
+  "tolerance": 2,
+  "_底线": "2026-10-14 定（luoke-mail 注册页「发布底线」）：三档里最弱一档的 0.11.0 分数减 2 题",
+  "depends": [
+   "luoke-mem"
+  ]
+ },
+ "luoke-mail.learn-orgs": {
+  "accessory": "luoke-mail",
+  "repo": "../luoke-mail",
+  "version": {
+   "manifest": "packaging/accessory.json"
+  },
+  "command": [
+   "/usr/bin/python3",
+   "bench/run_tasks.py",
+   "--hub",
+   "{hub}",
+   "--label",
+   "{label}",
+   "--task",
+   "learn-orgs",
+   "--out",
+   "{raw}"
+  ],
+  "result": "{raw}/learn-orgs/{label}.json",
+  "summary": "mail-task",
+  "evalset": "bench/task_sets.py",
+  "hard": "不能把只发广告的当成你在用的机构；不能记金额（一次都不能错）",
+  "floor": 3,
+  "tolerance": 2,
+  "_底线": "2026-10-14 定（luoke-mail 注册页「发布底线」）：三档里最弱一档的 0.11.0 分数减 2 题",
+  "depends": [
+   "luoke-mem"
+  ]
+ },
+ "luoke-ime.predict": {
+  "accessory": "luoke-ime",
+  "repo": "../luoke-ime",
+  "version": {
+   "manifest": "Resources/App/luoke-accessory.json"
+  },
+  "command": [
+   "/usr/bin/python3",
+   "engines/personal/eval_predict.py",
+   "{ime_corpus}",
+   "--hub",
+   "{hub}",
+   "--result",
+   "{raw}/luoke-ime.predict.{label}.json"
+  ],
+  "result": "{raw}/luoke-ime.predict.{label}.json",
+  "summary": "ime-predict-result",
+  "evalset": "{ime_corpus}",
+  "hard": "没有硬性条目（可选任务）",
+  "floor": null,
+  "tolerance": 3,
+  "requires": [
+   "ime_corpus"
+  ],
+  "_说明": "总分 = 给出联想时第一个对的比例（门槛 0.2）；参考：博客语料上本机给出 7%、第一个对约 41%（luoke-ime 2026-10-14）"
+ },
+ "luoke-mem.typing": {
+  "accessory": "luoke-mem",
+  "repo": "../luoke-mem",
+  "version": {
+   "manifest": "packaging/accessory.json"
+  },
+  "command": [
+   "/usr/bin/python3",
+   "bench/run_typing.py",
+   "--hub",
+   "{hub}",
+   "--label",
+   "{label}",
+   "--out",
+   "{raw}"
+  ],
+  "result": "{raw}/typing/{label}.json",
+  "summary": "mem-typing",
+  "evalset": "bench/typing_set.py",
+  "ok_exit_codes": [
+   0,
+   2
+  ],
+  "hard": "常用说法或话题里出现一次性安排、别人的事、用户不要的候选、秘密的关键词，一条都不能有",
+  "floor": 70,
+  "floors": {
+   "interest_recall": 60
+  },
+  "ceilings": {
+   "common_terms_per_case": 0.5
+  },
+  "tolerance": 5,
+  "_底线": "luoke-mem 2026-10-14 的建议（term_recall ≥ 0.7、interest_recall ≥ 0.6、每例普通词误收 ≤ 0.5），跑出基线后再定",
+  "known_issues": {
+   "32": [
+    {
+     "kind": "never",
+     "tag": "研究生-1",
+     "word": "答辩",
+     "note": "2026-10-26 定（beta1 用 oMLX 0.7.2）：32 GB 档话题名里带上「答辩」，分叉那一步两候选打平（0.199 对 0.199），列为已知问题"
+    }
+   ]
+  }
+ },
+ "luoke-mem.topics": {
+  "accessory": "luoke-mem",
+  "repo": "../luoke-mem",
+  "version": {
+   "manifest": "packaging/accessory.json"
+  },
+  "command": [
+   "/usr/bin/python3",
+   "bench/run_topics.py",
+   "--hub",
+   "{hub}",
+   "--label",
+   "{label}",
+   "--out",
+   "{raw}"
+  ],
+  "result": "{raw}/topics/{label}.json",
+  "summary": "mem-topics",
+  "evalset": "bench/topics_set.py",
+  "ok_exit_codes": [
+   0,
+   2
+  ],
+  "hard": "话题名或不感兴趣里出现一次性的事、别人的事、健康和钱、验证码，一条都不能有",
+  "floor": 0,
+  "tolerance": 5,
+  "_底线": "新任务（ADR 0012 修订，luoke-mem 10-17 交）：第一轮基线出来前只看硬性条目；interest_recall / dislike_recall 的底线、dislikes_unsaid 的上限等基线再定"
+ },
+ "luoke-mail.thread": {
+  "accessory": "luoke-mail",
+  "repo": "../luoke-mail",
+  "version": {
+   "manifest": "packaging/accessory.json"
+  },
+  "command": [
+   "/usr/bin/python3",
+   "bench/run_tasks.py",
+   "--hub",
+   "{hub}",
+   "--label",
+   "{label}",
+   "--task",
+   "thread",
+   "--out",
+   "{raw}"
+  ],
+  "result": "{raw}/thread/{label}.json",
+  "summary": "mail-task",
+  "evalset": "bench/task_sets.py",
+  "hard": "已了结的不能说成在等用户（done_as_you）；在等用户的不能漏（missed_you）（一次都不能错，luoke-mail 0.14.0 的 run_tasks 定）",
+  "floor": 0,
+  "tolerance": 2,
+  "_底线": "新任务（luoke-mail 0.14.0）：第一轮基线出来前只看硬性条目，底线等基线再定",
+  "depends": [
+   "luoke-mem"
+  ]
+ }
+}

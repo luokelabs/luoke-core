@@ -1,0 +1,505 @@
+{
+ "task": "luoke-mem.typing",
+ "label": "release-beta0-16",
+ "accessory_version": "0.15.0",
+ "set": "bench/typing_set.py",
+ "set_sha256": "e8e81afc4f0f4d68d304819f15c45be4b3df7fccda1dcad60f788a00b664a473",
+ "cases": 24,
+ "combo": "omlx-0.7.0-dev+qwen3.5-9b-4bit",
+ "params": {
+  "item_tokens": 8,
+  "fixed_tokens": 300,
+  "batch": 40,
+  "think": false,
+  "max_chars": 6000
+ },
+ "machine": {
+  "model": "arm64",
+  "system": "macOS-26.2-arm64-arm-64bit"
+ },
+ "date": "2026-10-16 01:24:15",
+ "hard_pass": false,
+ "score": {
+  "hard_failures": 1,
+  "term_recall": 0.969,
+  "interest_recall": 1.0,
+  "common_terms": 0,
+  "seconds": 1227.1
+ },
+ "items": [
+  {
+   "case": "产品经理-1",
+   "terms": [
+    "星图看板",
+    "行云",
+    "周会纪要",
+    "B 端续费",
+    "续费率",
+    "流失客户"
+   ],
+   "interests": [
+    "续费流程与指标优化",
+    "客户流失回访",
+    "周会纪要确认"
+   ],
+   "hard_failures": [],
+   "terms_found": "4/4",
+   "interests_found": "1/1",
+   "common_terms": [],
+   "seconds": 331.4
+  },
+  {
+   "case": "后端工程师-1",
+   "terms": [
+    "luoke-core",
+    "前缀缓存",
+    "4-bit 量化",
+    "oMLX",
+    "热词表",
+    "推理速度"
+   ],
+   "interests": [
+    "本地大模型推理优化",
+    "luoke-core 项目推进"
+   ],
+   "hard_failures": [],
+   "terms_found": "4/4",
+   "interests_found": "1/1",
+   "common_terms": [],
+   "seconds": 39.2
+  },
+  {
+   "case": "家长-1",
+   "terms": [
+    "启明小学",
+    "奥数班",
+    "小葵",
+    "接送表",
+    "小升初"
+   ],
+   "interests": [
+    "孩子升学规划",
+    "启明小学入学事宜"
+   ],
+   "hard_failures": [],
+   "terms_found": "4/4",
+   "interests_found": "1/1",
+   "common_terms": [],
+   "seconds": 33.4
+  },
+  {
+   "case": "摄影爱好者-1",
+   "terms": [
+    "富士 X-T5",
+    "XF35",
+    "胶片模拟",
+    "调色预设",
+    "扫街"
+   ],
+   "interests": [
+    "相机后期调色与预设优化",
+    "富士相机扫街摄影实践"
+   ],
+   "hard_failures": [],
+   "terms_found": "4/4",
+   "interests_found": "1/1",
+   "common_terms": [],
+   "seconds": 36.9
+  },
+  {
+   "case": "研究生-1",
+   "terms": [
+    "消融实验",
+    "基线",
+    "LoRA",
+    "RTX 4090",
+    "导师组会",
+    "论文"
+   ],
+   "interests": [
+    "大模型微调与推理优化",
+    "学术答辩与论文投稿"
+   ],
+   "hard_failures": [
+    "学术答辩与论文投稿（含「答辩」）"
+   ],
+   "terms_found": "4/4",
+   "interests_found": "1/1",
+   "common_terms": [],
+   "seconds": 38.8
+  },
+  {
+   "case": "跑步爱好者-1",
+   "terms": [
+    "配速表",
+    "LSD 训练",
+    "Garmin",
+    "上马"
+   ],
+   "interests": [
+    "马拉松备赛与配速优化",
+    "马拉松专项训练计划"
+   ],
+   "hard_failures": [],
+   "terms_found": "4/4",
+   "interests_found": "1/1",
+   "common_terms": [],
+   "seconds": 32.7
+  },
+  {
+   "case": "产品经理-2",
+   "terms": [
+    "周会纪要",
+    "星图看板",
+    "行云",
+    "续费率",
+    "流失客户",
+    "B 端续费"
+   ],
+   "interests": [
+    "续费率下降与流失客户回访",
+    "周会纪要与星图看板确认",
+    "行云项目进度跟进"
+   ],
+   "hard_failures": [],
+   "terms_found": "4/4",
+   "interests_found": "1/1",
+   "common_terms": [],
+   "seconds": 44.2
+  },
+  {
+   "case": "后端工程师-2",
+   "terms": [
+    "luoke-core",
+    "oMLX",
+    "前缀缓存",
+    "热词表",
+    "4-bit 量化",
+    "小李"
+   ],
+   "interests": [
+    "本地大模型推理优化",
+    "模型热词表优化"
+   ],
+   "hard_failures": [],
+   "terms_found": "4/4",
+   "interests_found": "1/1",
+   "common_terms": [],
+   "seconds": 38.0
+  },
+  {
+   "case": "家长-2",
+   "terms": [
+    "小葵",
+    "启明小学",
+    "接送表",
+    "择校名单",
+    "奥数班"
+   ],
+   "interests": [
+    "孩子升学规划",
+    "小葵入学准备"
+   ],
+   "hard_failures": [],
+   "terms_found": "4/4",
+   "interests_found": "1/1",
+   "common_terms": [],
+   "seconds": 34.0
+  },
+  {
+   "case": "摄影爱好者-2",
+   "terms": [
+    "胶片模拟",
+    "扫街",
+    "富士 X-T5",
+    "调色预设",
+    "练构图"
+   ],
+   "interests": [
+    "相机后期调色与预设优化",
+    "街头摄影实践与构图训练",
+    "富士 X-T5 相机参数确认"
+   ],
+   "hard_failures": [],
+   "terms_found": "3/4",
+   "interests_found": "1/1",
+   "common_terms": [],
+   "seconds": 41.1
+  },
+  {
+   "case": "研究生-2",
+   "terms": [
+    "基线",
+    "LoRA",
+    "消融实验",
+    "RTX 4090",
+    "导师组会",
+    "论文"
+   ],
+   "interests": [
+    "大模型微调技术优化",
+    "学术实验复现与调优"
+   ],
+   "hard_failures": [],
+   "terms_found": "4/4",
+   "interests_found": "1/1",
+   "common_terms": [],
+   "seconds": 39.3
+  },
+  {
+   "case": "跑步爱好者-2",
+   "terms": [
+    "上马",
+    "配速表",
+    "LSD 训练",
+    "配速",
+    "跑量",
+    "Garmin"
+   ],
+   "interests": [
+    "马拉松备赛与训练计划"
+   ],
+   "hard_failures": [],
+   "terms_found": "4/4",
+   "interests_found": "1/1",
+   "common_terms": [],
+   "seconds": 34.9
+  },
+  {
+   "case": "产品经理-3",
+   "terms": [
+    "星图看板",
+    "行云",
+    "B 端续费",
+    "周会纪要",
+    "续费提醒",
+    "流失客户"
+   ],
+   "interests": [
+    "B 端续费与流失客户分析",
+    "星图看板与行云项目跟进"
+   ],
+   "hard_failures": [],
+   "terms_found": "4/4",
+   "interests_found": "1/1",
+   "common_terms": [],
+   "seconds": 41.2
+  },
+  {
+   "case": "后端工程师-3",
+   "terms": [
+    "oMLX",
+    "luoke-core",
+    "前缀缓存",
+    "热词表",
+    "4-bit 量化"
+   ],
+   "interests": [
+    "本地大模型推理优化"
+   ],
+   "hard_failures": [],
+   "terms_found": "4/4",
+   "interests_found": "1/1",
+   "common_terms": [],
+   "seconds": 43.1
+  },
+  {
+   "case": "家长-3",
+   "terms": [
+    "启明小学",
+    "奥数班",
+    "接送表",
+    "小葵",
+    "小升初",
+    "升学讲座",
+    "择校名单"
+   ],
+   "interests": [
+    "孩子升学规划",
+    "学校事务协调"
+   ],
+   "hard_failures": [],
+   "terms_found": "4/4",
+   "interests_found": "1/1",
+   "common_terms": [],
+   "seconds": 46.8
+  },
+  {
+   "case": "摄影爱好者-3",
+   "terms": [
+    "富士 X-T5",
+    "扫街",
+    "胶片模拟",
+    "后期调色",
+    "调色预设",
+    "XF35"
+   ],
+   "interests": [
+    "富士相机与胶片模拟优化",
+    "街头摄影与构图练习"
+   ],
+   "hard_failures": [],
+   "terms_found": "4/4",
+   "interests_found": "1/1",
+   "common_terms": [],
+   "seconds": 40.1
+  },
+  {
+   "case": "研究生-3",
+   "terms": [
+    "消融实验",
+    "RTX 4090",
+    "LoRA",
+    "论文",
+    "基线",
+    "导师组会"
+   ],
+   "interests": [
+    "大模型微调与实验优化",
+    "学术论文撰写与投稿"
+   ],
+   "hard_failures": [],
+   "terms_found": "4/4",
+   "interests_found": "1/1",
+   "common_terms": [],
+   "seconds": 37.5
+  },
+  {
+   "case": "跑步爱好者-3",
+   "terms": [
+    "配速表",
+    "LSD 训练",
+    "上马",
+    "跑量",
+    "配速"
+   ],
+   "interests": [
+    "马拉松备赛与训练计划",
+    "Garmin 设备使用与调试"
+   ],
+   "hard_failures": [],
+   "terms_found": "3/4",
+   "interests_found": "1/1",
+   "common_terms": [],
+   "seconds": 38.4
+  },
+  {
+   "case": "产品经理-4",
+   "terms": [
+    "行云",
+    "流失客户",
+    "星图看板",
+    "B 端续费",
+    "周会纪要"
+   ],
+   "interests": [
+    "客户流失分析与回访",
+    "B 端续费策略优化",
+    "周会纪要整理"
+   ],
+   "hard_failures": [],
+   "terms_found": "4/4",
+   "interests_found": "1/1",
+   "common_terms": [],
+   "seconds": 38.8
+  },
+  {
+   "case": "后端工程师-4",
+   "terms": [
+    "luoke-core",
+    "oMLX",
+    "前缀缓存",
+    "4-bit 量化",
+    "热词表",
+    "推理速度"
+   ],
+   "interests": [
+    "本地大模型推理优化",
+    "luoke-core 项目优化"
+   ],
+   "hard_failures": [],
+   "terms_found": "4/4",
+   "interests_found": "1/1",
+   "common_terms": [],
+   "seconds": 40.3
+  },
+  {
+   "case": "家长-4",
+   "terms": [
+    "启明小学",
+    "奥数班",
+    "小升初",
+    "接送表",
+    "择校名单",
+    "小葵"
+   ],
+   "interests": [
+    "孩子升学规划",
+    "接送安排"
+   ],
+   "hard_failures": [],
+   "terms_found": "4/4",
+   "interests_found": "1/1",
+   "common_terms": [],
+   "seconds": 35.8
+  },
+  {
+   "case": "摄影爱好者-4",
+   "terms": [
+    "富士 X-T5",
+    "扫街",
+    "胶片模拟",
+    "调色预设",
+    "XF35"
+   ],
+   "interests": [
+    "相机器材参数确认与后期调色优化",
+    "周末街头摄影练习与构图训练"
+   ],
+   "hard_failures": [],
+   "terms_found": "4/4",
+   "interests_found": "1/1",
+   "common_terms": [],
+   "seconds": 38.7
+  },
+  {
+   "case": "研究生-4",
+   "terms": [
+    "LoRA",
+    "RTX 4090",
+    "基线",
+    "消融实验",
+    "论文",
+    "导师组会"
+   ],
+   "interests": [
+    "大模型微调与推理优化",
+    "学术实验与论文撰写"
+   ],
+   "hard_failures": [],
+   "terms_found": "4/4",
+   "interests_found": "1/1",
+   "common_terms": [],
+   "seconds": 45.9
+  },
+  {
+   "case": "跑步爱好者-4",
+   "terms": [
+    "配速",
+    "LSD 训练",
+    "上马",
+    "跑量",
+    "Garmin"
+   ],
+   "interests": [
+    "马拉松备赛与配速优化",
+    "Garmin 设备配置与调试"
+   ],
+   "hard_failures": [],
+   "terms_found": "3/4",
+   "interests_found": "1/1",
+   "common_terms": [],
+   "seconds": 36.6
+  }
+ ]
+}

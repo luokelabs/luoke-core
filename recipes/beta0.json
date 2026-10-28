@@ -1,0 +1,1078 @@
+{
+ "recipe_version": "beta0",
+ "contract": 1,
+ "tiers": {
+  "16": {
+   "min_gb": 0,
+   "max_gb": 24,
+   "guard_gb": 10,
+   "base_resident": false,
+   "background_input_chars": 6000,
+   "idle_unload_secs": 300
+  },
+  "32": {
+   "min_gb": 24,
+   "max_gb": 64,
+   "guard_gb": 20,
+   "base_resident": true,
+   "background_input_chars": 12000,
+   "idle_unload_secs": 1800
+  },
+  "128": {
+   "min_gb": 64,
+   "max_gb": 4096,
+   "guard_gb": 100,
+   "base_resident": true,
+   "background_input_chars": 32000,
+   "idle_unload_secs": 3600
+  }
+ },
+ "models": {
+  "qwen3.5-9b-4bit": {
+   "dir": "Qwen3.5-9B-4bit",
+   "kind": "base",
+   "source": "mlx-community/Qwen3.5-9B-4bit",
+   "wired_gb": 10,
+   "load_secs": 15,
+   "prefill_tok_s": {
+    "16": 95,
+    "32": 230,
+    "*": 200
+   },
+   "decode_tok_s": {
+    "16": 10,
+    "32": 18,
+    "*": 15
+   },
+   "special_tokens": [
+    "<|im_start|>",
+    "<|im_end|>",
+    "<|endoftext|>",
+    "<think>",
+    "</think>"
+   ],
+   "size_gb": 5.8,
+   "sha256": "3c4cfc94e6488137c51a00db61bd45fa5d780378d60d67aa5a386af37cd16dc8"
+  },
+  "gemma-4-26b-8bit": {
+   "dir": "gemma-4-26b-a4b-it-8bit",
+   "kind": "base",
+   "source": "gemma-4-26b-a4b-it-8bit",
+   "wired_gb": 33,
+   "load_secs": 15,
+   "prefill_tok_s": {
+    "128": 3000,
+    "*": 3000
+   },
+   "decode_tok_s": {
+    "128": 70,
+    "*": 70
+   },
+   "special_tokens": [
+    "<start_of_turn>",
+    "<end_of_turn>",
+    "<bos>",
+    "<eos>"
+   ],
+   "size_gb": 26.0,
+   "sha256": "d92fb547c7db4753b5329e24383e1b1573c8288c6d6ea48ac5f8d47afe0f9dd8"
+  },
+  "gemma-4-e4b-4bit": {
+   "dir": "gemma-4-e4b-it-4bit",
+   "kind": "base",
+   "source": "mlx-community/gemma-4-e4b-it-4bit",
+   "wired_gb": 8,
+   "load_secs": 5,
+   "prefill_tok_s": {
+    "*": 2000
+   },
+   "decode_tok_s": {
+    "*": 60
+   },
+   "special_tokens": [
+    "<start_of_turn>",
+    "<end_of_turn>",
+    "<bos>",
+    "<eos>"
+   ],
+   "size_gb": 4.8
+  },
+  "qwen3.5-0.8b-base-4bit": {
+   "dir": "Qwen3.5-0.8B-Base-4bit",
+   "kind": "special",
+   "source": "local/Qwen3.5-0.8B-Base-4bit",
+   "wired_gb": 2.7,
+   "load_secs": 2,
+   "size_gb": 0.5,
+   "cache_mb": 1024,
+   "_内存": "工作进程：模型 0.5 GB；MLX 缓冲上限 cache_mb（1 GB），连续打分时 footprint 约 2.7 GB（2026-10-14 实测 2000 次重排），空闲 30 s 清空后约 1.3 GB。之前写 0.6 是只算了模型，缓冲不限时 20 小时涨到 8 GB",
+   "sha256": "81ce589eec2947d9f448ba551d6ad07d39b860d12ef5a8e2c3dea037d4ada962"
+  }
+ },
+ "assignment": {
+  "16": {
+   "base": "qwen3.5-9b-4bit",
+   "special": {
+    "luoke-ime.rerank": "qwen3.5-0.8b-base-4bit",
+    "luoke-ime.predict": "qwen3.5-0.8b-base-4bit"
+   }
+  },
+  "32": {
+   "base": "qwen3.5-9b-4bit",
+   "special": {
+    "luoke-ime.rerank": "qwen3.5-0.8b-base-4bit",
+    "luoke-ime.predict": "qwen3.5-0.8b-base-4bit"
+   }
+  },
+  "128": {
+   "base": "gemma-4-26b-8bit",
+   "special": {
+    "luoke-ime.rerank": "qwen3.5-0.8b-base-4bit",
+    "luoke-ime.predict": "qwen3.5-0.8b-base-4bit"
+   }
+  }
+ },
+ "engine": {
+  "version": "omlx-0.7.0",
+  "app": "/Applications/oMLX.app",
+  "python": "Contents/Resources/Python/cpython-3.11/bin/python3.11",
+  "site": "Contents/Resources/Python/framework-mlx-base/lib/python3.11/site-packages",
+  "log_level": "info",
+  "sha256": "e94053bb001726e3bac14570819f0f86bb1667483acf0c34a8bd743dcd911c39"
+ },
+ "tasks": {
+  "luoke-mail.triage": {
+   "accessory": "luoke-mail",
+   "kind": "generate",
+   "main": true,
+   "params": {
+    "*": {
+     "item_tokens": 320,
+     "fixed_tokens": 80,
+     "batch": 1,
+     "think": false
+    },
+    "16": {
+     "max_chars": 6000
+    },
+    "32": {
+     "max_chars": 12000
+    },
+    "128": {
+     "max_chars": 32000
+    }
+   },
+   "base_params": {
+    "temperature": 0,
+    "top_p": 1
+   }
+  },
+  "luoke-mail.draft": {
+   "accessory": "luoke-mail",
+   "kind": "generate",
+   "main": false,
+   "params": {
+    "*": {
+     "item_tokens": 800,
+     "fixed_tokens": 100,
+     "batch": 1,
+     "think": false
+    },
+    "16": {
+     "max_chars": 6000
+    },
+    "32": {
+     "max_chars": 12000
+    },
+    "128": {
+     "max_chars": 32000
+    }
+   },
+   "base_params": {
+    "temperature": 0.3,
+    "top_p": 0.9
+   }
+  },
+  "luoke-mail.senders": {
+   "accessory": "luoke-mail",
+   "kind": "generate",
+   "main": false,
+   "params": {
+    "*": {
+     "item_tokens": 25,
+     "fixed_tokens": 60,
+     "batch": 10,
+     "think": false
+    },
+    "16": {
+     "max_chars": 6000
+    },
+    "32": {
+     "max_chars": 12000
+    },
+    "128": {
+     "max_chars": 32000
+    }
+   },
+   "base_params": {
+    "temperature": 0,
+    "top_p": 1
+   }
+  },
+  "luoke-mail.cleanup": {
+   "accessory": "luoke-mail",
+   "kind": "generate",
+   "main": false,
+   "params": {
+    "*": {
+     "item_tokens": 30,
+     "fixed_tokens": 60,
+     "batch": 25,
+     "think": false
+    },
+    "16": {
+     "max_chars": 6000
+    },
+    "32": {
+     "max_chars": 12000
+    },
+    "128": {
+     "max_chars": 32000
+    }
+   },
+   "base_params": {
+    "temperature": 0,
+    "top_p": 1
+   }
+  },
+  "luoke-mail.digest-read": {
+   "accessory": "luoke-mail",
+   "kind": "generate",
+   "main": false,
+   "params": {
+    "*": {
+     "item_tokens": 1300,
+     "fixed_tokens": 100,
+     "batch": 1,
+     "think": false
+    },
+    "16": {
+     "max_chars": 6000
+    },
+    "32": {
+     "max_chars": 12000
+    },
+    "128": {
+     "max_chars": 12000
+    }
+   },
+   "base_params": {
+    "temperature": 0,
+    "top_p": 1
+   }
+  },
+  "luoke-mail.digest-pick": {
+   "accessory": "luoke-mail",
+   "kind": "generate",
+   "main": false,
+   "params": {
+    "*": {
+     "item_tokens": 60,
+     "fixed_tokens": 60,
+     "batch": 30,
+     "think": false
+    },
+    "16": {
+     "max_chars": 6000
+    },
+    "32": {
+     "max_chars": 12000
+    },
+    "128": {
+     "max_chars": 32000
+    }
+   },
+   "base_params": {
+    "temperature": 0,
+    "top_p": 1
+   }
+  },
+  "luoke-mail.interests": {
+   "accessory": "luoke-mail",
+   "kind": "generate",
+   "main": false,
+   "params": {
+    "*": {
+     "item_tokens": 800,
+     "fixed_tokens": 100,
+     "batch": 1,
+     "think": false
+    },
+    "16": {
+     "max_chars": 6000
+    },
+    "32": {
+     "max_chars": 12000
+    },
+    "128": {
+     "max_chars": 32000
+    }
+   },
+   "base_params": {
+    "temperature": 0,
+    "top_p": 1
+   }
+  },
+  "luoke-mail.learn-sent": {
+   "accessory": "luoke-mail",
+   "kind": "generate",
+   "main": false,
+   "params": {
+    "*": {
+     "item_tokens": 100,
+     "fixed_tokens": 100,
+     "batch": 8,
+     "think": false
+    },
+    "16": {
+     "max_chars": 6000
+    },
+    "32": {
+     "max_chars": 12000
+    },
+    "128": {
+     "max_chars": 32000
+    }
+   },
+   "base_params": {
+    "temperature": 0,
+    "top_p": 1
+   }
+  },
+  "luoke-mail.learn-orgs": {
+   "accessory": "luoke-mail",
+   "kind": "generate",
+   "main": false,
+   "params": {
+    "*": {
+     "item_tokens": 60,
+     "fixed_tokens": 100,
+     "batch": 10,
+     "think": false
+    },
+    "16": {
+     "max_chars": 6000
+    },
+    "32": {
+     "max_chars": 12000
+    },
+    "128": {
+     "max_chars": 32000
+    }
+   },
+   "base_params": {
+    "temperature": 0,
+    "top_p": 1
+   }
+  },
+  "luoke-ime.rerank": {
+   "accessory": "luoke-ime",
+   "kind": "score",
+   "main": false,
+   "latency_ms": {
+    "*": 50
+   },
+   "params": {
+    "*": {
+     "prefix_snapshots": 16,
+     "batch": 16,
+     "max_chars": 2000,
+     "threshold_nats": 3
+    }
+   },
+   "_latency_ms": "主控探针（前文 30–54 字逐字变长、16 个长短混合的候选、25 次去前 5 取 p90）的分界，各档相同，实验室定（2026-10-14）：M5 Max 13.9 ms 不慢；基础款 M4 59.4 ms 慢（整次重排 p90 186 ms，超过壳按空格最多等的 150 ms）；M1 134.5 ms 慢。标了以后低于 40 ms 才清。不按参考机器自己的实测值定，不然稍一波动就翻"
+  },
+  "luoke-ime.predict": {
+   "accessory": "luoke-ime",
+   "kind": "predict",
+   "main": false,
+   "latency_ms": {
+    "*": 200
+   },
+   "params": {
+    "*": {
+     "prefix_snapshots": 16,
+     "k": 8,
+     "n": 6,
+     "max_chars": 2000
+    }
+   },
+   "_latency_ms": "同一探针的联想（8 个开头、各 6 个 token，10 次取 p90）分界：M5 Max 27.8、基础款 M4 98.5、M1 294.3 ms；上屏后约 300 ms 内要备好；输入法现在不按它减什么"
+  },
+  "luoke-mem.typing": {
+   "accessory": "luoke-mem",
+   "kind": "generate",
+   "main": false,
+   "params": {
+    "*": {
+     "item_tokens": 8,
+     "fixed_tokens": 300,
+     "batch": 40,
+     "think": false,
+     "max_chars": 6000
+    }
+   },
+   "base_params": {
+    "temperature": 0,
+    "top_p": 1
+   },
+   "_说明": "顶层 ADR 0005：luoke-mem 在安静时刻经主控从打字记录归纳常用说法和关注的话题，只走 background。初值 luoke-mem 2026-10-14 按 9B 4-bit 估：一批最多 40 段打字、整个请求 6000 字（提示词约 600 字），满 40 段约 620 token 输出",
+   "tiers": [
+    "32",
+    "128"
+   ],
+   "_tiers": "发布脚本按证据填：硬性条目没过的档不支持（16 GB 档没过、32 GB 档过、128 GB 档过）"
+  }
+ },
+ "verified": {
+  "luoke-core": {
+   "versions": [
+    "0.1.0.dev1"
+   ]
+  },
+  "luoke-ime": {
+   "versions": [
+    "0.1.3"
+   ],
+   "tasks": {
+    "luoke-ime.predict": [
+     {
+      "model": "qwen3.5-0.8b-base-4bit",
+      "tiers": [
+       "128"
+      ],
+      "accessory_version": "0.1.3",
+      "score": 42.5,
+      "score_max": 100.0,
+      "hard_ok": true,
+      "evidence": "dc8f9eaf7f261348b2c90b668ee88aef2ed898f21092ff83004b9f45ccb7678e"
+     }
+    ],
+    "luoke-ime.rerank": [
+     {
+      "model": "qwen3.5-0.8b-base-4bit",
+      "tiers": [
+       "128"
+      ],
+      "accessory_version": "0.1.3",
+      "score": 89.8,
+      "score_max": 100.0,
+      "hard_ok": true,
+      "evidence": "0c94a7385ca5366297187117518c8597d657018a099e0a089d544504f14a4622"
+     }
+    ]
+   }
+  },
+  "luoke-mail": {
+   "versions": [
+    "0.12.5"
+   ],
+   "tasks": {
+    "luoke-mail.cleanup": [
+     {
+      "model": "gemma-4-26b-8bit",
+      "tiers": [
+       "128"
+      ],
+      "accessory_version": "0.12.5",
+      "score": 39,
+      "score_max": 40,
+      "hard_ok": true,
+      "evidence": "97d3fb6b898357f38ab89ea10c72dd41aa480f252655eec49d88ee08aa3f83bf"
+     },
+     {
+      "model": "qwen3.5-9b-4bit",
+      "tiers": [
+       "32"
+      ],
+      "accessory_version": "0.12.5",
+      "score": 38,
+      "score_max": 40,
+      "hard_ok": true,
+      "evidence": "fa218fa4583677bfec351a5af530f2846d78ac6435eb4f538119b4a3d4b805fc"
+     },
+     {
+      "model": "qwen3.5-9b-4bit",
+      "tiers": [
+       "16"
+      ],
+      "accessory_version": "0.12.5",
+      "score": 38,
+      "score_max": 40,
+      "hard_ok": true,
+      "evidence": "18093ff16ad3bbab06f96655da82b72702efc2b5457bd9b5f5cce43b79a1c7a2"
+     }
+    ],
+    "luoke-mail.learn-orgs": [
+     {
+      "model": "gemma-4-26b-8bit",
+      "tiers": [
+       "128"
+      ],
+      "accessory_version": "0.12.5",
+      "score": 7,
+      "score_max": 8,
+      "hard_ok": true,
+      "evidence": "8261bf5c0ced960bbddd8f23457080a754ce7c3d947597affdbbbe1f334d991e"
+     },
+     {
+      "model": "qwen3.5-9b-4bit",
+      "tiers": [
+       "16"
+      ],
+      "accessory_version": "0.12.5",
+      "score": 4,
+      "score_max": 8,
+      "hard_ok": true,
+      "evidence": "a1a3516fd23a835f2991e7e9b9a850a64c3fcc10fbf52844e61ef9f3bdb11603"
+     },
+     {
+      "model": "qwen3.5-9b-4bit",
+      "tiers": [
+       "32"
+      ],
+      "accessory_version": "0.12.5",
+      "score": 5,
+      "score_max": 8,
+      "hard_ok": true,
+      "evidence": "fdd6cdf5f59e60bcb83bcfb3e03b0dcb6bb4c90901d6176f07bbe37c2051544d"
+     }
+    ],
+    "luoke-mail.learn-sent": [
+     {
+      "model": "gemma-4-26b-8bit",
+      "tiers": [
+       "128"
+      ],
+      "accessory_version": "0.12.5",
+      "score": 12,
+      "score_max": 14,
+      "hard_ok": true,
+      "evidence": "6d7d319018d5a8ec809f5bb4f0b0a7098decd03e03dcb84ed2ae237c6e05f943"
+     },
+     {
+      "model": "qwen3.5-9b-4bit",
+      "tiers": [
+       "32"
+      ],
+      "accessory_version": "0.12.5",
+      "score": 13,
+      "score_max": 14,
+      "hard_ok": true,
+      "evidence": "a423e5919ca14267953670ee068f5734b70f76e888f25b5e5fd8355d7c177e68"
+     },
+     {
+      "model": "qwen3.5-9b-4bit",
+      "tiers": [
+       "16"
+      ],
+      "accessory_version": "0.12.5",
+      "score": 12,
+      "score_max": 14,
+      "hard_ok": true,
+      "evidence": "7bcaff0d548b80207b8358ff90c20fb839271473ce42bfabcf1ef6c2de341098"
+     }
+    ],
+    "luoke-mail.senders": [
+     {
+      "model": "gemma-4-26b-8bit",
+      "tiers": [
+       "128"
+      ],
+      "accessory_version": "0.12.5",
+      "score": 25,
+      "score_max": 25,
+      "hard_ok": true,
+      "evidence": "29df8200c29bee24572a15c78cec4fe3518845aa5a2d19fec3426bc1c18b72ae"
+     },
+     {
+      "model": "qwen3.5-9b-4bit",
+      "tiers": [
+       "32"
+      ],
+      "accessory_version": "0.12.5",
+      "score": 25,
+      "score_max": 25,
+      "hard_ok": true,
+      "evidence": "d1da2ddb13b5ea3a6eca6d0f2baceaf1bd4dd9502ddb16dc94a1e0d5b08efe04"
+     },
+     {
+      "model": "qwen3.5-9b-4bit",
+      "tiers": [
+       "16"
+      ],
+      "accessory_version": "0.12.5",
+      "score": 25,
+      "score_max": 25,
+      "hard_ok": true,
+      "evidence": "28b56b93ec7c730f8a3d09b1ac358515f75f215110171974ad729f8c8a926203"
+     }
+    ],
+    "luoke-mail.triage": [
+     {
+      "model": "gemma-4-26b-8bit",
+      "tiers": [
+       "128"
+      ],
+      "accessory_version": "0.12.5",
+      "score": 44,
+      "score_max": 45,
+      "hard_ok": true,
+      "evidence": "2f8db1bd143fd669134ac968d9ce5905bfc184f7c3a3c2246079c7b82c35f99a"
+     },
+     {
+      "model": "qwen3.5-9b-4bit",
+      "tiers": [
+       "32"
+      ],
+      "accessory_version": "0.12.5",
+      "score": 39,
+      "score_max": 45,
+      "hard_ok": true,
+      "evidence": "b948f79fe7a596ba56931f62124c6543961adbe3bbf48c6a593878236a303d84"
+     },
+     {
+      "model": "qwen3.5-9b-4bit",
+      "tiers": [
+       "16"
+      ],
+      "accessory_version": "0.12.5",
+      "score": 39,
+      "score_max": 45,
+      "hard_ok": true,
+      "evidence": "6a7c319203b3fe7471e387b7c873e5da0cc1ea41bb15930ac7fd02f871f32bb1"
+     }
+    ]
+   }
+  },
+  "luoke-mem": {
+   "versions": [
+    "0.15.0"
+   ],
+   "tasks": {
+    "luoke-mem.typing": [
+     {
+      "model": "gemma-4-26b-8bit",
+      "tiers": [
+       "128"
+      ],
+      "accessory_version": "0.15.0",
+      "score": 82.3,
+      "score_max": 100.0,
+      "hard_ok": true,
+      "evidence": "f22769bcb82e6a5756195114cd2daf871efc91c1571264f3faff9a7642d03810"
+     },
+     {
+      "model": "qwen3.5-9b-4bit",
+      "tiers": [
+       "16"
+      ],
+      "accessory_version": "0.15.0",
+      "score": 96.9,
+      "score_max": 100.0,
+      "hard_ok": false,
+      "evidence": "abc815d71cd9b5a7ba3934dbda333aec004866de896a08fa03a3db49b8e071f7"
+     },
+     {
+      "model": "qwen3.5-9b-4bit",
+      "tiers": [
+       "32"
+      ],
+      "accessory_version": "0.15.0",
+      "score": 97.9,
+      "score_max": 100.0,
+      "hard_ok": true,
+      "evidence": "b1d546416565b8691262ce447f93f89e1b7e8b56ae83722dc25aebd175a1d30f"
+     }
+    ]
+   }
+  }
+ },
+ "release": "beta0",
+ "evidence": [
+  {
+   "accessory": "luoke-ime",
+   "version": "0.1.3",
+   "task": "luoke-ime.predict",
+   "model": "qwen3.5-0.8b-base-4bit",
+   "tiers": [
+    "128"
+   ],
+   "conclusion": "luoke-ime 0.1.3 的 luoke-ime.predict 在 qwen3.5-0.8b-base-4bit（128 GB 档）上 42.5/100.0，硬性条目过（Apple M5 Max，2026-10-15T23:12:55+0900）",
+   "evalset_sha256": "41a9521fc042db8d92d40f54d34b8553f5d64bc8c7958915dd96a55665d1c1e8",
+   "evidence_sha256": "dc8f9eaf7f261348b2c90b668ee88aef2ed898f21092ff83004b9f45ccb7678e",
+   "machine": {
+    "os": "macOS 27.0.1",
+    "model": "Mac17,7",
+    "chip": "Apple M5 Max",
+    "memory_gb": 128
+   },
+   "date": "2026-10-15T23:12:55+0900"
+  },
+  {
+   "accessory": "luoke-ime",
+   "version": "0.1.3",
+   "task": "luoke-ime.rerank",
+   "model": "qwen3.5-0.8b-base-4bit",
+   "tiers": [
+    "128"
+   ],
+   "conclusion": "luoke-ime 0.1.3 的 luoke-ime.rerank 在 qwen3.5-0.8b-base-4bit（128 GB 档）上 89.8/100.0，硬性条目过（Apple M5 Max，2026-10-15T23:12:45+0900）",
+   "evalset_sha256": "41a9521fc042db8d92d40f54d34b8553f5d64bc8c7958915dd96a55665d1c1e8",
+   "evidence_sha256": "0c94a7385ca5366297187117518c8597d657018a099e0a089d544504f14a4622",
+   "machine": {
+    "os": "macOS 27.0.1",
+    "model": "Mac17,7",
+    "chip": "Apple M5 Max",
+    "memory_gb": 128
+   },
+   "date": "2026-10-15T23:12:45+0900"
+  },
+  {
+   "accessory": "luoke-mail",
+   "version": "0.12.5",
+   "task": "luoke-mail.cleanup",
+   "model": "gemma-4-26b-8bit",
+   "tiers": [
+    "128"
+   ],
+   "conclusion": "luoke-mail 0.12.5 的 luoke-mail.cleanup 在 gemma-4-26b-8bit（128 GB 档）上 39/40，硬性条目过（，2026-10-16）",
+   "evalset_sha256": "b2c83ed862cea4f4fed2f225ed5fb74a37d82bf934518899410e8b2eb5b646df",
+   "evidence_sha256": "97d3fb6b898357f38ab89ea10c72dd41aa480f252655eec49d88ee08aa3f83bf",
+   "machine": {
+    "os": "Darwin",
+    "machine": "arm64",
+    "cpu": "Apple M5 Max",
+    "memory_gb": 128.0
+   },
+   "date": "2026-10-16"
+  },
+  {
+   "accessory": "luoke-mail",
+   "version": "0.12.5",
+   "task": "luoke-mail.cleanup",
+   "model": "qwen3.5-9b-4bit",
+   "tiers": [
+    "32"
+   ],
+   "conclusion": "luoke-mail 0.12.5 的 luoke-mail.cleanup 在 qwen3.5-9b-4bit（32 GB 档）上 38/40，硬性条目过（，2026-10-16）",
+   "evalset_sha256": "b2c83ed862cea4f4fed2f225ed5fb74a37d82bf934518899410e8b2eb5b646df",
+   "evidence_sha256": "fa218fa4583677bfec351a5af530f2846d78ac6435eb4f538119b4a3d4b805fc",
+   "machine": {
+    "os": "Darwin",
+    "machine": "arm64",
+    "cpu": "Apple M4",
+    "memory_gb": 32.0
+   },
+   "date": "2026-10-16"
+  },
+  {
+   "accessory": "luoke-mail",
+   "version": "0.12.5",
+   "task": "luoke-mail.cleanup",
+   "model": "qwen3.5-9b-4bit",
+   "tiers": [
+    "16"
+   ],
+   "conclusion": "luoke-mail 0.12.5 的 luoke-mail.cleanup 在 qwen3.5-9b-4bit（16 GB 档）上 38/40，硬性条目过（，2026-10-16）",
+   "evalset_sha256": "b2c83ed862cea4f4fed2f225ed5fb74a37d82bf934518899410e8b2eb5b646df",
+   "evidence_sha256": "18093ff16ad3bbab06f96655da82b72702efc2b5457bd9b5f5cce43b79a1c7a2",
+   "machine": {
+    "os": "Darwin",
+    "machine": "arm64",
+    "cpu": "Apple M1",
+    "memory_gb": 16.0
+   },
+   "date": "2026-10-16"
+  },
+  {
+   "accessory": "luoke-mail",
+   "version": "0.12.5",
+   "task": "luoke-mail.learn-orgs",
+   "model": "gemma-4-26b-8bit",
+   "tiers": [
+    "128"
+   ],
+   "conclusion": "luoke-mail 0.12.5 的 luoke-mail.learn-orgs 在 gemma-4-26b-8bit（128 GB 档）上 7/8，硬性条目过（，2026-10-16）",
+   "evalset_sha256": "230f1e0852609661cf1f63d4b1c7d9c43cf40aa35427f7360b8ec62f24de5df2",
+   "evidence_sha256": "8261bf5c0ced960bbddd8f23457080a754ce7c3d947597affdbbbe1f334d991e",
+   "machine": {
+    "os": "Darwin",
+    "machine": "arm64",
+    "cpu": "Apple M5 Max",
+    "memory_gb": 128.0
+   },
+   "date": "2026-10-16"
+  },
+  {
+   "accessory": "luoke-mail",
+   "version": "0.12.5",
+   "task": "luoke-mail.learn-orgs",
+   "model": "qwen3.5-9b-4bit",
+   "tiers": [
+    "16"
+   ],
+   "conclusion": "luoke-mail 0.12.5 的 luoke-mail.learn-orgs 在 qwen3.5-9b-4bit（16 GB 档）上 4/8，硬性条目过（，2026-10-16）",
+   "evalset_sha256": "230f1e0852609661cf1f63d4b1c7d9c43cf40aa35427f7360b8ec62f24de5df2",
+   "evidence_sha256": "a1a3516fd23a835f2991e7e9b9a850a64c3fcc10fbf52844e61ef9f3bdb11603",
+   "machine": {
+    "os": "Darwin",
+    "machine": "arm64",
+    "cpu": "Apple M1",
+    "memory_gb": 16.0
+   },
+   "date": "2026-10-16"
+  },
+  {
+   "accessory": "luoke-mail",
+   "version": "0.12.5",
+   "task": "luoke-mail.learn-orgs",
+   "model": "qwen3.5-9b-4bit",
+   "tiers": [
+    "32"
+   ],
+   "conclusion": "luoke-mail 0.12.5 的 luoke-mail.learn-orgs 在 qwen3.5-9b-4bit（32 GB 档）上 5/8，硬性条目过（，2026-10-16）",
+   "evalset_sha256": "230f1e0852609661cf1f63d4b1c7d9c43cf40aa35427f7360b8ec62f24de5df2",
+   "evidence_sha256": "fdd6cdf5f59e60bcb83bcfb3e03b0dcb6bb4c90901d6176f07bbe37c2051544d",
+   "machine": {
+    "os": "Darwin",
+    "machine": "arm64",
+    "cpu": "Apple M4",
+    "memory_gb": 32.0
+   },
+   "date": "2026-10-16"
+  },
+  {
+   "accessory": "luoke-mail",
+   "version": "0.12.5",
+   "task": "luoke-mail.learn-sent",
+   "model": "gemma-4-26b-8bit",
+   "tiers": [
+    "128"
+   ],
+   "conclusion": "luoke-mail 0.12.5 的 luoke-mail.learn-sent 在 gemma-4-26b-8bit（128 GB 档）上 12/14，硬性条目过（，2026-10-16）",
+   "evalset_sha256": "decbbf188720caf4c9fa01da33b4dedd5fde1ee14c495a8e398f9cfdf29ff4de",
+   "evidence_sha256": "6d7d319018d5a8ec809f5bb4f0b0a7098decd03e03dcb84ed2ae237c6e05f943",
+   "machine": {
+    "os": "Darwin",
+    "machine": "arm64",
+    "cpu": "Apple M5 Max",
+    "memory_gb": 128.0
+   },
+   "date": "2026-10-16"
+  },
+  {
+   "accessory": "luoke-mail",
+   "version": "0.12.5",
+   "task": "luoke-mail.learn-sent",
+   "model": "qwen3.5-9b-4bit",
+   "tiers": [
+    "32"
+   ],
+   "conclusion": "luoke-mail 0.12.5 的 luoke-mail.learn-sent 在 qwen3.5-9b-4bit（32 GB 档）上 13/14，硬性条目过（，2026-10-16）",
+   "evalset_sha256": "decbbf188720caf4c9fa01da33b4dedd5fde1ee14c495a8e398f9cfdf29ff4de",
+   "evidence_sha256": "a423e5919ca14267953670ee068f5734b70f76e888f25b5e5fd8355d7c177e68",
+   "machine": {
+    "os": "Darwin",
+    "machine": "arm64",
+    "cpu": "Apple M4",
+    "memory_gb": 32.0
+   },
+   "date": "2026-10-16"
+  },
+  {
+   "accessory": "luoke-mail",
+   "version": "0.12.5",
+   "task": "luoke-mail.learn-sent",
+   "model": "qwen3.5-9b-4bit",
+   "tiers": [
+    "16"
+   ],
+   "conclusion": "luoke-mail 0.12.5 的 luoke-mail.learn-sent 在 qwen3.5-9b-4bit（16 GB 档）上 12/14，硬性条目过（，2026-10-16）",
+   "evalset_sha256": "decbbf188720caf4c9fa01da33b4dedd5fde1ee14c495a8e398f9cfdf29ff4de",
+   "evidence_sha256": "7bcaff0d548b80207b8358ff90c20fb839271473ce42bfabcf1ef6c2de341098",
+   "machine": {
+    "os": "Darwin",
+    "machine": "arm64",
+    "cpu": "Apple M1",
+    "memory_gb": 16.0
+   },
+   "date": "2026-10-16"
+  },
+  {
+   "accessory": "luoke-mail",
+   "version": "0.12.5",
+   "task": "luoke-mail.senders",
+   "model": "gemma-4-26b-8bit",
+   "tiers": [
+    "128"
+   ],
+   "conclusion": "luoke-mail 0.12.5 的 luoke-mail.senders 在 gemma-4-26b-8bit（128 GB 档）上 25/25，硬性条目过（，2026-10-16）",
+   "evalset_sha256": "7bd4c5c54130abe843528de3da15e410bcc818931f34ce36da4cd784947c6add",
+   "evidence_sha256": "29df8200c29bee24572a15c78cec4fe3518845aa5a2d19fec3426bc1c18b72ae",
+   "machine": {
+    "os": "Darwin",
+    "machine": "arm64",
+    "cpu": "Apple M5 Max",
+    "memory_gb": 128.0
+   },
+   "date": "2026-10-16"
+  },
+  {
+   "accessory": "luoke-mail",
+   "version": "0.12.5",
+   "task": "luoke-mail.senders",
+   "model": "qwen3.5-9b-4bit",
+   "tiers": [
+    "32"
+   ],
+   "conclusion": "luoke-mail 0.12.5 的 luoke-mail.senders 在 qwen3.5-9b-4bit（32 GB 档）上 25/25，硬性条目过（，2026-10-16）",
+   "evalset_sha256": "7bd4c5c54130abe843528de3da15e410bcc818931f34ce36da4cd784947c6add",
+   "evidence_sha256": "d1da2ddb13b5ea3a6eca6d0f2baceaf1bd4dd9502ddb16dc94a1e0d5b08efe04",
+   "machine": {
+    "os": "Darwin",
+    "machine": "arm64",
+    "cpu": "Apple M4",
+    "memory_gb": 32.0
+   },
+   "date": "2026-10-16"
+  },
+  {
+   "accessory": "luoke-mail",
+   "version": "0.12.5",
+   "task": "luoke-mail.senders",
+   "model": "qwen3.5-9b-4bit",
+   "tiers": [
+    "16"
+   ],
+   "conclusion": "luoke-mail 0.12.5 的 luoke-mail.senders 在 qwen3.5-9b-4bit（16 GB 档）上 25/25，硬性条目过（，2026-10-16）",
+   "evalset_sha256": "7bd4c5c54130abe843528de3da15e410bcc818931f34ce36da4cd784947c6add",
+   "evidence_sha256": "28b56b93ec7c730f8a3d09b1ac358515f75f215110171974ad729f8c8a926203",
+   "machine": {
+    "os": "Darwin",
+    "machine": "arm64",
+    "cpu": "Apple M1",
+    "memory_gb": 16.0
+   },
+   "date": "2026-10-16"
+  },
+  {
+   "accessory": "luoke-mail",
+   "version": "0.12.5",
+   "task": "luoke-mail.triage",
+   "model": "gemma-4-26b-8bit",
+   "tiers": [
+    "128"
+   ],
+   "conclusion": "luoke-mail 0.12.5 的 luoke-mail.triage 在 gemma-4-26b-8bit（128 GB 档）上 44/45，硬性条目过（，2026-10-16）",
+   "evalset_sha256": "7bf497cce4f3b963cd615a7dfea0e1f5f238236fe8d32b0ad3dccd03ed4f3a09",
+   "evidence_sha256": "2f8db1bd143fd669134ac968d9ce5905bfc184f7c3a3c2246079c7b82c35f99a",
+   "machine": {
+    "os": "Darwin",
+    "machine": "arm64",
+    "cpu": "Apple M5 Max",
+    "memory_gb": 128.0
+   },
+   "date": "2026-10-16"
+  },
+  {
+   "accessory": "luoke-mail",
+   "version": "0.12.5",
+   "task": "luoke-mail.triage",
+   "model": "qwen3.5-9b-4bit",
+   "tiers": [
+    "32"
+   ],
+   "conclusion": "luoke-mail 0.12.5 的 luoke-mail.triage 在 qwen3.5-9b-4bit（32 GB 档）上 39/45，硬性条目过（，2026-10-16）",
+   "evalset_sha256": "7bf497cce4f3b963cd615a7dfea0e1f5f238236fe8d32b0ad3dccd03ed4f3a09",
+   "evidence_sha256": "b948f79fe7a596ba56931f62124c6543961adbe3bbf48c6a593878236a303d84",
+   "machine": {
+    "os": "Darwin",
+    "machine": "arm64",
+    "cpu": "Apple M4",
+    "memory_gb": 32.0
+   },
+   "date": "2026-10-16"
+  },
+  {
+   "accessory": "luoke-mail",
+   "version": "0.12.5",
+   "task": "luoke-mail.triage",
+   "model": "qwen3.5-9b-4bit",
+   "tiers": [
+    "16"
+   ],
+   "conclusion": "luoke-mail 0.12.5 的 luoke-mail.triage 在 qwen3.5-9b-4bit（16 GB 档）上 39/45，硬性条目过（，2026-10-16）",
+   "evalset_sha256": "7bf497cce4f3b963cd615a7dfea0e1f5f238236fe8d32b0ad3dccd03ed4f3a09",
+   "evidence_sha256": "6a7c319203b3fe7471e387b7c873e5da0cc1ea41bb15930ac7fd02f871f32bb1",
+   "machine": {
+    "os": "Darwin",
+    "machine": "arm64",
+    "cpu": "Apple M1",
+    "memory_gb": 16.0
+   },
+   "date": "2026-10-16"
+  },
+  {
+   "accessory": "luoke-mem",
+   "version": "0.15.0",
+   "task": "luoke-mem.typing",
+   "model": "gemma-4-26b-8bit",
+   "tiers": [
+    "128"
+   ],
+   "conclusion": "luoke-mem 0.15.0 的 luoke-mem.typing 在 gemma-4-26b-8bit（128 GB 档）上 82.3/100.0，硬性条目过（，2026-10-16 00:32:26）",
+   "evalset_sha256": "e8e81afc4f0f4d68d304819f15c45be4b3df7fccda1dcad60f788a00b664a473",
+   "evidence_sha256": "f22769bcb82e6a5756195114cd2daf871efc91c1571264f3faff9a7642d03810",
+   "machine": {
+    "model": "arm64",
+    "system": "macOS-27.0.1-arm64-arm-64bit"
+   },
+   "date": "2026-10-16 00:32:26"
+  },
+  {
+   "accessory": "luoke-mem",
+   "version": "0.15.0",
+   "task": "luoke-mem.typing",
+   "model": "qwen3.5-9b-4bit",
+   "tiers": [
+    "16"
+   ],
+   "conclusion": "luoke-mem 0.15.0 的 luoke-mem.typing 在 qwen3.5-9b-4bit（16 GB 档）上 96.9/100.0，硬性条目没过（，2026-10-16 01:24:15）",
+   "evalset_sha256": "e8e81afc4f0f4d68d304819f15c45be4b3df7fccda1dcad60f788a00b664a473",
+   "evidence_sha256": "abc815d71cd9b5a7ba3934dbda333aec004866de896a08fa03a3db49b8e071f7",
+   "machine": {
+    "model": "arm64",
+    "system": "macOS-26.2-arm64-arm-64bit"
+   },
+   "date": "2026-10-16 01:24:15"
+  },
+  {
+   "accessory": "luoke-mem",
+   "version": "0.15.0",
+   "task": "luoke-mem.typing",
+   "model": "qwen3.5-9b-4bit",
+   "tiers": [
+    "32"
+   ],
+   "conclusion": "luoke-mem 0.15.0 的 luoke-mem.typing 在 qwen3.5-9b-4bit（32 GB 档）上 97.9/100.0，硬性条目过（，2026-10-16 00:56:50）",
+   "evalset_sha256": "e8e81afc4f0f4d68d304819f15c45be4b3df7fccda1dcad60f788a00b664a473",
+   "evidence_sha256": "b1d546416565b8691262ce447f93f89e1b7e8b56ae83722dc25aebd175a1d30f",
+   "machine": {
+    "model": "arm64",
+    "system": "macOS-26.5.1-arm64-arm-64bit"
+   },
+   "date": "2026-10-16 00:56:50"
+  }
+ ]
+}

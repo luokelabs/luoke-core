@@ -1,0 +1,106 @@
+{
+ "task": "luoke-mail.learn-orgs",
+ "accessory": "luoke-mail/0.12.5",
+ "label": "release-beta0-128",
+ "model": "omlx-0.7.0-dev+gemma-4-26b-8bit",
+ "base_url": "unix:~/Codes/luoke/luoke-core/build.noindex/release/beta0/lab/128/run/hub.sock",
+ "machine": {
+  "os": "Darwin",
+  "machine": "arm64",
+  "cpu": "Apple M5 Max",
+  "memory_gb": 128.0
+ },
+ "python": "3.9.6",
+ "date": "2026-10-16",
+ "set_sha256": "230f1e0852609661cf1f63d4b1c7d9c43cf40aa35427f7360b8ec62f24de5df2",
+ "score": {
+  "n": 8,
+  "ok": 7,
+  "hard_failures": 0,
+  "facts": 8,
+  "seconds": 7.2,
+  "passes": true
+ },
+ "items": [
+  {
+   "batch": 1,
+   "facts": [
+    {
+     "topic": "账户:招商银行",
+     "text": "在招商银行持有信用卡",
+     "n": [
+      1
+     ]
+    },
+    {
+     "topic": "住房:物业服务中心",
+     "text": "租住或居住的房屋由物业服务中心管理",
+     "n": [
+      2
+     ]
+    },
+    {
+     "topic": "出行:云端航空",
+     "text": "是云端航空的会员",
+     "n": [
+      3
+     ]
+    },
+    {
+     "topic": "学校:复旦大学",
+     "text": "是复旦大学校友",
+     "n": [
+      4
+     ]
+    },
+    {
+     "topic": "账户:平安保险",
+     "text": "持有平安保险的保单",
+     "n": [
+      7
+     ]
+    }
+   ],
+   "expect_found": [
+    true,
+    true,
+    true,
+    true,
+    true
+   ],
+   "hard_failures": []
+  },
+  {
+   "batch": 2,
+   "facts": [
+    {
+     "topic": "其他:国家电网",
+     "text": "使用国家电网提供的电力服务",
+     "n": [
+      1
+     ]
+    },
+    {
+     "topic": "账户:某某证券",
+     "text": "在某某证券开立有证券账户",
+     "n": [
+      2
+     ]
+    },
+    {
+     "topic": "其他:某某健身",
+     "text": "是某某健身的会员",
+     "n": [
+      3
+     ]
+    }
+   ],
+   "expect_found": [
+    true,
+    true,
+    false
+   ],
+   "hard_failures": []
+  }
+ ]
+}

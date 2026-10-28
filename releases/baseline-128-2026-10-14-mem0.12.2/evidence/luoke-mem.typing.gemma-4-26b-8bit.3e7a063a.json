@@ -1,0 +1,62 @@
+{
+ "release": "baseline-128-2026-10-14-mem0.12.2",
+ "task": "luoke-mem.typing",
+ "accessory": "luoke-mem",
+ "accessory_version": "0.12.3",
+ "accessory_commit": "7082d5a",
+ "combo": {
+  "key": "gemma-4-26b-8bit:3e7a063a",
+  "model": "gemma-4-26b-8bit",
+  "base": "gemma-4-26b-8bit",
+  "tiers": [
+   "128"
+  ],
+  "params": {
+   "item_tokens": 8,
+   "fixed_tokens": 300,
+   "batch": 40,
+   "think": false,
+   "max_chars": 6000
+  }
+ },
+ "tier_run": "128",
+ "hub_version": "0.1.0.dev1",
+ "recipe_template": "2026-10-12-dev",
+ "engine": "omlx-0.7.0-dev",
+ "base_loaded": "gemma-4-26b-a4b-it-8bit",
+ "date": "2026-10-15 00:11:14",
+ "machine": {
+  "model": "arm64",
+  "system": "macOS-27.0.1-arm64-arm-64bit"
+ },
+ "hard": "常用说法或话题里出现一次性安排、别人的事、用户不要的候选、秘密的关键词，一条都不能有",
+ "evalset": {
+  "path": "bench/typing_set.py",
+  "sha256": "e8e81afc4f0f4d68d304819f15c45be4b3df7fccda1dcad60f788a00b664a473"
+ },
+ "command": [
+  "/usr/bin/python3",
+  "bench/run_typing.py",
+  "--hub",
+  "/tmp/luoke-rel-79125bb5-128.sock",
+  "--label",
+  "release-baseline-128-2026-10-14-mem0.12.2-128",
+  "--out",
+  "~/Codes/luoke/luoke-core/releases/baseline-128-2026-10-14-mem0.12.2/evidence/raw"
+ ],
+ "hard_ok": true,
+ "score": 82.3,
+ "score_max": 100.0,
+ "n": 24,
+ "latency": {
+  "seconds": 76.5
+ },
+ "detail": {
+  "interest_recall": 100.0,
+  "common_terms_per_case": 0.0,
+  "common_terms": 0,
+  "hard_failures": 0
+ },
+ "result_sha256": "70247ab8d4ae6f16d4425cce9c202bad45f591a5b28fd468a0d81273819f6f3a",
+ "raw": "raw/luoke-mem.typing.gemma-4-26b-8bit.3e7a063a.json"
+}

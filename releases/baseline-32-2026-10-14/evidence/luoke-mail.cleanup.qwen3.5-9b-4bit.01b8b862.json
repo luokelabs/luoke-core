@@ -1,0 +1,66 @@
+{
+ "release": "baseline-32-2026-10-14",
+ "task": "luoke-mail.cleanup",
+ "accessory": "luoke-mail",
+ "accessory_version": "0.10.0",
+ "combo": {
+  "key": "qwen3.5-9b-4bit:01b8b862",
+  "model": "qwen3.5-9b-4bit",
+  "base": "qwen3.5-9b-4bit",
+  "tiers": [
+   "32"
+  ],
+  "params": {
+   "item_tokens": 30,
+   "fixed_tokens": 60,
+   "batch": 25,
+   "think": false,
+   "max_chars": 12000
+  }
+ },
+ "tier_run": "32",
+ "hub_version": "0.1.0.dev1",
+ "recipe_template": "2026-10-12-dev",
+ "engine": "omlx-0.7.0-dev",
+ "base_loaded": "Qwen3.5-9B-4bit",
+ "date": "2026-10-14",
+ "machine": {
+  "os": "Darwin",
+  "machine": "arm64",
+  "cpu": "Apple M4",
+  "memory_gb": 32.0
+ },
+ "hard": "该留的邮件不能被判成推广、订阅内容、一般通知（一次都不能错）",
+ "evalset": {
+  "path": "bench/task_sets.py",
+  "sha256": "b2c83ed862cea4f4fed2f225ed5fb74a37d82bf934518899410e8b2eb5b646df"
+ },
+ "command": [
+  "/usr/bin/python3",
+  "bench/run_tasks.py",
+  "--hub",
+  "~/luoke-coexist/luoke-core/build/release/baseline-32-2026-10-14/lab/32/run/hub.sock",
+  "--label",
+  "release-baseline-32-2026-10-14-32",
+  "--task",
+  "cleanup",
+  "--out",
+  "~/luoke-coexist/luoke-core/releases/baseline-32-2026-10-14/evidence/raw"
+ ],
+ "hard_ok": false,
+ "score": 37,
+ "score_max": 40,
+ "n": 40,
+ "latency": {
+  "seconds": 43.3
+ },
+ "detail": {
+  "hard_n": 21,
+  "hard_failures": 1,
+  "unanswered": 0,
+  "trash_found": 13,
+  "trash_n": 13
+ },
+ "result_sha256": "445bbecd7e83aecd8fed8463b32427d489468eea6142d7d48b09d463a866f2bc",
+ "raw": "raw/luoke-mail.cleanup.qwen3.5-9b-4bit.01b8b862.json"
+}

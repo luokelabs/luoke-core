@@ -1,0 +1,189 @@
+{
+ "task": "luoke-mail.learn-sent",
+ "accessory": "luoke-mail/0.11.0",
+ "label": "release-baseline-128-2026-10-14-128",
+ "model": "omlx-0.7.0-dev+gemma-4-26b-8bit",
+ "base_url": "unix:/tmp/luoke-rel-cd46a3f5-128.sock",
+ "machine": {
+  "os": "Darwin",
+  "machine": "arm64",
+  "cpu": "Apple M5 Max",
+  "memory_gb": 128.0
+ },
+ "python": "3.9.6",
+ "date": "2026-10-14",
+ "set_sha256": "decbbf188720caf4c9fa01da33b4dedd5fde1ee14c495a8e398f9cfdf29ff4de",
+ "score": {
+  "n": 14,
+  "ok": 12,
+  "hard_failures": 0,
+  "facts": 15,
+  "seconds": 7.9,
+  "passes": true
+ },
+ "items": [
+  {
+   "batch": 1,
+   "facts": [
+    {
+     "topic": "姓名",
+     "text": "姓名：周晓",
+     "n": [
+      1,
+      2,
+      3,
+      4
+     ]
+    },
+    {
+     "topic": "职位",
+     "text": "职位：产品经理",
+     "n": [
+      1,
+      2,
+      3
+     ]
+    },
+    {
+     "topic": "单位",
+     "text": "单位：螺壳实验室",
+     "n": [
+      1,
+      2,
+      3
+     ]
+    },
+    {
+     "topic": "上级:王总",
+     "text": "上级：王总",
+     "n": [
+      1,
+      4
+     ]
+    },
+    {
+     "topic": "同事:王磊",
+     "text": "同事：王磊",
+     "n": [
+      2
+     ]
+    },
+    {
+     "topic": "客户:Ms. Lin",
+     "text": "客户：Ms. Lin",
+     "n": [
+      3
+     ]
+    },
+    {
+     "topic": "语言",
+     "text": "常用语言：中文、英文",
+     "n": [
+      1,
+      3
+     ]
+    }
+   ],
+   "expect_found": [
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true
+   ],
+   "hard_failures": []
+  },
+  {
+   "batch": 2,
+   "facts": [],
+   "expect_found": [
+    false,
+    false
+   ],
+   "hard_failures": []
+  },
+  {
+   "batch": 3,
+   "facts": [
+    {
+     "topic": "姓名",
+     "text": "姓名：周晓",
+     "n": [
+      1,
+      2,
+      3
+     ]
+    },
+    {
+     "topic": "职位",
+     "text": "职位：产品经理",
+     "n": [
+      1
+     ]
+    },
+    {
+     "topic": "单位",
+     "text": "单位：螺壳实验室",
+     "n": [
+      1
+     ]
+    },
+    {
+     "topic": "上级:王总",
+     "text": "上级：王总",
+     "n": [
+      1
+     ]
+    },
+    {
+     "topic": "同事:王磊",
+     "text": "同事：王磊",
+     "n": [
+      2
+     ]
+    },
+    {
+     "topic": "下属:小陈",
+     "text": "下属：小陈",
+     "n": [
+      3
+     ]
+    }
+   ],
+   "expect_found": [
+    true,
+    true,
+    true,
+    true
+   ],
+   "hard_failures": []
+  },
+  {
+   "batch": 4,
+   "facts": [
+    {
+     "topic": "单位",
+     "text": "单位：螺壳实验室",
+     "n": [
+      1
+     ]
+    },
+    {
+     "topic": "署名",
+     "text": "署名：周晓",
+     "n": [
+      1,
+      2,
+      3
+     ]
+    }
+   ],
+   "expect_found": [
+    true
+   ],
+   "hard_failures": []
+  }
+ ]
+}

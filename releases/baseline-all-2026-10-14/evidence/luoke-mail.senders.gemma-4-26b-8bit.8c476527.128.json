@@ -1,0 +1,67 @@
+{
+ "release": "baseline-128-2026-10-14",
+ "task": "luoke-mail.senders",
+ "accessory": "luoke-mail",
+ "accessory_version": "0.11.0",
+ "accessory_commit": "a8744ff",
+ "combo": {
+  "key": "gemma-4-26b-8bit:8c476527",
+  "model": "gemma-4-26b-8bit",
+  "base": "gemma-4-26b-8bit",
+  "tiers": [
+   "128"
+  ],
+  "params": {
+   "item_tokens": 25,
+   "fixed_tokens": 60,
+   "batch": 10,
+   "think": false,
+   "max_chars": 32000
+  }
+ },
+ "tier_run": "128",
+ "hub_version": "0.1.0.dev1",
+ "recipe_template": "2026-10-12-dev",
+ "engine": "omlx-0.7.0-dev",
+ "base_loaded": "gemma-4-26b-a4b-it-8bit",
+ "date": "2026-10-14",
+ "machine": {
+  "os": "Darwin",
+  "machine": "arm64",
+  "cpu": "Apple M5 Max",
+  "memory_gb": 128.0
+ },
+ "hard": "账单、登录提醒、个人往来不能被判成会建议退订的类别（一次都不能错）",
+ "evalset": {
+  "path": "bench/task_sets.py",
+  "sha256": "7bd4c5c54130abe843528de3da15e410bcc818931f34ce36da4cd784947c6add"
+ },
+ "command": [
+  "/usr/bin/python3",
+  "bench/run_tasks.py",
+  "--hub",
+  "/tmp/luoke-rel-cd46a3f5-128.sock",
+  "--label",
+  "release-baseline-128-2026-10-14-128",
+  "--task",
+  "senders",
+  "--out",
+  "~/Codes/luoke/luoke-core/releases/baseline-128-2026-10-14/evidence/raw"
+ ],
+ "hard_ok": true,
+ "score": 25,
+ "score_max": 25,
+ "n": 25,
+ "latency": {
+  "seconds": 4.8
+ },
+ "detail": {
+  "hard_n": 13,
+  "hard_failures": 0,
+  "unanswered": 0,
+  "unsub_found": 11,
+  "unsub_n": 12
+ },
+ "result_sha256": "f260a3f2d8c5085af3be6efcb27a8482da375ebef365b1385b07cecee4f9f9ff",
+ "raw": "raw/luoke-mail.senders.gemma-4-26b-8bit.8c476527.json"
+}

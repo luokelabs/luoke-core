@@ -1,0 +1,75 @@
+{
+ "release": "baseline-128-2026-10-14",
+ "task": "luoke-ime.rerank",
+ "accessory": "luoke-ime",
+ "accessory_version": "0.1.0",
+ "accessory_commit": "d53154b",
+ "combo": {
+  "key": "qwen3.5-0.8b-base-4bit:8c1881e1",
+  "model": "qwen3.5-0.8b-base-4bit",
+  "base": "gemma-4-26b-8bit",
+  "tiers": [
+   "128"
+  ],
+  "params": {
+   "prefix_snapshots": 16,
+   "batch": 16,
+   "max_chars": 2000,
+   "threshold_nats": 3
+  }
+ },
+ "tier_run": "128",
+ "hub_version": "0.1.0.dev1",
+ "recipe_template": "2026-10-12-dev",
+ "engine": "omlx-0.7.0-dev",
+ "base_loaded": "gemma-4-26b-a4b-it-8bit",
+ "date": "2026-10-14T01:09:02+0900",
+ "machine": {
+  "os": "macOS 27.0.1",
+  "model": "Mac17,7",
+  "chip": "Apple M5 Max",
+  "memory_gb": 128
+ },
+ "hard": "没有硬性条目（可选任务）",
+ "evalset": {
+  "path": "corpus.tsv",
+  "sha256": "41a9521fc042db8d92d40f54d34b8553f5d64bc8c7958915dd96a55665d1c1e8"
+ },
+ "command": [
+  "/usr/bin/python3",
+  "engines/xiaohe/bench.py",
+  "~/Codes/on-device-llm/ime_eval/private/corpus.tsv",
+  "--scorer",
+  "hub",
+  "--hub",
+  "/tmp/luoke-rel-cd46a3f5-128.sock",
+  "--typing",
+  "0",
+  "--result",
+  "~/Codes/luoke/luoke-core/releases/baseline-128-2026-10-14/evidence/raw/luoke-ime.rerank.release-baseline-128-2026-10-14-128.json"
+ ],
+ "hard_ok": true,
+ "score": 89.8,
+ "score_max": 100.0,
+ "n": 600,
+ "latency": {
+  "p50_ms": 41,
+  "p90_ms": 70,
+  "first_p90_ms": 17
+ },
+ "detail": {
+  "settled_top1_pct": 89.8,
+  "fast_top1_pct": 78.8,
+  "space": null,
+  "hub": {
+   "n": 25156,
+   "prefix_cache_hit_pct": 100.0,
+   "p50_ms": 8.78,
+   "p90_ms": 15.180000000000001,
+   "errors": {}
+  },
+  "engine_options": {}
+ },
+ "result_sha256": "e9b9f0da8867500809093e4aa88d7b2731f94e1a1f0355a94cc0c2593bc12aac",
+ "raw": "raw/luoke-ime.rerank.qwen3.5-0.8b-base-4bit.8c1881e1.json"
+}

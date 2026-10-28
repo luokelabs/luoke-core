@@ -1,0 +1,18 @@
+# 自带 Python 运行时（python-build-standalone 3.12.15+20261009，aarch64-apple-darwin，install_only）带的第三方组件及许可
+# 来源：该发布的 PYTHON.json（licenses / license_path）；许可全文在同目录的 LICENSE.*.txt。全部为宽松许可，没有 GPL。
+
+CPython 3.12.15: Python-2.0, CNRI-Python (LICENSE.cpython.txt)
+
+0BSD           xz / liblzma (LICENSE.liblzma.txt)  <- 扩展模块: _lzma
+Apache-2.0     OpenSSL 3 的 Apache-2.0 (LICENSE.openssl-3.txt)  <- 扩展模块: _hashlib, _ssl
+BSD-2-Clause   mpdecimal (LICENSE.mpdecimal.txt)  <- 扩展模块: _decimal
+BSD-3-Clause   libedit（readline 模块）、libuuid (LICENSE.libedit.txt, LICENSE.libuuid.txt)  <- 扩展模块: _uuid, readline
+MIT            libffi、expat (LICENSE.libffi.txt, LICENSE.expat.txt)  <- 扩展模块: _ctypes, pyexpat
+OpenSSL        OpenSSL 3 (LICENSE.openssl-3.txt)  <- 扩展模块: _hashlib, _ssl
+TCL            Tcl/Tk、tix (LICENSE.tcl.txt, LICENSE.tix.txt)  <- 扩展模块: _tkinter
+X11            ncurses、libX11/libXau/libxcb (LICENSE.ncurses.txt, LICENSE.libX11.txt …)  <- 扩展模块: _curses, _curses_panel
+Zlib           zlib (LICENSE.zlib.txt)  <- 扩展模块: _sqlite3, _tkinter, binascii, zlib
+bzip2-1.0.6    bzip2 (LICENSE.bzip2.txt)  <- 扩展模块: _bz2
+
+SQLite: 公有领域 (LICENSE.sqlite.txt)  <- _sqlite3
+Berkeley DB: LICENSE.bdb.txt  <- _dbm（如启用）

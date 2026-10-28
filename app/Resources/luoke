@@ -1,0 +1,10 @@
+#!/bin/sh
+# 给高级用户的命令行（luoke_core/cli.py）：用主控 .app 自带的 Python 跑。可以被链接到 PATH 里（luoke install-cli），先顺着链接找到 .app。
+self=$0
+while [ -L "$self" ]; do
+  t=$(readlink "$self")
+  case $t in /*) self=$t ;; *) self=$(dirname "$self")/$t ;; esac
+done
+here=$(cd "$(dirname "$self")" && pwd)
+export LUOKE_CLI_SELF="$here/luoke"
+exec "$here/../python/bin/python3" -B -s -m luoke_core.cli "$@"

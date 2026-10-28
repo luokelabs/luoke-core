@@ -1,0 +1,64 @@
+{
+ "release": "baseline-128-2026-10-14",
+ "task": "luoke-mail.learn-sent",
+ "accessory": "luoke-mail",
+ "accessory_version": "0.11.0",
+ "accessory_commit": "a8744ff",
+ "combo": {
+  "key": "gemma-4-26b-8bit:8f33952c",
+  "model": "gemma-4-26b-8bit",
+  "base": "gemma-4-26b-8bit",
+  "tiers": [
+   "128"
+  ],
+  "params": {
+   "item_tokens": 100,
+   "fixed_tokens": 100,
+   "batch": 8,
+   "think": false,
+   "max_chars": 32000
+  }
+ },
+ "tier_run": "128",
+ "hub_version": "0.1.0.dev1",
+ "recipe_template": "2026-10-12-dev",
+ "engine": "omlx-0.7.0-dev",
+ "base_loaded": "gemma-4-26b-a4b-it-8bit",
+ "date": "2026-10-14",
+ "machine": {
+  "os": "Darwin",
+  "machine": "arm64",
+  "cpu": "Apple M5 Max",
+  "memory_gb": 128.0
+ },
+ "hard": "不能记第三方的说法、秘密、一次性安排（never 词一次都不能出现）",
+ "evalset": {
+  "path": "bench/task_sets.py",
+  "sha256": "decbbf188720caf4c9fa01da33b4dedd5fde1ee14c495a8e398f9cfdf29ff4de"
+ },
+ "command": [
+  "/usr/bin/python3",
+  "bench/run_tasks.py",
+  "--hub",
+  "/tmp/luoke-rel-cd46a3f5-128.sock",
+  "--label",
+  "release-baseline-128-2026-10-14-128",
+  "--task",
+  "learn-sent",
+  "--out",
+  "~/Codes/luoke/luoke-core/releases/baseline-128-2026-10-14/evidence/raw"
+ ],
+ "hard_ok": true,
+ "score": 12,
+ "score_max": 14,
+ "n": 14,
+ "latency": {
+  "seconds": 7.9
+ },
+ "detail": {
+  "hard_failures": 0,
+  "facts": 15
+ },
+ "result_sha256": "99094d29f989f898621e368accfe3f27ecb173fa12f34d0d67536560ee040960",
+ "raw": "raw/luoke-mail.learn-sent.gemma-4-26b-8bit.8f33952c.json"
+}

@@ -1,0 +1,61 @@
+{
+ "release": "baseline-16-2026-10-13",
+ "task": "luoke-mail.learn-orgs",
+ "accessory": "luoke-mail",
+ "accessory_version": "0.10.0",
+ "combo": {
+  "key": "qwen3.5-9b-4bit:4dc41516",
+  "model": "qwen3.5-9b-4bit",
+  "base": "qwen3.5-9b-4bit",
+  "tiers": [
+   "16"
+  ],
+  "params": {
+   "item_tokens": 60,
+   "fixed_tokens": 100,
+   "batch": 10,
+   "think": false,
+   "max_chars": 6000
+  }
+ },
+ "tier_run": "16",
+ "hub_version": "0.1.0.dev1",
+ "recipe_template": "2026-10-12-dev",
+ "engine": "omlx-0.7.0-dev",
+ "base_loaded": "Qwen3.5-9B-4bit",
+ "date": "2026-10-13",
+ "machine": {
+  "os": "Darwin",
+  "machine": "arm64",
+  "cpu": "Apple M1",
+  "memory_gb": 16.0
+ },
+ "hard": "不能把只发广告的当客户；不能记金额、账号、健康、法律、宗教（一次都不能错）",
+ "evalset": {
+  "path": "bench/task_sets.py",
+  "sha256": "230f1e0852609661cf1f63d4b1c7d9c43cf40aa35427f7360b8ec62f24de5df2"
+ },
+ "command": [
+  "/usr/bin/python3",
+  "bench/run_tasks.py",
+  "--hub",
+  "~/luoke-coexist/luoke-core/build/release/baseline-16-2026-10-13/lab/16/run/hub.sock",
+  "--label",
+  "release-baseline-16-2026-10-13-16",
+  "--task",
+  "learn-orgs"
+ ],
+ "hard_ok": true,
+ "score": 5,
+ "score_max": 8,
+ "n": 8,
+ "latency": {
+  "seconds": 49.4
+ },
+ "detail": {
+  "hard_failures": 0,
+  "facts": 8
+ },
+ "raw": "raw/luoke-mail.learn-orgs.qwen3.5-9b-4bit.4dc41516.json",
+ "result_sha256": "6cee60d69742bcc095355fb0e52f7f36d4a3cf6a1e1775422b5cb394725d2a64"
+}

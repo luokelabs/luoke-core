@@ -1,0 +1,582 @@
+{
+ "recipe_version": "2026-10-12-dev",
+ "contract": 1,
+ "tiers": {
+  "16": {
+   "min_gb": 0,
+   "max_gb": 24,
+   "guard_gb": 10,
+   "base_resident": false,
+   "background_input_chars": 6000,
+   "idle_unload_secs": 300
+  },
+  "32": {
+   "min_gb": 24,
+   "max_gb": 64,
+   "guard_gb": 20,
+   "base_resident": true,
+   "background_input_chars": 12000,
+   "idle_unload_secs": 1800
+  },
+  "128": {
+   "min_gb": 64,
+   "max_gb": 4096,
+   "guard_gb": 100,
+   "base_resident": true,
+   "background_input_chars": 32000,
+   "idle_unload_secs": 3600
+  }
+ },
+ "models": {
+  "qwen3.5-9b-4bit": {
+   "dir": "Qwen3.5-9B-4bit",
+   "kind": "base",
+   "source": "mlx-community/Qwen3.5-9B-4bit",
+   "wired_gb": 10,
+   "load_secs": 15,
+   "prefill_tok_s": {
+    "16": 95,
+    "32": 230,
+    "*": 200
+   },
+   "decode_tok_s": {
+    "16": 10,
+    "32": 18,
+    "*": 15
+   },
+   "special_tokens": [
+    "<|im_start|>",
+    "<|im_end|>",
+    "<|endoftext|>",
+    "<think>",
+    "</think>"
+   ],
+   "size_gb": 5.8
+  },
+  "gemma-4-26b-8bit": {
+   "dir": "gemma-4-26b-a4b-it-8bit",
+   "kind": "base",
+   "source": "gemma-4-26b-a4b-it-8bit",
+   "wired_gb": 33,
+   "load_secs": 15,
+   "prefill_tok_s": {
+    "128": 3000,
+    "*": 3000
+   },
+   "decode_tok_s": {
+    "128": 70,
+    "*": 70
+   },
+   "special_tokens": [
+    "<start_of_turn>",
+    "<end_of_turn>",
+    "<bos>",
+    "<eos>"
+   ],
+   "size_gb": 26.0
+  },
+  "gemma-4-e4b-4bit": {
+   "dir": "gemma-4-e4b-it-4bit",
+   "kind": "base",
+   "source": "mlx-community/gemma-4-e4b-it-4bit",
+   "wired_gb": 8,
+   "load_secs": 5,
+   "prefill_tok_s": {
+    "*": 2000
+   },
+   "decode_tok_s": {
+    "*": 60
+   },
+   "special_tokens": [
+    "<start_of_turn>",
+    "<end_of_turn>",
+    "<bos>",
+    "<eos>"
+   ],
+   "size_gb": 4.8
+  },
+  "qwen3.5-0.8b-base-4bit": {
+   "dir": "Qwen3.5-0.8B-Base-4bit",
+   "kind": "special",
+   "source": "local/Qwen3.5-0.8B-Base-4bit",
+   "wired_gb": 2.7,
+   "load_secs": 2,
+   "size_gb": 0.5,
+   "cache_mb": 1024,
+   "_内存": "工作进程：模型 0.5 GB；MLX 缓冲上限 cache_mb（1 GB），连续打分时 footprint 约 2.7 GB（2026-10-14 实测 2000 次重排），空闲 30 s 清空后约 1.3 GB。之前写 0.6 是只算了模型，缓冲不限时 20 小时涨到 8 GB"
+  },
+  "embeddinggemma-2": {
+   "dir": "embeddinggemma-2-bf16",
+   "kind": "special",
+   "source": "google/embeddinggemma-2",
+   "revision": "914f7f8",
+   "quant": "bf16",
+   "license": "Apache-2.0",
+   "wired_gb": 1.5,
+   "load_secs": 2,
+   "size_gb": 0.6,
+   "cache_mb": 512,
+   "dims": 768,
+   "vector_space": "embeddinggemma-2/1",
+   "_vector_space": "向量空间（2026-10-16 应 digup 加）：配件拿它判断旧向量还能不能和新算的放在一起比，只比相等、不解析。/1 就是 digup 参考向量集 vector_version 1 那个空间（主控 10-16 实测文字 5 条余弦 ≥ 0.999）。换模型或引擎后，新向量对参考集仍然 ≥ 0.999 就不变，否则后面的数加一",
+   "_待定": "2026-10-16 加（提议、10-19 认可，顶层 ADR 0018：全生态推理归主控，digup 改调 /v1/embed）。权重 google/embeddinggemma-2 @ 914f7f8 的 mlx bf16（digup 线上是 llama.cpp Q8_0，两者余弦 ≥ 0.999、索引兼容）。wired_gb、load_secs、size_gb 是占位，真机实测后改。还没分配到任何档（assignment 里没有）：不下载、不进发布清单，digup.embed 在各档答 unsupported。分配前要：引擎包的 mlx-vlm 能加载它（oMLX 0.7.0 带的 0.7.1 没有 EmbeddingGemma 2 的模型类型，digup 用的是 git fec3f50）、权重上传（逐次批）、对 digup 参考向量集余弦 ≥ 0.999"
+  }
+ },
+ "assignment": {
+  "16": {
+   "base": "qwen3.5-9b-4bit",
+   "special": {
+    "luoke-ime.rerank": "qwen3.5-0.8b-base-4bit",
+    "luoke-ime.predict": "qwen3.5-0.8b-base-4bit"
+   }
+  },
+  "32": {
+   "base": "qwen3.5-9b-4bit",
+   "special": {
+    "luoke-ime.rerank": "qwen3.5-0.8b-base-4bit",
+    "luoke-ime.predict": "qwen3.5-0.8b-base-4bit"
+   }
+  },
+  "128": {
+   "base": "gemma-4-26b-8bit",
+   "special": {
+    "luoke-ime.rerank": "qwen3.5-0.8b-base-4bit",
+    "luoke-ime.predict": "qwen3.5-0.8b-base-4bit"
+   }
+  }
+ },
+ "engine": {
+  "version": "omlx-0.7.2",
+  "app": "/Applications/oMLX.app",
+  "python": "Contents/Resources/Python/cpython-3.11/bin/python3.11",
+  "site": "Contents/Resources/Python/framework-mlx-base/lib/python3.11/site-packages",
+  "log_level": "info"
+ },
+ "tasks": {
+  "luoke-mail.triage": {
+   "accessory": "luoke-mail",
+   "kind": "generate",
+   "main": true,
+   "params": {
+    "*": {
+     "item_tokens": 320,
+     "fixed_tokens": 80,
+     "batch": 1,
+     "think": false
+    },
+    "16": {
+     "max_chars": 6000,
+     "sender_verdict": false
+    },
+    "32": {
+     "max_chars": 12000,
+     "sender_verdict": false
+    },
+    "128": {
+     "max_chars": 32000
+    },
+    "_sender_verdict": "9B 的两档（16、32）不把发件域名验证结论告诉模型（luoke-mail 0.13.12 起读这个参数；关掉时提示词同 0.12.5）。2026-10-16 定：9B 拿到验证结论后会把真的银行通知标成可疑（0.13.5–0.13.10），16 档关掉；2026-10-28 定（luoke-core#33）：32 档也关，这封在 M1、M4 上随引擎版本来回翻"
+   },
+   "base_params": {
+    "temperature": 0,
+    "top_p": 1
+   }
+  },
+  "luoke-mail.draft": {
+   "accessory": "luoke-mail",
+   "kind": "generate",
+   "main": false,
+   "params": {
+    "*": {
+     "item_tokens": 800,
+     "fixed_tokens": 100,
+     "batch": 1,
+     "think": false
+    },
+    "16": {
+     "max_chars": 6000
+    },
+    "32": {
+     "max_chars": 12000
+    },
+    "128": {
+     "max_chars": 32000
+    }
+   },
+   "base_params": {
+    "temperature": 0.3,
+    "top_p": 0.9
+   }
+  },
+  "luoke-mail.senders": {
+   "accessory": "luoke-mail",
+   "kind": "generate",
+   "main": false,
+   "params": {
+    "*": {
+     "item_tokens": 25,
+     "fixed_tokens": 60,
+     "batch": 10,
+     "think": false
+    },
+    "16": {
+     "max_chars": 6000
+    },
+    "32": {
+     "max_chars": 12000
+    },
+    "128": {
+     "max_chars": 32000
+    }
+   },
+   "base_params": {
+    "temperature": 0,
+    "top_p": 1
+   }
+  },
+  "luoke-mail.cleanup": {
+   "accessory": "luoke-mail",
+   "kind": "generate",
+   "main": false,
+   "params": {
+    "*": {
+     "item_tokens": 30,
+     "fixed_tokens": 60,
+     "batch": 25,
+     "think": false
+    },
+    "16": {
+     "max_chars": 6000
+    },
+    "32": {
+     "max_chars": 12000
+    },
+    "128": {
+     "max_chars": 32000
+    }
+   },
+   "base_params": {
+    "temperature": 0,
+    "top_p": 1
+   }
+  },
+  "luoke-mail.digest-read": {
+   "accessory": "luoke-mail",
+   "kind": "generate",
+   "main": false,
+   "params": {
+    "*": {
+     "item_tokens": 1300,
+     "fixed_tokens": 100,
+     "batch": 1,
+     "think": false
+    },
+    "16": {
+     "max_chars": 6000
+    },
+    "32": {
+     "max_chars": 12000
+    },
+    "128": {
+     "max_chars": 12000
+    }
+   },
+   "base_params": {
+    "temperature": 0,
+    "top_p": 1
+   }
+  },
+  "luoke-mail.digest-pick": {
+   "accessory": "luoke-mail",
+   "kind": "generate",
+   "main": false,
+   "params": {
+    "*": {
+     "item_tokens": 60,
+     "fixed_tokens": 60,
+     "batch": 30,
+     "think": false
+    },
+    "16": {
+     "max_chars": 6000
+    },
+    "32": {
+     "max_chars": 12000
+    },
+    "128": {
+     "max_chars": 32000
+    }
+   },
+   "base_params": {
+    "temperature": 0,
+    "top_p": 1
+   }
+  },
+  "luoke-mail.learn-sent": {
+   "accessory": "luoke-mail",
+   "kind": "generate",
+   "main": false,
+   "params": {
+    "*": {
+     "item_tokens": 100,
+     "fixed_tokens": 100,
+     "batch": 8,
+     "think": false
+    },
+    "16": {
+     "max_chars": 6000
+    },
+    "32": {
+     "max_chars": 12000
+    },
+    "128": {
+     "max_chars": 32000
+    }
+   },
+   "base_params": {
+    "temperature": 0,
+    "top_p": 1
+   }
+  },
+  "luoke-mail.learn-orgs": {
+   "accessory": "luoke-mail",
+   "kind": "generate",
+   "main": false,
+   "params": {
+    "*": {
+     "item_tokens": 60,
+     "fixed_tokens": 100,
+     "batch": 10,
+     "think": false
+    },
+    "16": {
+     "max_chars": 6000
+    },
+    "32": {
+     "max_chars": 12000
+    },
+    "128": {
+     "max_chars": 32000
+    }
+   },
+   "base_params": {
+    "temperature": 0,
+    "top_p": 1
+   }
+  },
+  "luoke-ime.rerank": {
+   "accessory": "luoke-ime",
+   "kind": "score",
+   "main": false,
+   "latency_ms": {
+    "*": 50
+   },
+   "params": {
+    "*": {
+     "prefix_snapshots": 16,
+     "batch": 16,
+     "max_chars": 2000,
+     "probe": {
+      "context": "下周的产品评审会改到周四下午三点，地点还是三楼的大会议室。请大家提前把各自负责的模块整理一下，重点说明一下",
+      "start": 28,
+      "candidates": [
+       "进度",
+       "近度",
+       "尽度",
+       "进渡",
+       "晋度",
+       "风险",
+       "分险",
+       "问题",
+       "计划",
+       "难点"
+      ]
+     }
+    }
+   },
+   "_latency_ms": "主控探针（前文 30–54 字逐字变长、16 个长短混合的候选、25 次去前 5 取 p90）的分界，各档相同，实验室定（2026-10-14）：M5 Max 13.9 ms 不慢；基础款 M4 59.4 ms 慢（整次重排 p90 186 ms，超过壳按空格最多等的 150 ms）；M1 134.5 ms 慢。标了以后低于 40 ms 才清。不按参考机器自己的实测值定，不然稍一波动就翻"
+  },
+  "luoke-ime.predict": {
+   "accessory": "luoke-ime",
+   "kind": "predict",
+   "main": false,
+   "latency_ms": {
+    "*": 200
+   },
+   "params": {
+    "*": {
+     "prefix_snapshots": 16,
+     "k": 8,
+     "n": 6,
+     "max_chars": 2000,
+     "max_tokens": 6,
+     "probe": {
+      "context": "今天的会议先到这里，大家回去以后把会上提到的几个问题整理成文档，明天上午",
+      "start": 26,
+      "stop": [
+       "，",
+       "。",
+       "！",
+       "？",
+       "、",
+       "；",
+       "：",
+       ",",
+       ".",
+       "!",
+       "?",
+       ";",
+       ":",
+       "\n",
+       "\r",
+       "\t",
+       " ",
+       "　",
+       "“",
+       "”",
+       "‘",
+       "’",
+       "\"",
+       "'",
+       "（",
+       "）",
+       "(",
+       ")",
+       "《",
+       "》",
+       "【",
+       "】",
+       "[",
+       "]"
+      ]
+     }
+    }
+   },
+   "_latency_ms": "同一探针的联想（8 个开头、各 6 个 token，10 次取 p90）分界：M5 Max 27.8、基础款 M4 98.5、M1 294.3 ms；上屏后约 300 ms 内要备好；输入法现在不按它减什么",
+   "_params": "k / n 是旧 /v1/predict 的开头数和每支 token 数；/v1/continue 用 k / max_tokens（缺省也是上限，2026-10-16）"
+  },
+  "luoke-mem.typing": {
+   "accessory": "luoke-mem",
+   "kind": "generate",
+   "main": false,
+   "params": {
+    "*": {
+     "item_tokens": 8,
+     "fixed_tokens": 300,
+     "batch": 40,
+     "think": false,
+     "max_chars": 6000
+    }
+   },
+   "base_params": {
+    "temperature": 0,
+    "top_p": 1
+   },
+   "_说明": "顶层 ADR 0015：luoke-mem 在安静时刻经主控从打字记录归纳常用说法和关注的话题，只走 background。初值 luoke-mem 2026-10-14 按 9B 4-bit 估：一批最多 40 段打字、整个请求 6000 字（提示词约 600 字），满 40 段约 620 token 输出"
+  },
+  "luoke-mem.topics": {
+   "accessory": "luoke-mem",
+   "kind": "generate",
+   "main": false,
+   "params": {
+    "*": {
+     "item_tokens": 8,
+     "fixed_tokens": 300,
+     "batch": 40,
+     "think": false,
+     "max_chars": 6000
+    },
+    "16": {
+     "batch": 20,
+     "max_chars": 3000
+    }
+   },
+   "base_params": {
+    "temperature": 0,
+    "top_p": 1
+   },
+   "_说明": "顶层 ADR 0015：螺壳记忆在空闲任务 learn 里读各工具记下的原文（邮件主题和正文等）归纳话题，定档由记忆的代码按表来。参数照 typing；记录带原文后每批实际条数由 max_chars 先卡住（luoke-mem 10-19）",
+   "_16": "luoke-mem 10-18：16 GB 档一批 40 条被 oMLX 的预填内存闸拒过（约 9.63 GB 对 9.50 GB 上限），减半；还被拒就降到 batch 12、max_chars 2000"
+  },
+  "luoke-mail.thread": {
+   "accessory": "luoke-mail",
+   "kind": "generate",
+   "main": false,
+   "params": {
+    "*": {
+     "item_tokens": 60,
+     "fixed_tokens": 100,
+     "batch": 1,
+     "think": false,
+     "max_chars": 6000
+    }
+   },
+   "base_params": {
+    "temperature": 0,
+    "top_p": 1
+   },
+   "_说明": "luoke-mail 0.14.0（10-17 同意）：一串往来最后 6 封、每封最多 600 字，判断现在等谁（user_turn / other_turn / done）、从哪天起、卡在哪；同步后后台跑，一次最多 10 串。预算按 luoke-mail 注册页任务表（每条目 60 + 固定 100）"
+  },
+  "digup.embed": {
+   "accessory": "digup",
+   "kind": "embed",
+   "main": false,
+   "params": {
+    "*": {
+     "batch": 32,
+     "max_tokens": 2048,
+     "max_chars": 32000,
+     "max_total_chars": 320000
+    }
+   },
+   "_说明": "2026-10-16 提议、10-19 认可（顶层 ADR 0018）：digup 搜索去掉自带模型，经主控算向量（/v1/embed，专用模型直连、常驻）。texts 由 digup 加好检索提示前缀；batch 是一次最多几条；max_tokens 是每条按 token 截到多长（和 digup 一样 2048，含 <bos>/<eos>）；max_chars 只防过大的请求（2048 个 token 的英文约八九千字，留足余量），不是截断。max_total_chars 是一次请求的文字总量上限（约 32 条 × 1 万字；超了答 input_too_long，请分几次发）。满 768 维、float16，不截维。模型还没分配到任何档，所以现在各档都答 unsupported。pass/fail：对 digup 参考向量集余弦 ≥ 0.999"
+  }
+ },
+ "verified": {
+  "luoke-mail": {
+   "versions": [
+    "*"
+   ]
+  },
+  "luoke-ime": {
+   "versions": [
+    "*"
+   ]
+  },
+  "luoke-core": {
+   "versions": [
+    "*"
+   ]
+  },
+  "luoke-mem": {
+   "versions": [
+    "*"
+   ]
+  },
+  "digup": {
+   "versions": [
+    "*"
+   ]
+  }
+ },
+ "expectations": {
+  "_": "首次运行预检页照实说体验的文字（顶层 ADR 0017）。只在这里维护一份：首次运行按档和芯片类别读；官网素材 docs/community/luoke-core.md 的数字以此为准。数字出处 docs/experiments/。",
+  "tiers": {
+   "16": [
+    "邮件助手：后台整理（分拣新邮件、清理旧邮件的分析、精选的阅读等）仅在电脑空闲时进行，平均每封约 50 秒；点「同步新邮件」时按需加载模型，每封约 22 秒。"
+   ],
+   "32": [
+    "邮件助手：后台整理随时进行，每封约 11 秒。"
+   ],
+   "128": [
+    "邮件助手：后台整理随时进行，每封约 2 秒。"
+   ]
+  },
+  "typing_unsupported": "记忆：此档位不支持从输入内容中归纳常用说法和话题。",
+  "ime": {
+   "m1": "输入法：预计每次按键约 150 毫秒给出候选，首选准确率约 88.8%。",
+   "base": "输入法：预计使用精简模式（候选减半，准确率约低 1 个百分点），仍优于系统自带输入法。",
+   "pro": "输入法：预计可获得完整体验。"
+  }
+ }
+}

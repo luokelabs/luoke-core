@@ -1,0 +1,531 @@
+{
+ "task": "luoke-mail.cleanup",
+ "accessory": "luoke-mail/0.12.5",
+ "label": "release-beta0-128",
+ "model": "omlx-0.7.0-dev+gemma-4-26b-8bit",
+ "base_url": "unix:~/Codes/luoke/luoke-core/build.noindex/release/beta0/lab/128/run/hub.sock",
+ "machine": {
+  "os": "Darwin",
+  "machine": "arm64",
+  "cpu": "Apple M5 Max",
+  "memory_gb": 128.0
+ },
+ "python": "3.9.6",
+ "date": "2026-10-16",
+ "set_sha256": "b2c83ed862cea4f4fed2f225ed5fb74a37d82bf934518899410e8b2eb5b646df",
+ "score": {
+  "n": 40,
+  "ok": 39,
+  "hard_n": 21,
+  "hard_failures": 0,
+  "unanswered": 0,
+  "trash_found": 13,
+  "trash_n": 13,
+  "seconds": 7.9,
+  "passes": true
+ },
+ "items": [
+  {
+   "scope": "archive",
+   "subject": "您的 2025 年 9 月信用卡电子账单",
+   "from": "service@cmbchina.example",
+   "expect": [
+    "receipt"
+   ],
+   "hard": true,
+   "kind": "receipt",
+   "ok": true,
+   "hard_failure": false
+  },
+  {
+   "scope": "archive",
+   "subject": "您的信用卡还款已入账",
+   "from": "service@cmbchina.example",
+   "expect": [
+    "receipt"
+   ],
+   "hard": true,
+   "kind": "receipt",
+   "ok": true,
+   "hard_failure": false
+  },
+  {
+   "scope": "archive",
+   "subject": "双十一刷卡满 1000 元返 50 元",
+   "from": "service@cmbchina.example",
+   "expect": [
+    "promotion"
+   ],
+   "hard": false,
+   "kind": "promotion",
+   "ok": true,
+   "hard_failure": false
+  },
+  {
+   "scope": "archive",
+   "subject": "掌上生活：本周五折美食",
+   "from": "service@cmbchina.example",
+   "expect": [
+    "promotion"
+   ],
+   "hard": false,
+   "kind": "promotion",
+   "ok": true,
+   "hard_failure": false
+  },
+  {
+   "scope": "archive",
+   "subject": "【招商银行】您的账户在新设备登录",
+   "from": "service@cmbchina.example",
+   "expect": [
+    "notification",
+    "account"
+   ],
+   "hard": false,
+   "kind": "account",
+   "ok": true,
+   "hard_failure": false
+  },
+  {
+   "scope": "archive",
+   "subject": "信用卡年费减免规则调整通知",
+   "from": "service@cmbchina.example",
+   "expect": [
+    "document",
+    "notification",
+    "other"
+   ],
+   "hard": false,
+   "kind": "account",
+   "ok": false,
+   "hard_failure": false
+  },
+  {
+   "scope": "archive",
+   "subject": "行程确认：上海浦东—东京成田 11 月 3 日",
+   "from": "news@skyair.example",
+   "expect": [
+    "travel"
+   ],
+   "hard": true,
+   "kind": "travel",
+   "ok": true,
+   "hard_failure": false
+  },
+  {
+   "scope": "archive",
+   "subject": "电子客票行程单（报销凭证）",
+   "from": "news@skyair.example",
+   "expect": [
+    "receipt",
+    "travel"
+   ],
+   "hard": true,
+   "kind": "receipt",
+   "ok": true,
+   "hard_failure": false
+  },
+  {
+   "scope": "archive",
+   "subject": "会员专享：东京往返特价 1299 元起",
+   "from": "news@skyair.example",
+   "expect": [
+    "promotion"
+   ],
+   "hard": false,
+   "kind": "promotion",
+   "ok": true,
+   "hard_failure": false
+  },
+  {
+   "scope": "archive",
+   "subject": "值机提醒：您的航班明天起飞",
+   "from": "news@skyair.example",
+   "expect": [
+    "notification",
+    "travel"
+   ],
+   "hard": false,
+   "kind": "notification",
+   "ok": true,
+   "hard_failure": false
+  },
+  {
+   "scope": "archive",
+   "subject": "您的订单已发货",
+   "from": "order@jd.example",
+   "expect": [
+    "notification"
+   ],
+   "hard": false,
+   "kind": "notification",
+   "ok": true,
+   "hard_failure": false
+  },
+  {
+   "scope": "archive",
+   "subject": "订单 4417 的电子发票",
+   "from": "order@jd.example",
+   "expect": [
+    "receipt"
+   ],
+   "hard": true,
+   "kind": "receipt",
+   "ok": true,
+   "hard_failure": false
+  },
+  {
+   "scope": "archive",
+   "subject": "618 大促提前看",
+   "from": "order@jd.example",
+   "expect": [
+    "promotion"
+   ],
+   "hard": false,
+   "kind": "promotion",
+   "ok": true,
+   "hard_failure": false
+  },
+  {
+   "scope": "archive",
+   "subject": "租房合同已签署完成（附合同 PDF）",
+   "from": "notice@esign.example",
+   "expect": [
+    "document"
+   ],
+   "hard": true,
+   "kind": "document",
+   "ok": true,
+   "hard_failure": false
+  },
+  {
+   "scope": "archive",
+   "subject": "您的家庭财产保险保单已生效",
+   "from": "policy@pingan.example",
+   "expect": [
+    "document"
+   ],
+   "hard": true,
+   "kind": "document",
+   "ok": true,
+   "hard_failure": false
+  },
+  {
+   "scope": "archive",
+   "subject": "个人所得税年度汇算结果",
+   "from": "service@tax.example",
+   "expect": [
+    "document",
+    "account",
+    "other"
+   ],
+   "hard": true,
+   "kind": "document",
+   "ok": true,
+   "hard_failure": false
+  },
+  {
+   "scope": "archive",
+   "subject": "录取通知书电子版",
+   "from": "admission@fudan.example",
+   "expect": [
+    "document"
+   ],
+   "hard": true,
+   "kind": "document",
+   "ok": true,
+   "hard_failure": false
+  },
+  {
+   "scope": "archive",
+   "subject": "账号开通成功：欢迎使用某云",
+   "from": "noreply@cloud.example",
+   "expect": [
+    "account"
+   ],
+   "hard": true,
+   "kind": "account",
+   "ok": true,
+   "hard_failure": false
+  },
+  {
+   "scope": "archive",
+   "subject": "您的验证码是 482913",
+   "from": "noreply@cloud.example",
+   "expect": [
+    "notification"
+   ],
+   "hard": false,
+   "kind": "notification",
+   "ok": true,
+   "hard_failure": false
+  },
+  {
+   "scope": "archive",
+   "subject": "密码重置链接",
+   "from": "noreply@cloud.example",
+   "expect": [
+    "notification",
+    "account"
+   ],
+   "hard": false,
+   "kind": "notification",
+   "ok": true,
+   "hard_failure": false
+  },
+  {
+   "scope": "archive",
+   "subject": "周末去爬山吗？",
+   "from": "zhangwei@mail.example",
+   "expect": [
+    "personal"
+   ],
+   "hard": true,
+   "kind": "personal",
+   "ok": true,
+   "hard_failure": false
+  },
+  {
+   "scope": "archive",
+   "subject": "婚礼请柬 💌",
+   "from": "lina@mail.example",
+   "expect": [
+    "personal"
+   ],
+   "hard": true,
+   "kind": "personal",
+   "ok": true,
+   "hard_failure": false
+  },
+  {
+   "scope": "archive",
+   "subject": "Q3 报告终稿",
+   "from": "boss@corp.example",
+   "expect": [
+    "work"
+   ],
+   "hard": true,
+   "kind": "work",
+   "ok": true,
+   "hard_failure": false
+  },
+  {
+   "scope": "archive",
+   "subject": "AI 周刊 第 42 期：本地模型的新进展",
+   "from": "digest@aiweekly.example",
+   "expect": [
+    "newsletter"
+   ],
+   "hard": false,
+   "kind": "newsletter",
+   "ok": true,
+   "hard_failure": false
+  },
+  {
+   "scope": "archive",
+   "subject": "AI 周刊 第 37 期：长文精读",
+   "from": "digest@aiweekly.example",
+   "expect": [
+    "other",
+    "document",
+    "work",
+    "personal"
+   ],
+   "hard": true,
+   "kind": "held",
+   "ok": true,
+   "hard_failure": false
+  },
+  {
+   "scope": "archive",
+   "subject": "清仓特卖最后一天",
+   "from": "news@shop.example",
+   "expect": [
+    "promotion"
+   ],
+   "hard": false,
+   "kind": "promotion",
+   "ok": true,
+   "hard_failure": false
+  },
+  {
+   "scope": "archive",
+   "subject": "有人回答了你关注的问题",
+   "from": "noreply@zhihu.example",
+   "expect": [
+    "notification"
+   ],
+   "hard": false,
+   "kind": "notification",
+   "ok": true,
+   "hard_failure": false
+  },
+  {
+   "scope": "archive",
+   "subject": "您的快件已签收",
+   "from": "notice@sf.example",
+   "expect": [
+    "notification"
+   ],
+   "hard": false,
+   "kind": "notification",
+   "ok": true,
+   "hard_failure": false
+  },
+  {
+   "scope": "archive",
+   "subject": "2025 年物业费缴费收据",
+   "from": "billing@pm.example",
+   "expect": [
+    "receipt"
+   ],
+   "hard": true,
+   "kind": "receipt",
+   "ok": true,
+   "hard_failure": false
+  },
+  {
+   "scope": "archive",
+   "subject": "体检报告已出，请登录查看",
+   "from": "noreply@hospital.example",
+   "expect": [
+    "document",
+    "account",
+    "other",
+    "notification"
+   ],
+   "hard": false,
+   "kind": "document",
+   "ok": true,
+   "hard_failure": false
+  },
+  {
+   "scope": "inbox",
+   "subject": "物业费账单：请于 10 月 20 日前缴纳",
+   "from": "billing@pm.example",
+   "expect": [
+    "todo",
+    "receipt"
+   ],
+   "hard": true,
+   "kind": "todo",
+   "ok": true,
+   "hard_failure": false
+  },
+  {
+   "scope": "inbox",
+   "subject": "合同第 7 条的问题，麻烦回复确认",
+   "from": "zhao@law.example",
+   "expect": [
+    "todo",
+    "work"
+   ],
+   "hard": true,
+   "kind": "work",
+   "ok": true,
+   "hard_failure": false
+  },
+  {
+   "scope": "inbox",
+   "subject": "下周能把方案再改一版吗？",
+   "from": "boss@corp.example",
+   "expect": [
+    "todo",
+    "work"
+   ],
+   "hard": true,
+   "kind": "work",
+   "ok": true,
+   "hard_failure": false
+  },
+  {
+   "scope": "inbox",
+   "subject": "请补交入职材料（截止本月底）",
+   "from": "hr@corp.example",
+   "expect": [
+    "todo",
+    "work"
+   ],
+   "hard": true,
+   "kind": "todo",
+   "ok": true,
+   "hard_failure": false
+  },
+  {
+   "scope": "inbox",
+   "subject": "报名截止提醒（活动已结束）",
+   "from": "events@devcon.example",
+   "expect": [
+    "notification",
+    "promotion"
+   ],
+   "hard": false,
+   "kind": "notification",
+   "ok": true,
+   "hard_failure": false
+  },
+  {
+   "scope": "inbox",
+   "subject": "新人专享优惠券",
+   "from": "news@shop.example",
+   "expect": [
+    "promotion"
+   ],
+   "hard": false,
+   "kind": "promotion",
+   "ok": true,
+   "hard_failure": false
+  },
+  {
+   "scope": "inbox",
+   "subject": "AI 周刊 第 30 期",
+   "from": "digest@aiweekly.example",
+   "expect": [
+    "newsletter"
+   ],
+   "hard": false,
+   "kind": "newsletter",
+   "ok": true,
+   "hard_failure": false
+  },
+  {
+   "scope": "inbox",
+   "subject": "您的 2025 年 6 月信用卡电子账单",
+   "from": "service@cmbchina.example",
+   "expect": [
+    "receipt",
+    "todo"
+   ],
+   "hard": true,
+   "kind": "receipt",
+   "ok": true,
+   "hard_failure": false
+  },
+  {
+   "scope": "inbox",
+   "subject": "登录提醒：新的设备登录",
+   "from": "noreply@cloud.example",
+   "expect": [
+    "notification",
+    "account"
+   ],
+   "hard": false,
+   "kind": "account",
+   "ok": true,
+   "hard_failure": false
+  },
+  {
+   "scope": "inbox",
+   "subject": "孩子的家长会时间确认",
+   "from": "chen@school.example",
+   "expect": [
+    "todo",
+    "personal"
+   ],
+   "hard": true,
+   "kind": "personal",
+   "ok": true,
+   "hard_failure": false
+  }
+ ]
+}
