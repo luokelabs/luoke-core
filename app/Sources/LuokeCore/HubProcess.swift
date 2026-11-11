@@ -3,7 +3,12 @@ import Foundation
 
 enum AppInfo {
     static let version: String = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "0.1.0.dev1"   // 主控版本号；CFBundleShortVersionString 是给人看的发布号（build_app.sh）
-    static let isLab: Bool = (Bundle.main.bundleIdentifier ?? "").hasSuffix(".lab") || ProcessInfo.processInfo.environment["LUOKE_LAB"] == "1"
+    static let isLab: Bool = labBuild(bundleID: Bundle.main.bundleIdentifier ?? "", environment: ProcessInfo.processInfo.environment)
+    /// 实验室构建按 bundle id 认；LUOKE_LAB=1 只在开发时认（没打包成 .app、开发版）。正式版认了的话，同一个用户的任何程序
+    /// `launchctl setenv` 一下，螺壳下次就带 --lab 起主控：装配件不核签名、socket 谁都放行
+    static func labBuild(bundleID: String, environment: [String: String]) -> Bool {
+        bundleID.hasSuffix(".lab") || (overridesAllowed(bundleID: bundleID) && environment["LUOKE_LAB"] == "1")
+    }
     /// 开发版（ai.luoke.core.dev，10-23）：自己的名字、自己的数据目录，和装着的正式版互不相干
     static let isDev: Bool = (Bundle.main.bundleIdentifier ?? "").hasSuffix(".dev")
     /// 包名（10-23：不叫「螺壳主控」了，就叫「螺壳」）；internal-1026 之前装的是 legacyName，升级时换成新名字
@@ -15,23 +20,30 @@ enum AppInfo {
     }()
     static let socketPath: String = envDir.appendingPathComponent("run/hub.sock").path
     static let resources: URL = Bundle.main.resourceURL ?? URL(fileURLWithPath: ".")
-    /// 自带 Python；开发时没打包成 .app，用环境变量 LUOKE_PYTHON 指一个能跑 luoke_core 的解释器。
+    /// 换主控代码和配方的覆盖（LUOKE_PYTHON、LUOKE_CORE_PATH、LUOKE_RECIPE、LUOKE_RELEASE）只有开发时认：没打包成 .app 的、开发版、实验室构建（按 bundle id，不看
+    /// LUOKE_LAB 这类环境变量）。正式版带着完全磁盘访问，认了的话同一个用户的任何程序 `launchctl setenv` 一下，
+    /// 下次螺壳就替它跑任意 Python（扫描那边审查 11-05 提的）
+    static var allowsCodeOverrides: Bool { overridesAllowed(bundleID: Bundle.main.bundleIdentifier ?? "") }
+    static func overridesAllowed(bundleID id: String) -> Bool { id.isEmpty || id.hasSuffix(".dev") || id.hasSuffix(".lab") }
+    /// 开发、测试用的环境变量（换更新源、允许任意位置的副本、不当安装器）：和上面一样只有开发时认，正式版一律当没设
+    static func devEnvironment(_ key: String) -> String? { allowsCodeOverrides ? ProcessInfo.processInfo.environment[key] : nil }
+    /// 自带 Python；开发时没打包成 .app，用环境变量 LUOKE_PYTHON 指一个能跑 luoke_core 的解释器（正式版不认）。
     static var python: String {
-        if let p = ProcessInfo.processInfo.environment["LUOKE_PYTHON"] { return p }
+        if allowsCodeOverrides, let p = ProcessInfo.processInfo.environment["LUOKE_PYTHON"] { return p }
         return resources.appendingPathComponent("python/bin/python3").path
     }
     static var recipe: String {
-        if let r = ProcessInfo.processInfo.environment["LUOKE_RECIPE"] { return r }
+        if allowsCodeOverrides, let r = ProcessInfo.processInfo.environment["LUOKE_RECIPE"] { return r }
         return resources.appendingPathComponent("recipe.json").path
     }
     static var modelDir: String { envDir.appendingPathComponent("models").path }
-    /// 发布清单：开发时用 LUOKE_RELEASE 指一份；打包时放 Resources/release.json（没有就退回放符号链接）。
+    /// 发布清单：开发时用 LUOKE_RELEASE 指一份（正式版不认）；打包时放 Resources/release.json（没有就退回放符号链接）。
     static var release: String {
-        if let r = ProcessInfo.processInfo.environment["LUOKE_RELEASE"] { return r }
+        if allowsCodeOverrides, let r = ProcessInfo.processInfo.environment["LUOKE_RELEASE"] { return r }
         return resources.appendingPathComponent("release.json").path
     }
-    /// 开发时 luoke_core 包的位置（打包后在自带 Python 的 site-packages 里，不用设）。
-    static var pythonPath: String? { ProcessInfo.processInfo.environment["LUOKE_CORE_PATH"] }
+    /// 开发时 luoke_core 包的位置（打包后在自带 Python 的 site-packages 里，不用设；正式版不认，它会变成 PYTHONPATH）。
+    static var pythonPath: String? { allowsCodeOverrides ? ProcessInfo.processInfo.environment["LUOKE_CORE_PATH"] : nil }
 }
 
 final class HubProcess {
@@ -46,14 +58,13 @@ final class HubProcess {
         try FileManager.default.createDirectory(at: AppInfo.envDir.appendingPathComponent("run"), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         try FileManager.default.createDirectory(at: AppInfo.envDir.appendingPathComponent("logs"), withIntermediateDirectories: true)
         try FileManager.default.createDirectory(atPath: AppInfo.modelDir, withIntermediateDirectories: true)
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: AppInfo.python)
         var args = ["-B", "-m", "luoke_core", "serve", "--recipe", AppInfo.recipe, "--model-dir", AppInfo.modelDir,
                     "--env", AppInfo.envDir.path, "--socket", AppInfo.socketPath]
         if FileManager.default.fileExists(atPath: AppInfo.release) { args += ["--release", AppInfo.release] }
         args.append("--parent-watch")   // 本体没了（哪怕被 kill），主控几秒内自己退出并停掉引擎
         if AppInfo.isLab { args.append("--lab") }
-        p.arguments = args
+        // disclaim：主控在包里，自己照样算螺壳；挡的是它起的包外程序（引擎等，那边由主控再 disclaim 一次，见 Spawn.swift）
+        let p = Spawn.process(AppInfo.python, args)
         var env = ["PATH": "/usr/bin:/bin", "HOME": NSHomeDirectory(), "PYTHONDONTWRITEBYTECODE": "1", "PYTHONNOUSERSITE": "1"]
         if let pp = AppInfo.pythonPath { env["PYTHONPATH"] = pp }
         if let lh = ProcessInfo.processInfo.environment["LUOKE_HOME"] { env["LUOKE_HOME"] = lh }

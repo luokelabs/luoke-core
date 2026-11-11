@@ -9,14 +9,29 @@ import UserNotifications
 struct LuokeCoreApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
 
+    init() {
+        // 本体、主控起包外的程序时经这里带上 disclaim 换成它（Spawn.swift）：不起界面，原地换掉
+        if CommandLine.arguments.count >= 3, CommandLine.arguments[1] == Spawn.disclaimFlag {
+            Spawn.execDisclaimed(Array(CommandLine.arguments.dropFirst(2)))
+        }
+        // 替扫描弹密码框的子进程（ScanElevate.swift）：本体用干净的环境起它，不起界面，弹完就退
+        if CommandLine.arguments.count == 2, CommandLine.arguments[1] == ScanElevate.childFlag { ScanElevate.child() }
+        // 主控跑工具的空闲任务（ToolLauncher.swift）：起工具、核签名、等它退出，不起界面
+        if CommandLine.arguments.count >= 2, CommandLine.arguments[1] == ToolLauncher.flag {
+            ToolLauncher.main(Array(CommandLine.arguments.dropFirst(2)))
+        }
+    }
+
     var body: some Scene {
         // 菜单栏图标和菜单在 MenuBar.swift（NSStatusItem）。SwiftUI 至少要一个场景：留一个空的 Settings，⌘, 改走 SettingsWindow
-        // （10-23：升级时安装器激活主控、走一遍 reopen，SwiftUI 把唯一的场景——设置——当窗口打开了，标题是"“螺壳”设置"，只有一行「主控启动中」）
+        // （10-23：升级时安装器激活主控、走一遍 reopen，SwiftUI 把唯一的场景——设置——当窗口打开了，标题是"“螺壳”设置"，只有一行「主控启动中」）。
+        // 这个场景不会被打开：顶部菜单的「设置…」换掉了，reopen 一律答 false（螺壳只有一个窗口，11-10）
         Settings { EmptyView() }
             .commands {
                 CommandGroup(replacing: .appSettings) {
                     Button("设置…") { SettingsWindow.show() }.keyboardShortcut(",", modifiers: .command)
                 }
+                MainWindowCommands()      // 主窗口的「前往」、收起侧栏（这一份没带主窗口时是空的）
             }
     }
 }
@@ -26,7 +41,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
                                 withCompletionHandler completionHandler: @escaping () -> Void) {
         let info = response.notification.request.content.userInfo
-        DispatchQueue.main.async { DoneAttention.clicked(info) }
+        DispatchQueue.main.async {
+            if MainWindow.notificationClicked(info) { return }     // agent 核心发的：打开主窗口，简报的在「今天」最上面打开简报
+            if MailHelper.notificationClicked(info) { return }     // 邮件助手的：打开它的页面
+            DoneAttention.clicked(info)
+        }
         completionHandler()
     }
 
@@ -39,6 +58,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     func applicationDidFinishLaunching(_ notification: Notification) {
         if let i = CommandLine.arguments.firstIndex(of: "--render-ui"), i + 1 < CommandLine.arguments.count {
             UIRender.run(to: CommandLine.arguments[i + 1])      // 截图用：画完就退，不起主控
+            exit(0)
+        }
+        if let i = CommandLine.arguments.firstIndex(of: "--check-window"), i + 1 < CommandLine.arguments.count {
+            #if canImport(LuokeWindow)
+            AgentCore.checkWindow(to: CommandLine.arguments[i + 1])     // 打包后的自检：画一遍主窗口就退，不起主控
+            #endif
             exit(0)
         }
         // 开发版专用的测试入口：照「检查更新」的路子用一个本地 DMG 升级自己（ADR 0012 的换包在 16 GB 测试机上实测用）
@@ -61,6 +86,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 return
             }
             // 别的副本（旧版、构建目录里的）：只说明一声就退，不起主控进程
+            // 一个窗口的例外：这一份不是装好的螺壳，不开主窗口，这时只有这一个框
             let a = NSAlert()
             a.messageText = "这不是装好的螺壳"
             a.informativeText = "请打开「应用程序」文件夹里的「\(AppInfo.appName)」。"
@@ -73,43 +99,77 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         // 上一次换包的结果（ADR 0012）：没成的话现在跑的是脚本放回的旧版，"刚升级"的标记作废，照实说一声
         if let r = Swap.takeResult(), !r.ok {
             try? FileManager.default.removeItem(at: Installer.upgradeFile)
-            let a = NSAlert()
-            a.messageText = "升级没完成"
-            a.informativeText = (r.why.contains("Operation not permitted")
+            let text = (r.why.contains("Operation not permitted")
                 ? "macOS 的「App 管理」权限挡住了这次替换。到 系统设置 → 隐私与安全性 → App 管理 里打开「\(AppInfo.appName)」，再检查一次更新。"
                 : r.why + "。") + "原来的螺壳照常能用。"
-            DispatchQueue.main.async { a.runModal() }
+            // 带主窗口：盖在主窗口上的一张卡片，不弹框（11-10：只有一个窗口）
+            if !UpgradeNotDone.show(text) {
+                let a = NSAlert()
+                a.messageText = UpgradeNotDone.title
+                a.informativeText = text
+                DispatchQueue.main.async { a.runModal() }
+            }
         }
         CommandLineTool.repoint()               // 改名、换位置以后命令行链接跟上
         Updater.cleanupAfterUpgrade()          // 上一次经"检查更新"升级时挂的 DMG：卸下、删掉（首次设置没走完也做，luoke-core#28）
+        // 用户自己打开螺壳就开主窗口；登录时自动启动、点通知或链接拉起的不开。首次运行、升级的窗口先出，走完再开（#112）
+        let byUser = Self.openedByUser(notification)
         let preselect = Installer.takePreselect()
         if FirstRun.needed() {
             _ = Installer.takeUpgrade()           // 首次运行没走完就被升级了：照首次运行走，标记作废
+            MainWindow.openAfterSetup = byUser
             FirstRun.show(preselect: preselect)   // 模型准备好之后（fetch 那一步）再起主控，引擎启动时才看得见模型
         } else {
             HubModel.shared.startHub()
             if let up = Installer.takeUpgrade() {   // 安装器刚把本体换成这一版：应用、引擎、模型也更新到清单的版本，然后再拉起常驻配件
-                // 登录项按 bundle 记位置；改名换了路径（螺壳主控.app → 螺壳.app）以后重新登记一次。用户关掉过的（notRegistered）不动
-                if SMAppService.mainApp.status != .notRegistered { try? SMAppService.mainApp.register() }
+                LoginItem.repoint()     // 登记找不到了、或换了位置才重新登记；每登记一次系统就弹一次「已添加登录项」（#130）
+                MainWindow.openAfterSetup = byUser && preselect == nil
                 UpgradeWindow.show(from: up.from, to: up.to, then: preselect)   // 应用的安装器顺带升级了螺壳：升级完到「应用」窗口里接着装它
             } else {
                 Accessories.launchResident()   // 主控是唯一的登录项：常驻配件由它在登录时拉起（V1 §1）
                 if let p = preselect { FirstRun.showAdd(accessory: p) }
+                else if byUser { MainWindow.show() }
             }
         }
         Accessories.watchResident()
     }
 
+    /// 这次启动是用户自己打开的（访达、启动台、程序坞，或安装器、升级换包后打开的）。不算：系统按登录项拉起的；
+    /// 为打开链接（luoke://memory）、点通知、恢复上次的窗口而起的（launchIsDefault 是 false）。只在 applicationDidFinishLaunching 里准
+    static func openedByUser(_ launch: Notification) -> Bool {
+        let isDefault = launch.userInfo?[NSApplication.launchIsDefaultUserInfoKey] as? Bool ?? true
+        return isDefault && !byLoginItem()
+    }
+
+    /// 正在处理的启动（或再次打开）事件带着「按登录项拉起」的标记
+    static func byLoginItem() -> Bool {
+        let e = NSAppleEventManager.shared().currentAppleEvent
+        return e?.paramDescriptor(forKeyword: AEKeyword(keyAEPropData))?.enumCodeValue == OSType(keyAELaunchedAsLogInItem)
+    }
+
     /// 用户在主控运行时又打开了它（Dock / 启动台），或者某个应用的安装器交过预选来：有预选就接着走加装（安装器通常只激活我们，预选由状态定时器取走；这里兜底）
-    /// 没有预选时（#19、#20）：有开着的窗口（首次运行、升级、卸载……）就叫到前面；都没有就弹主控的小窗口，菜单栏图标找不到也有入口
+    /// 没有预选时（#19、#20）：有开着的窗口（首次运行、升级、卸载……）就叫到前面；都没有就弹主控的小窗口，菜单栏图标找不到也有入口。
+    /// 带主窗口的这一份只有主窗口：首次运行、升级也画在里面，叫回来的都是它（HomeWindow 也改开主窗口）
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         // 一律答 false：要开的窗口这里都自己开了；答 true 会让 SwiftUI 再按默认做法开它的场景（设置）
+        if Self.byLoginItem() { return false }      // 已经在跑，登录时系统又按登录项拉了一次：不是用户打开的（#112）
         if let p = Installer.takePreselect() {
             if FirstRun.needed() { FirstRun.show(preselect: p) } else { FirstRun.showAdd(accessory: p) }
             return false
         }
+        let ready = !Installer.isInstallerLaunch() && Installer.isCanonicalCopy && !FirstRun.needed()
+        // 带了主窗口（luoke-core#68）：再次打开螺壳就是打开它；首次运行、升级的窗口开着时先把它们叫回来，走完再开主窗口（#112）
+        if ready && MainWindow.available && !FirstRun.isOpen && !UpgradeWindow.isOpen {
+            MainWindow.show()
+            return false
+        }
+        if !Installer.isInstallerLaunch() && Installer.isCanonicalCopy { MainWindow.openAfterSetup = true }
+        // 首次运行、升级画在主窗口里，主窗口被关了：再开主窗口就回到它们（窗口关了它们还在）
+        if FirstRun.showing || MainWindow.showing(UpgradeWindow.hostID) { MainWindow.show(); return false }
         if AppWindows.bringBack() { return false }
-        if !Installer.isInstallerLaunch() && Installer.isCanonicalCopy && !FirstRun.needed() { HomeWindow.show() }
+        if Installer.isInstallerLaunch() || !Installer.isCanonicalCopy { return false }
+        // 首次运行没走完、窗口被关了：回到向导（之前什么都不做，菜单停在「启动中」，只有退出再开才回得去）
+        if FirstRun.needed() { FirstRun.show() } else { HomeWindow.show() }
         return false
     }
 
@@ -120,6 +180,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        BundledApps.all.forEach { $0.stop() }
+        MainWindow.stop()
         HubModel.shared.stopHub()
     }
 }
@@ -155,13 +217,19 @@ final class HubModel: ObservableObject {
         }
         hubExit = nil
         startedAt = Date()
-        do {
-            try process.start()
-            hubError = nil
-            startFailed = false
-        } catch {
-            hubError = "螺壳进程起不来：\(error.localizedDescription)"
+        let problem = CodeSigning.bundleProblem      // 它们带着螺壳的权限：包不对就都不起。检查更新还要留着
+        if let problem {
+            hubError = "\(problem)，请重新安装螺壳。"
             startFailed = true
+        } else {
+            do {
+                try process.start()
+                hubError = nil
+                startFailed = false
+            } catch {
+                hubError = "螺壳进程起不来：\(error.localizedDescription)"
+                startFailed = true
+            }
         }
         if pathMonitor.pathUpdateHandler == nil && ProcessInfo.processInfo.environment["LUOKE_TEST_METERED"] != "1" {
             pathMonitor.pathUpdateHandler = { [weak self] path in
@@ -177,6 +245,10 @@ final class HubModel: ObservableObject {
             if let p = Installer.takePreselect() { FirstRun.showAdd(accessory: p) }   // 某个应用的安装器把预选交过来了（它只激活我们，不走 reopen）
         }
         refresh()
+        if problem == nil {
+            MainWindow.startCore()     // 主控起来了：起 agent 核心、连上它（带了主窗口才有；重复调不要紧）
+            BundledApps.all.forEach { $0.start() }      // 收进来的应用也由本体起（带了才有）
+        }
         updateTimer = Timer.scheduledTimer(withTimeInterval: 3600, repeats: true) { [weak self] _ in
             Updater.autoCheckIfDue { f in self?.updateFound = f }
         }
@@ -226,7 +298,7 @@ final class HubModel: ObservableObject {
     private var lastAutoDownload = Date.distantPast
     private var autoDownloadTries = 0
     func autoDownload(_ st: HubStatus) {
-        guard !FirstRun.needed(), FirstRun.window?.isVisible != true, UpgradeWindow.window?.isVisible != true, Manifests.hasRelease,
+        guard !FirstRun.needed(), !FirstRun.isOpen, !UpgradeWindow.isOpen, Manifests.hasRelease,
               !st.neededDownloads.isEmpty, !st.downloading, !meteredNetwork else { return }
         let wait = min(1800.0, 30.0 * pow(2.0, Double(autoDownloadTries)))   // 30 s、1 分、2 分……最多半小时
         guard Date().timeIntervalSince(lastAutoDownload) > wait else { return }
@@ -274,7 +346,7 @@ final class HubModel: ObservableObject {
     var lightState: String {
         if unreachable { return "error" }
         guard let st = status else { return "offline" }
-        if st.breaker != nil || !st.engineAlive { return "error" }
+        if st.breaker != nil || (!st.engineAlive && !st.engineMissing) { return "error" }
         if !st.engineReady { return "offline" }
         if st.job != nil || st.interactive { return "busy-50" }
         if st.backgroundState != "running" { return "unloaded" }
@@ -285,25 +357,28 @@ final class HubModel: ObservableObject {
 /// 设置窗口（品牌规范的设置行：左图标、标题 + 说明、右控件；分组卡片）
 struct SettingsView: View {
     @EnvironmentObject var model: HubModel
-    @State private var loginItem = SMAppService.mainApp.status == .enabled
-    @State private var loginError: String?
 
     var body: some View {
         LKPage {
-            if let st = model.status { sections(st) }
-            else { LKNote(icon: "exclamationmark.triangle", text: model.hubError ?? "螺壳启动中", kind: model.hubError == nil ? .info : .danger) }
+            Text("设置").font(.system(size: 20, weight: .semibold))
+            HubModelSettings()
+            HubPrivacySettings(uninstallBack: { SettingsWindow.show() })
         } footer: {
             Spacer()
             Button("完成") { NSApp.keyWindow?.close() }.buttonStyle(LKPrimaryButton())
         }
         .frame(width: 560, height: 680)
     }
+}
 
-    private func header(_ t: String) -> some View {
+/// 设置里归主控的两块（11-09 负责人定）：菜单栏「设置…」的窗口把两块拼在一起；主窗口「设置」的「模型」「隐私」两个标签
+/// 各画一块（`AgentCore.settingsContent`），不再另弹这个窗口。
+enum SettingsParts {
+    static func header(_ t: String) -> some View {
         Text(t).font(.system(size: 11, weight: .medium)).foregroundStyle(Color.lkMuted).padding(.top, 20).padding(.bottom, 8)
     }
 
-    private func info(_ label: String, _ value: String) -> some View {
+    static func info(_ label: String, _ value: String) -> some View {
         HStack(alignment: .top) {
             Text(label).font(.system(size: 14))
             Spacer(minLength: 16)
@@ -312,18 +387,40 @@ struct SettingsView: View {
         .padding(.horizontal, 16).padding(.vertical, 10)
     }
 
-    private var divider: some View { Divider().overlay(Color.lkBorder) }
+    static var divider: some View { Divider().overlay(Color.lkBorder) }
+
+    /// 主控还没起来时的那一句
+    @ViewBuilder static func starting(_ model: HubModel) -> some View {
+        LKNote(icon: "triangle-alert", text: model.hubError ?? "螺壳启动中", kind: model.hubError == nil ? .info : .danger)
+    }
+}
+
+/// 「模型」那一块：通用（能耗、电池、登录时启动）、下载、模型、高级（本机接口）
+struct HubModelSettings: View {
+    @EnvironmentObject var model: HubModel
+    @State private var loginItem = SMAppService.mainApp.status == .enabled
+    @State private var loginError: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if let st = model.status { sections(st) } else { SettingsParts.starting(model) }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func header(_ t: String) -> some View { SettingsParts.header(t) }
+    private func info(_ label: String, _ value: String) -> some View { SettingsParts.info(label, value) }
+    private var divider: some View { SettingsParts.divider }
 
     @ViewBuilder private func sections(_ st: HubStatus) -> some View {
-        Text("设置").font(.system(size: 20, weight: .semibold))
         header("通用")
         LKGroup {
-            LKSettingRow(icon: "gauge.with.dots.needle.50percent", title: "能耗模式") {
+            LKSettingRow(icon: "gauge", title: "能耗模式") {
                 LKSegmented(options: [("full", "全速"), ("balanced", "均衡"), ("quiet", "静音")],
                             selection: Binding(get: { st.powerMode }, set: { model.setPowerMode($0) }))
             }
             divider
-            LKSettingRow(icon: "battery.75percent", title: "使用电池时仍运行后台") {
+            LKSettingRow(icon: "battery-medium", title: "使用电池时仍运行后台") {
                 Toggle("", isOn: Binding(get: { st.backgroundOnBattery }, set: { model.setBackgroundOnBattery($0) }))
                     .toggleStyle(.switch).controlSize(.small).tint(.lkPrimary).labelsHidden()
             }
@@ -333,7 +430,7 @@ struct SettingsView: View {
                             ?? (SMAppService.mainApp.status == .requiresApproval ? "要在「系统设置 › 通用 › 登录项」里允许一次。" : nil)) {
                 Toggle("", isOn: Binding(get: { loginItem }, set: { on in
                     loginError = nil
-                    do { if on { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() } }
+                    do { if on { try LoginItem.register() } else { try LoginItem.unregister() } }
                     catch { loginError = error.localizedDescription; NSLog("登录项：%@", error.localizedDescription) }
                     loginItem = SMAppService.mainApp.status == .enabled
                 }))
@@ -353,9 +450,9 @@ struct SettingsView: View {
                 }
                 if !st.neededDownloads.isEmpty && !st.downloading {
                     divider
-                    LKSettingRow(icon: "arrow.down.circle", title: "还缺：" + st.neededDownloads.joined(separator: "、"),
+                    LKSettingRow(icon: "circle-arrow-down", title: "还缺：" + st.neededDownloads.joined(separator: "、"),
                                  detail: model.meteredNetwork ? "当前网络按流量计费或开启了低数据模式，不会自动下载。" : nil) {
-                        Button { model.retryDownloads() } label: { Label("重试", systemImage: "arrow.clockwise") }.buttonStyle(LKSecondaryButton())
+                        Button { model.retryDownloads() } label: { LKLabel("重试", icon: "rotate-cw") }.buttonStyle(LKSecondaryButton())
                     }
                 }
             }
@@ -364,7 +461,7 @@ struct SettingsView: View {
         LKGroup {
             let choices = Manifests.tierChoices(memGB: Diagnostics.memGB())
             if choices.count > 1 {
-                LKSettingRow(icon: "internaldrive", title: "占多少空间",
+                LKSettingRow(icon: "hard-drive", title: "占多少空间",
                              detail: choices.map { "\($0.label) \(ModelName.display($0.base)) 约 \(String(format: "%.0f", $0.sizeGB)) GB" }.joined(separator: "，")
                                 + "。换了会下载另一个，下完自动切换。") {
                     Picker("", selection: Binding(get: { st.pendingTier ?? st.tier }, set: { model.setTier($0) })) {     // 选了还没换过去的，显示选的那个
@@ -395,20 +492,49 @@ struct SettingsView: View {
         header("高级")
         EndpointView()
         // 不常用、会删东西的放最下面（10-23：卸载、导出诊断信息不放在一打开就点得到的地方）
+    }
+}
+
+/// 「隐私」那一块：推理只在本机、记忆（带了记忆时）、关于（版本、导出诊断信息、卸载）。uninstallBack：卸载页点「取消」「完成」回哪
+struct HubPrivacySettings: View {
+    @EnvironmentObject var model: HubModel
+    var uninstallBack: (() -> Void)? = nil
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            SettingsParts.header("隐私")
+            LKGroup {
+                LKSettingRow(icon: "lock", title: "推理只在本机", detail: "模型在这台 Mac 上跑，没有遥测。") { EmptyView() }
+                if Memory.bundled {
+                    SettingsParts.divider
+                    LKSettingRow(icon: "brain", title: "记忆") {
+                        Button("打开") { Memory.open() }.buttonStyle(LKSecondaryButton())
+                    }
+                }
+            }
+            if let st = model.status { about(st) } else { SettingsParts.starting(model) }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func header(_ t: String) -> some View { SettingsParts.header(t) }
+    private var divider: some View { SettingsParts.divider }
+
+    @ViewBuilder private func about(_ st: HubStatus) -> some View {
         header("关于")
         LKGroup {
             if let rel = st.release {
-                LKSettingRow(icon: "info.circle", title: "螺壳版本") {
+                LKSettingRow(icon: "info", title: "螺壳版本") {
                     Text(rel.hasPrefix("local-") ? "\(rel)（本机版，没上传）" : rel).font(.system(size: 13)).foregroundStyle(Color.lkMuted).textSelection(.enabled)
                 }
                 divider
             }
-            LKSettingRow(icon: "square.and.arrow.up", title: "导出诊断信息") {
+            LKSettingRow(icon: "share", title: "导出诊断信息") {
                 Button("导出") { Diagnostics.export(model: model) }.buttonStyle(LKSecondaryButton())
             }
             divider
-            LKSettingRow(icon: "trash", title: "卸载螺壳") {
-                Button("卸载") { SettingsWindow.window?.close(); Uninstall.show(preselect: UninstallModel.all, back: { SettingsWindow.show() }) }.buttonStyle(LKPrimaryButton(destructive: true))
+            LKSettingRow(icon: "trash-2", title: "卸载螺壳") {
+                Button("卸载") { SettingsWindow.window?.close(); Uninstall.show(preselect: UninstallModel.all, back: uninstallBack) }.buttonStyle(LKPrimaryButton(destructive: true))
             }
         }
     }
@@ -454,9 +580,11 @@ enum Accessories {
         let type: String
         let app: URL
         let version: String
+        var bundled = false       // 在本体里（BundledApps），app 是螺壳自己，没有单独的 .app
     }
 
-    static func installed() -> [Manifest] {
+    /// includeDisabled：连用户停用了的本体里的应用也列（「应用」窗口、卸载全部要看到它）
+    static func installed(includeDisabled: Bool = false) -> [Manifest] {
         let home = FileManager.default.homeDirectoryForCurrentUser
         var out: [Manifest] = []
         for dir in [home.appendingPathComponent("Applications"), home.appendingPathComponent("Library/Input Methods")] {
@@ -469,6 +597,11 @@ enum Accessories {
                                     resident: o["resident"] as? Bool ?? false, type: o["type"] as? String ?? "app", app: app,
                                     version: o["version"] as? String ?? ""))
             }
+        }
+        for b in BundledApps.all {                // 本体里那份盖过 ~/Applications 里还没迁走的旧包
+            guard let m = b.manifest else { continue }
+            out.removeAll { $0.bundleID == m.bundleID }
+            if includeDisabled || b.enabled { out.append(m) }
         }
         return out
     }
@@ -494,9 +627,14 @@ enum Accessories {
     /// 拉起要常驻的配件，入口后加 --resident（系统拉起的配件和组件配件不在此列）。已在运行的不碰（再拉只会变成"再次打开"）。
     static func launchResident() {
         // 压着不重启的（升级中排队等换装、正在卸载的）不拉（luoke-top 10-23 核查：之前升级时每装好一项就把它们拉起来、再按路径结束）
-        for m in installed() where m.type == "app" && wantsResident(m) && !isRunning(m.bundleID) && !noRestart.contains(m.bundleID) {
+        for m in installed() where m.type == "app" && wantsResident(m) && !isRunning(m.bundleID) && !noRestart.contains(m.bundleID) && !retired(m) {
             launch(m)
         }
+    }
+
+    /// 并进本体以后不再单独拉起的：旧的「螺壳 agent.app」（luoke-core#68，主窗口和 agent 核心在本体里；它还装着的话手动删）
+    static func retired(_ m: Manifest) -> Bool {
+        m.bundleID == AgentProcess.oldBundleID && MainWindow.available
     }
 
     static func launch(_ m: Manifest) {
@@ -512,7 +650,7 @@ enum Accessories {
                                                                      object: nil, queue: .main) { note in
             guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
                   let bid = app.bundleIdentifier, !noRestart.contains(bid), let m = installed().first(where: { $0.bundleID == bid }),
-                  m.type == "app", wantsResident(m) else { return }
+                  m.type == "app", wantsResident(m), !retired(m) else { return }
             let exited = HubModel.shared.status?.exited[m.accessory] ?? 0
             if Date().timeIntervalSince1970 - exited < 30 { return }     // 它自己说了要退出
             var times = (restarts[m.accessory] ?? []).filter { Date().timeIntervalSince($0) < 600 }

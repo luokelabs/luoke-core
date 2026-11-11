@@ -112,14 +112,42 @@
    "revision": "914f7f8",
    "quant": "bf16",
    "license": "Apache-2.0",
-   "wired_gb": 1.5,
-   "load_secs": 2,
-   "size_gb": 0.6,
+   "wired_gb": 2.8,
+   "media_wired_gb": 4.4,
+   "load_secs": 3,
+   "size_gb": 1.5,
    "cache_mb": 512,
    "dims": 768,
    "vector_space": "embeddinggemma-2/1",
-   "_vector_space": "向量空间（2026-10-16 应 digup 加）：配件拿它判断旧向量还能不能和新算的放在一起比，只比相等、不解析。/1 就是 digup 参考向量集 vector_version 1 那个空间（主控 10-16 实测文字 5 条余弦 ≥ 0.999）。换模型或引擎后，新向量对参考集仍然 ≥ 0.999 就不变，否则后面的数加一",
-   "_待定": "2026-10-16 加（提议、10-19 认可，顶层 ADR 0018：全生态推理归主控，digup 改调 /v1/embed）。权重 google/embeddinggemma-2 @ 914f7f8 的 mlx bf16（digup 线上是 llama.cpp Q8_0，两者余弦 ≥ 0.999、索引兼容）。wired_gb、load_secs、size_gb 是占位，真机实测后改。还没分配到任何档（assignment 里没有）：不下载、不进发布清单，digup.embed 在各档答 unsupported。分配前要：引擎包的 mlx-vlm 能加载它（oMLX 0.7.0 带的 0.7.1 没有 EmbeddingGemma 2 的模型类型，digup 用的是 git fec3f50）、权重上传（逐次批）、对 digup 参考向量集余弦 ≥ 0.999"
+   "_vector_space": "向量空间（2026-10-16 加）：配件拿它判断旧向量还能不能和新算的放在一起比，只比相等、不解析。/1 就是参考向量集（luoke-search 的 Tests/Reference/vectors.json，拷自 digup，vector_version 1）那个空间。换模型或引擎后，新向量对参考集仍然 ≥ 0.999 就不变，否则后面的数加一",
+   "_内存": "2026-11-02 实测（M3 Pro 36 GB，实验室主控按 16、32、128 三档各起一次，oMLX 0.7.2 自带的 mlx-vlm 0.7.8，只有文字，不设底座）：嵌入进程 1.9–2.9 s 就绪；空闲约 1.4–1.5 GB，其中约 1 GB 是 GPU 内存，空闲时不算 wired；后台建索引（主控切成 8 条一份）最高 2.5 GB；一次 32 条、每条 2048 token 最高 3.0 GB（英文）、3.6 GB（中文），wired_gb 当时按最坏的取 3.7（2026-11-04 起改为 2.8，见本条末尾）；算的时候系统 wired 多出约 2.6 GB。size_gb 是权重目录的大小（1,525,810,123 字节）。权重 google/embeddinggemma-2 @ 914f7f8 的 mlx bf16（参考向量是 llama.cpp Q8_0 做的，两者余弦 ≥ 0.999）。16 GB 档 2026-11-02 在一台 M2 16 GB 的 Mac mini 上量（不是平时的 16 GB 测试机；实验室主控 16 档，9B 底座、输入法打分 0.8B、嵌入三个都在；机器上还开着别的程序，开始时 wired 1.5 GB、交换区已用 3.0 GB）：两个专用进程约 4 s 就绪；底座每次都装得下（5.5–5.9 s），内存闸一次没拒；嵌入进程空闲 0.9–1.3 GB、后台建索引最高 2.4 GB，打分进程约 2.1 GB，引擎带 9B 约 6.6 GB；内存压力只在底座加载和刚开始生成的几秒里到 warn，没到 critical，后台没停；约 11 分钟里交换区从 3.0 GB 涨到 4.3 GB，都涨在 9B 加载的那几秒。单条查询 p50 34 ms、p90 37 ms（M2；M1 没量），底座生成时 p90 50 ms；后台请求还在算时来的查询要等手上那一份（8 条）算完，这次 3 条各等了 2.5–2.8 s；用户开始打字以后，已经在算的那次后台请求还会算完。只建索引每秒约 1 条（每 32 条约 15 s，之后按功耗档歇同样长，答 lane_busy；这批文字偏长），和后台邮件一起时 179 s 128 条。2026-11-04 在同一台 M3 Pro 上重量（每次新起嵌入进程，看进程一生的 phys_footprint 最高值；中文，每条截到 2048 token）：嵌入进程自己一次只算 16 条，所以一次 16 条和 32 条都是 3.7 GB；一次 8 条 2.66 GB，32 条分 4 次每次 8 条也是 2.66 GB。主控从这天起 user-waiting 也按 8 条一份交给嵌入进程（之前只有后台切份），所以 wired_gb 按 8 条取 2.8；16 GB 档 9B 在内存里时只收文字的嵌入进程就能起",
+   "_media_wired_gb": "2026-11-03 加：嵌入进程连视觉、声音一起加载时（任务参数有 image_batch / audio_batch 的档）按这个算预算，只有文字时照旧按 wired_gb。数字出自 luoke-search 10-20 的实验室主控（oMLX 0.7.1rc1，开了图片和声音；0.7.2 的 mlx、transformers 版本和它一样，媒体 4 条参考向量在两个包上逐位相同）：建索引时 phys_footprint 3.1–3.4 GB，峰值 4.3 GB，按峰值往上取 4.4。32 档预算 20 GB 扣掉打分 2.7、嵌入 4.4 剩 12.9，9B 底座（wired_gb 10）照样放得下，天花板照常降。11-04 16 GB 测试机上主控放行的最坏情况（8 张 280、1 张 1120）都在 4.3 GB 以内，4.4 照旧；8 张 1120 会到 13.3 GB，所以主控按任务参数 max_image_tokens、single_image_budgets 拦下"
+  },
+  "qwen3-asr-0.6b-8bit": {
+   "dir": "Qwen3-ASR-0.6B-8bit",
+   "kind": "special",
+   "source": "mlx-community/Qwen3-ASR-0.6B-8bit",
+   "revision": "89e96d9",
+   "quant": "8bit",
+   "license": "Apache-2.0",
+   "wired_gb": 1.8,
+   "load_secs": 4,
+   "size_gb": 1.0,
+   "cache_mb": 512,
+   "_内存": "2026-11-05：16 GB 的 M1 上量的：冷加载加第一次解码约 4 s，热的时候 6 秒左右的一句终稿 p50 / p90 351 / 437 ms，峰值 1.77 GB；M5 Max 上转写进程 2.8 s 就绪，6 秒的中文一句约 85 ms。wired_gb 按峰值往上取 1.8，等 16 GB 测试机上经主控量过再定"
+  },
+  "qwen3-asr-1.7b-8bit": {
+   "dir": "Qwen3-ASR-1.7B-8bit",
+   "kind": "special",
+   "source": "mlx-community/Qwen3-ASR-1.7B-8bit",
+   "revision": "a8379a2",
+   "quant": "8bit",
+   "license": "Apache-2.0",
+   "wired_gb": 3.5,
+   "load_secs": 5,
+   "size_gb": 2.5,
+   "cache_mb": 512,
+   "_内存": "2026-11-06：32、128 档用（定：加 5 dB 噪声以后字准确率 98.1% 对 0.6B 的 94.8%，中英混说字错率 7.6% 对 20.7%；不加噪声 99.3% 对 98.8%）。M5 Max 上用引擎包的 Python 直接跑转写进程：1.1 s 就绪，峰值 3.36 GB，单独一句 6 秒的中文约 130 ms（不经主控，只量了这几句，不是中位数）；评测那 44 句在 M5 Max 上整段识别的 p50 是 106 ms（0.6B 65 ms），这是 44 句的中位数，所以和 130 ms 对不上。review 时量的峰值约 3.5 GB。wired_gb 取 3.5；load_secs 按 0.6B 在 M1 上的 4 s 往上取，等 32 GB 测试机上经主控量过再定。32 档会超预算：打分 2.7 + 嵌入（带媒体）4.4 + 转写 3.5 + 9B 底座 10 = 20.6，超过 guard_gb 20（转写用 0.6B 时是 18.9）。语音开着、嵌入带媒体加载时，算出的引擎天花板是 9.4，比底座的 10 低；apply_budget 怕卸掉底座，这一步不降，天花板停在 12.9–16.5（看三个进程谁先起），底座和转写都留在内存里，多出的 0.6 GB 预算管不到，真实内存不够时两边互相挤，32 档的 luoke-ime.tidy 正好会碰上。128 档 guard_gb 100，没有这个问题。32 GB 测试机要量：四个都在时的 wired、内存压力、交换区，转写终稿和 luoke-ime.tidy 的用时，底座有没有被挤掉。下一版内部版在 32 GB 测试机上量，顶不住就把 32 档退回 0.6B"
   }
  },
  "assignment": {
@@ -127,21 +155,27 @@
    "base": "qwen3.5-9b-4bit",
    "special": {
     "luoke-ime.rerank": "qwen3.5-0.8b-base-4bit",
-    "luoke-ime.predict": "qwen3.5-0.8b-base-4bit"
+    "luoke-ime.predict": "qwen3.5-0.8b-base-4bit",
+    "luoke-search.embed": "embeddinggemma-2",
+    "luoke-ime.transcribe": "qwen3-asr-0.6b-8bit"
    }
   },
   "32": {
    "base": "qwen3.5-9b-4bit",
    "special": {
     "luoke-ime.rerank": "qwen3.5-0.8b-base-4bit",
-    "luoke-ime.predict": "qwen3.5-0.8b-base-4bit"
+    "luoke-ime.predict": "qwen3.5-0.8b-base-4bit",
+    "luoke-search.embed": "embeddinggemma-2",
+    "luoke-ime.transcribe": "qwen3-asr-1.7b-8bit"
    }
   },
   "128": {
    "base": "gemma-4-26b-8bit",
    "special": {
     "luoke-ime.rerank": "qwen3.5-0.8b-base-4bit",
-    "luoke-ime.predict": "qwen3.5-0.8b-base-4bit"
+    "luoke-ime.predict": "qwen3.5-0.8b-base-4bit",
+    "luoke-search.embed": "embeddinggemma-2",
+    "luoke-ime.transcribe": "qwen3-asr-1.7b-8bit"
    }
   }
  },
@@ -517,8 +551,8 @@
    },
    "_说明": "luoke-mail 0.14.0（10-17 同意）：一串往来最后 6 封、每封最多 600 字，判断现在等谁（user_turn / other_turn / done）、从哪天起、卡在哪；同步后后台跑，一次最多 10 串。预算按 luoke-mail 注册页任务表（每条目 60 + 固定 100）"
   },
-  "digup.embed": {
-   "accessory": "digup",
+  "luoke-search.embed": {
+   "accessory": "luoke-search",
    "kind": "embed",
    "main": false,
    "params": {
@@ -527,9 +561,141 @@
      "max_tokens": 2048,
      "max_chars": 32000,
      "max_total_chars": 320000
+    },
+    "32": {
+     "image_batch": 8,
+     "image_budgets": [
+      70,
+      140,
+      280,
+      560,
+      1120
+     ],
+     "max_image_tokens": 2240,
+     "single_image_budgets": [
+      560,
+      1120
+     ],
+     "audio_batch": 2,
+     "max_image_bytes": 4000000,
+     "max_audio_bytes": 1100000,
+     "max_audio_secs": 30
+    },
+    "128": {
+     "image_batch": 8,
+     "image_budgets": [
+      70,
+      140,
+      280,
+      560,
+      1120
+     ],
+     "max_image_tokens": 2240,
+     "single_image_budgets": [
+      560,
+      1120
+     ],
+     "audio_batch": 2,
+     "max_image_bytes": 4000000,
+     "max_audio_bytes": 1100000,
+     "max_audio_secs": 30
     }
    },
-   "_说明": "2026-10-16 提议、10-19 认可（顶层 ADR 0018）：digup 搜索去掉自带模型，经主控算向量（/v1/embed，专用模型直连、常驻）。texts 由 digup 加好检索提示前缀；batch 是一次最多几条；max_tokens 是每条按 token 截到多长（和 digup 一样 2048，含 <bos>/<eos>）；max_chars 只防过大的请求（2048 个 token 的英文约八九千字，留足余量），不是截断。max_total_chars 是一次请求的文字总量上限（约 32 条 × 1 万字；超了答 input_too_long，请分几次发）。满 768 维、float16，不截维。模型还没分配到任何档，所以现在各档都答 unsupported。pass/fail：对 digup 参考向量集余弦 ≥ 0.999"
+   "_说明": "2026-10-16 提议、10-19 认可（顶层 ADR 0018）：全生态推理归主控，深度搜索 luoke-search（原 digup）不带模型，经主控算向量（/v1/embed，专用模型直连、常驻）；任务名 2026-11-02 由 digup.embed 改成 luoke-search.embed（luoke-core#16），接口不变。texts 由 luoke-search 加好检索提示前缀；batch 是一次最多几条；max_tokens 是每条按 token 截到多长（和 luoke-search 一样 2048，含 <bos>/<eos>）；max_chars 只防过大的请求（2048 个 token 的英文约八九千字，留足余量），不是截断。max_total_chars 是一次请求的文字总量上限（约 32 条 × 1 万字；超了答 input_too_long，请分几次发）。满 768 维、float16，不截维。32、128 两档也收图片和声音（下面的 _媒体）；16 档只收文字。三档都分到 embeddinggemma-2；哪一档开着由发布评测定（tools/release_evals.json，每档各评：对 luoke-search 参考向量集余弦都 ≥ 0.999）",
+   "_媒体": "2026-11-03 定：赶得上 beta 2 就打开图片和声音。参数和 luoke-search 10-20 起的实验室主控用的一样（照草案 docs/research/embed-multimodal-draft.md）：image_batch、audio_batch 是一次最多几张图、几段声音，image_budgets 是允许的图片 token 预算，max_image_bytes、max_audio_bytes 是每条解码前的字节数，max_audio_secs 是每段声音最长几秒。有 image_batch / audio_batch 的档，嵌入进程连视觉、声音一起加载，内存按模型的 media_wired_gb 算。16 档先不开：11-02 在 16 GB 的 Mac mini 上只有文字时，9B 底座、打分、嵌入三个一起已经让交换区涨了 1.3 GB、内存压力到 warn；开了媒体嵌入进程要多占约 1–2 GB（峰值 4.3 GB），在 16 GB 上还没量过。16 档要开，先在 16 GB 测试机上量过再加 \"16\" 这一项。一次请求的图片：budget 加起来不超过 max_image_tokens（2240，即 8 张 280），budget 在 single_image_budgets（560、1120）里的图一次只许一张。11-04 在 16 GB 测试机上量（M2，嵌入进程 phys_footprint）：8 张 280 峰值 4.3 GB，1 张 1120 约 4.0 GB，1 张 560 约 3.5 GB，8 张 1120 涨到 13.3 GB；luoke-search 自己只用 70、140、280。max_audio_secs 只在嵌入进程解码以后查（超了那一条答 audio_too_long），主控收请求时只按 max_audio_bytes 查字节数。"
+  },
+  "luoke-scan.explain": {
+   "accessory": "luoke-scan",
+   "kind": "generate",
+   "main": false,
+   "params": {
+    "*": {
+     "item_tokens": 300,
+     "fixed_tokens": 0,
+     "batch": 1,
+     "think": false,
+     "max_chars": 6000
+    }
+   },
+   "base_params": {
+    "temperature": 0,
+    "top_p": 1
+   },
+   "_说明": "luoke-scan（螺壳扫描，beta 2 起）：把规则已经定好结论的一条发现讲成一两句人话（不超过 120 字）。提示词在 luoke-scan 的 prompts/explain.*（第 4 版：system + 示范 + 这一条），评测集里最长约 2200 字。后台跑，每轮几次。温度 0、不思考，照 luoke-scan 的评测。不是 main：没有模型时扫描照样查、照样出结果，只是没有人话说明，这个任务没开不该挡住整版"
+  },
+  "luoke-scan.identify": {
+   "accessory": "luoke-scan",
+   "kind": "generate",
+   "main": false,
+   "params": {
+    "*": {
+     "item_tokens": 200,
+     "fixed_tokens": 0,
+     "batch": 1,
+     "think": false,
+     "max_chars": 6000
+    }
+   },
+   "base_params": {
+    "temperature": 0,
+    "top_p": 1
+   },
+   "_说明": "luoke-scan：给规则认不出的目录起名，只看元信息（路径、大小、时间、文件数、扩展名、前几项的名字），不看文件内容；输出 JSON（name / what / kind / sure，按 prompts/identify.schema.json 校验）。提示词第 5 版，评测集里最长约 2000 字。按需跑，每次几条。能不能删由规则定，模型不说。参数和不是 main 的理由同 explain"
+  },
+  "luoke-scan.skills": {
+   "accessory": "luoke-scan",
+   "kind": "generate",
+   "main": false,
+   "params": {
+    "*": {
+     "item_tokens": 400,
+     "fixed_tokens": 0,
+     "batch": 1,
+     "think": false,
+     "max_chars": 12000
+    }
+   },
+   "base_params": {
+    "temperature": 0,
+    "top_p": 1
+   },
+   "_说明": "luoke-scan：看规则已经报了的一个 AI 工具 skill，它自己说的（名字、说明）和正文、脚本实际做的对不对得上；输出 JSON（fits / does / risk / beyond，按 prompts/skills.schema.json 校验）。回答只作为一段说明附在那条发现上，不改轻重、结论和标题。max_chars 按整个请求算：系统提示加示范约 4800 字符，skill 的输入扫描限制在 6000 字符以内，所以每档都给 12000（16 GB 档也一样，照抄 6000 会把大的 skill 拒成 input_too_long）。提示词第 3 版。不是 main，理由同 explain"
+  },
+  "luoke-ime.transcribe": {
+   "accessory": "luoke-ime",
+   "kind": "transcribe",
+   "main": false,
+   "latency_ms": {
+    "*": 500
+   },
+   "params": {
+    "*": {
+     "max_audio_secs": 120,
+     "max_context_chars": 2000,
+     "max_tokens": 512,
+     "language": "Chinese"
+    }
+   },
+   "_说明": "2026-11-05 加（core-private#22，让语音输入提前做）：输入法的语音输入，按住说话。一次听写一个会话、音频按块追加，草稿、终稿都是用户在等（V1 §2 /v1/transcribe）。max_audio_secs 是一次听写最长多少秒（主控攒着的音频上限），max_context_chars 是 context 的上限，max_tokens 是一次转写最多出多少 token。16 档用 0.6B 8-bit（权重 2026-11-05 传到 ModelScope、Hugging Face 的 luokelabs/Qwen3-ASR-0.6B-8bit，批准）；32、128 档用 1.7B 8-bit（2026-11-06 定：44 句加白噪声到 5 dB 信噪比后字准确率 98.1% 对 0.6B 的 94.8%，其中中英混说字错率 7.6% 对 20.7%，不加噪声 99.3% 对 98.8%；权重 2026-11-06 传到 ModelScope、Hugging Face 的 luokelabs/Qwen3-ASR-1.7B-8bit，批准）。32 档的内存影响见模型 qwen3-asr-1.7b-8bit 的 _内存。评测见 tools/release_evals.json（每档各评一遍）。整理（去口头禅）不在这里，是 luoke-ime.tidy"
+  },
+  "luoke-ime.tidy": {
+   "accessory": "luoke-ime",
+   "kind": "generate",
+   "main": false,
+   "params": {
+    "*": {
+     "item_tokens": 1024,
+     "fixed_tokens": 100,
+     "batch": 1,
+     "think": false,
+     "max_chars": 6000
+    }
+   },
+   "base_params": {
+    "temperature": 0,
+    "top_p": 1
+   },
+   "_说明": "2026-11-05 加（让语音输入的「整理」也开始做）：语音终稿出来以后，用底座去口头禅、理顺改口，数字写法也在这一步；提示词归输入法，放在 messages 里，输出用 response_format 的 json_schema {\"text\": string}；用户松了键在等上屏，按 user-waiting 发。item_tokens 1024 够一次听写最长 120 秒（约 600 字）。16 档上底座和转写二选一，整理会把转写挤下去、换上底座，默认开不开等实测；评测集归 luoke-ime（evals/tidy），进评测表之前各档答 unsupported"
   }
  },
  "verified": {
@@ -553,7 +719,17 @@
     "*"
    ]
   },
-  "digup": {
+  "luoke-search": {
+   "versions": [
+    "*"
+   ]
+  },
+  "luoke-scan": {
+   "versions": [
+    "*"
+   ]
+  },
+  "luoke-agent": {
    "versions": [
     "*"
    ]

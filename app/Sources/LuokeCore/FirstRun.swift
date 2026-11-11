@@ -3,8 +3,8 @@
 // 没有清单（开发版）就从本机来源目录（LUOKE_MODEL_SOURCE，默认 ~/.omlx/models）放模型链接、只认已经在 ~/Applications 的配件。
 // 安装器按文件名预选一个配件（Installer.preselect）；主控已装、首次运行已走过时，再运行某个安装器就只走"加装"：勾选 → 同意 → 下载安装 → 启动。
 import AppKit
-import ServiceManagement
 import SwiftUI
+import UserNotifications
 
 struct AccessoryChoice: Identifiable {
     let id: String          // 配件标识
@@ -26,6 +26,11 @@ enum FirstRun {
     }
 
     static var window: NSWindow?
+    static let hostID = "first-run"
+    /// 首次运行正画在主窗口里（带主窗口的这一份占整个窗口）
+    static var showing: Bool { MainWindow.showing(hostID) }
+    /// 首次运行开着：主窗口里的，或者自己的窗口
+    static var isOpen: Bool { showing || window?.isVisible == true }
 
     static func show(preselect: String? = nil) { present(FirstRunModel(preselect: preselect), title: "欢迎使用螺壳") }
 
@@ -34,6 +39,9 @@ enum FirstRun {
 
     private static func present(_ model: FirstRunModel, title: String) {
         if let w = window, w.isVisible { w.close() }
+        // 带主窗口：占整个主窗口，走完才露出「今天」。关掉主窗口和原来关掉这个窗口一样，再打开螺壳回到这里
+        // 整窗没有走不开的（canLeave 都没给），不会是 busy
+        if MainWindow.present(hostID, title: title, style: .takeover, { FirstRunView(m: model) }) != .noWindow { return }
         let host = NSHostingController(rootView: FirstRunView(m: model))
         let w = NSWindow(contentViewController: host)
         w.title = title
@@ -50,13 +58,26 @@ enum FirstRun {
     static func finish() {
         UserDefaults.standard.set(true, forKey: doneKey)
         window?.close()
+        // 主窗口是为首次运行开的、用户又没自己打开螺壳：和原来一样关掉（#112）；要开的停在「今天」
+        MainWindow.endSetup(hostID, keepOpen: MainWindow.openAfterSetup)
+        MainWindow.showAfterSetup()      // 用户打开螺壳时该开的主窗口：首次运行走完再开（#112）
     }
+}
+
+private final class AnswerSlot<T>: @unchecked Sendable {
+    let lock = NSLock()
+    let done = DispatchSemaphore(value: 0)
+    var value: T?
+    var closed = false
 }
 
 final class FirstRunModel: ObservableObject {
     enum Step: String { case preflight, accessories, consent, fetching, smoke, done }
     @Published var step: Step = .preflight { didSet { FirstRunModel.mark(step.rawValue); if step == .done { prepareInputMethod(); watchNotifications() } } }
-    @Published var inputMethodState = ""     // 输入法 --status 的 state；空 = 还没看
+    @Published var inputMethodState = "" {   // 输入法 --status 的 state；空 = 还没看
+        didSet { if inputMethodState == "ready" && oldValue != "ready" { tutorialStep = nil } }   // 加上了就退出图文教程；别的状态变化不打断（11-02 16 GB 测试机：点「打开键盘设置」时教程自己关了）
+    }
+    @Published var tutorialStep: Int?          // 完成页的图文教程看到第几步；nil = 没在看
     @Published var tryText = ""
     @Published var refocusTry = 0               // 「切换到螺壳」切过去以后加一：试打框松开焦点再拿回来，让这个进程重新接上输入法（见 selectInputMethod）
     @Published var selectFailed = false          // 「切换到螺壳」没切过去（--select 退出码 3）
@@ -64,7 +85,8 @@ final class FirstRunModel: ObservableObject {
     @Published var reregistering = false
     static var otherIMECopies = 0               // --status 报的别的副本数
     /// 完成页上各应用的通知状态（10-20：开发机上邮件助手的通知一直被系统拒，下午的提醒全没看到，测试者也会这样默默收不到）
-    struct NotifyRow: Identifiable { let id: String; let name: String; let bundleID: String; let exe: URL; var state: String }
+    /// exe 是 nil：螺壳自己（收进来的应用、agent 核心都以螺壳的名义发通知）
+    struct NotifyRow: Identifiable { let id: String; let name: String; let bundleID: String; let exe: URL?; var state: String }
     @Published var notifyRows: [NotifyRow] = []
     private var notifyTimer: Timer?
     private var inputMethodTimer: Timer?
@@ -444,7 +466,7 @@ final class FirstRunModel: ObservableObject {
 
     func registerLoginItem() {
         do {
-            try SMAppService.mainApp.register()
+            try LoginItem.register()
             progress = "已注册登录项"
         } catch {
             progress = "登录项没注册上：\(error.localizedDescription)（开发版未签名时系统可能拒绝）"
@@ -496,9 +518,7 @@ final class FirstRunModel: ObservableObject {
 
     /// 输入法的状态：`--status` 那一行 JSON 的 state；旧版输入法没有这个命令时，已添加就当 ready、没添加当 not_added
     static func inputMethodState(exe: URL, bundleID: String) -> String {
-        let p = Process()
-        p.executableURL = exe
-        p.arguments = ["--status"]
+        let p = Spawn.process(exe.path, ["--status"])       // 输入法在包外：disclaim，不借螺壳的授权（Spawn.swift）
         let out = Pipe()
         p.standardOutput = out
         p.standardError = FileHandle.nullDevice
@@ -518,9 +538,7 @@ final class FirstRunModel: ObservableObject {
     /// 每个普通应用的启动器答 `--notify-status`（luoke-core b3c7131 起的启动器才有；旧的答不出 JSON 就不列）：
     /// ok（允许且横幅开着）/ ask（还没问过）/ off（被拒或横幅关了）
     static func notifyState(exe: URL) -> String? {
-        let p = Process()
-        p.executableURL = exe
-        p.arguments = ["--notify-status"]
+        let p = Spawn.process(exe.path, ["--notify-status"])     // 各应用的启动器在包外：disclaim
         let out = Pipe()
         p.standardOutput = out
         p.standardError = FileHandle.nullDevice
@@ -534,12 +552,47 @@ final class FirstRunModel: ObservableObject {
         return "off"
     }
 
+    /// 螺壳自己：问系统，答法和 notifyState(exe:) 一样。后台线程上调。系统答不上来就是 nil，这一行不列
+    static func ownNotifyState() -> String? {
+        firstAnswer(within: 3) { answer in
+            UNUserNotificationCenter.current().getNotificationSettings { s in
+                switch s.authorizationStatus {
+                case .notDetermined: answer("ask")
+                case .authorized, .provisional, .ephemeral: answer(s.alertSetting == .disabled ? "off" : "ok")
+                default: answer("off")
+                }
+            }
+        }
+    }
+
+    /// 等回调答一次。到时间没答就是 nil，之后晚到的回调什么也写不进去
+    static func firstAnswer<T>(within seconds: TimeInterval, _ ask: (@escaping (T) -> Void) -> Void) -> T? {
+        let slot = AnswerSlot<T>()
+        ask { v in
+            slot.lock.lock()
+            defer { slot.lock.unlock() }
+            guard !slot.closed, slot.value == nil else { return }
+            slot.value = v
+            slot.done.signal()
+        }
+        _ = slot.done.wait(timeout: .now() + seconds)
+        slot.lock.lock()
+        defer { slot.lock.unlock() }
+        slot.closed = true
+        return slot.value
+    }
+
+    static func notifyState(_ r: NotifyRow) -> String? { r.exe.map { notifyState(exe: $0) } ?? ownNotifyState() }
+
     func watchNotifications() {
         let apps = Accessories.installed().filter { $0.type == "app" }
         DispatchQueue.global().async {
-            let rows = apps.compactMap { m -> NotifyRow? in
+            var rows = apps.compactMap { m -> NotifyRow? in
                 guard let exe = Bundle(url: m.app)?.executableURL, let st = FirstRunModel.notifyState(exe: exe) else { return nil }
                 return NotifyRow(id: m.accessory, name: m.name, bundleID: m.bundleID, exe: exe, state: st)
+            }
+            if let id = Bundle.main.bundleIdentifier, let st = FirstRunModel.ownNotifyState() {
+                rows.insert(NotifyRow(id: "luoke-core", name: "螺壳", bundleID: id, exe: nil, state: st), at: 0)
             }
             DispatchQueue.main.async {
                 self.notifyRows = rows
@@ -549,7 +602,7 @@ final class FirstRunModel: ObservableObject {
                     guard let self else { t.invalidate(); return }
                     let cur = self.notifyRows
                     DispatchQueue.global().async {
-                        let upd = cur.map { r -> NotifyRow in var r = r; r.state = FirstRunModel.notifyState(exe: r.exe) ?? r.state; return r }
+                        let upd = cur.map { r -> NotifyRow in var r = r; r.state = FirstRunModel.notifyState(r) ?? r.state; return r }
                         DispatchQueue.main.async {
                             self.notifyRows = upd
                             if !upd.contains(where: { $0.state != "ok" }) { t.invalidate() }
@@ -562,10 +615,12 @@ final class FirstRunModel: ObservableObject {
 
     /// 还没问过：以这个应用的名义发一条测试通知，系统会先弹出"允许通知"的询问
     func askNotifications(_ r: NotifyRow) {
+        guard let exe = r.exe else {        // 螺壳自己：系统弹询问，答了以后 watchNotifications 的定时器看得到
+            UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+            return
+        }
         DispatchQueue.global().async {
-            let p = Process()
-            p.executableURL = r.exe
-            p.arguments = ["--notify", r.name, "", "通知打开了：有事会在这里提醒你。"]
+            let p = Spawn.process(exe.path, ["--notify", r.name, "", "通知打开了：有事会在这里提醒你。"])
             p.standardOutput = FileHandle.nullDevice
             p.standardError = FileHandle.nullDevice
             try? p.run()
@@ -585,7 +640,7 @@ final class FirstRunModel: ObservableObject {
         DispatchQueue.global().async {
             let code = Installer.shell(exe.path, ["--select"])
             DispatchQueue.main.async {
-                self.selectFailed = code == 3
+                self.selectFailed = code != 0     // 1 也要说（11-02 16 GB 测试机：点了没反应）
                 if code == 0 { self.refocusTry += 1 }
             }
         }
@@ -606,7 +661,7 @@ final class FirstRunModel: ObservableObject {
     }
 
     func openKeyboardSettings() {
-        if let url = URL(string: "x-apple.systempreferences:com.apple.Keyboard-Settings.extension") { NSWorkspace.shared.open(url) }
+        Uninstall.openInputSettings()
     }
 }
 
@@ -636,11 +691,14 @@ struct FirstRunView: View {
             .background(Color.lkBackground)
         }
         .foregroundStyle(Color.lkForeground)
-        .frame(width: 760, height: 540)
+        .lkWindowSize(width: 760, height: 540)
         .onAppear { m.preflight() }
     }
 
     // ---- 每一页 -------------------------------------------------------------------------------------------
+
+    @State private var searchOn = SearchHelper.enabled
+    @State private var scanOn = ScanHelper.enabled
 
     @ViewBuilder private var page: some View {
         switch m.step {
@@ -648,7 +706,7 @@ struct FirstRunView: View {
         case .accessories: appsPage
         case .consent: consentPage
         case .fetching, .smoke: fetchPage
-        case .done: donePage
+        case .done: if let step = m.tutorialStep { imeTutorial(step) } else { donePage }
         }
     }
 
@@ -656,22 +714,22 @@ struct FirstRunView: View {
         let mem = Diagnostics.memGB()
         let chip = Diagnostics.sysctl("machdep.cpu.brand_string")
         let v = ProcessInfo.processInfo.operatingSystemVersion
-        let facts: [(String, String, String)] = [
-            ("cpu", "芯片", chip.isEmpty ? "Apple 芯片" : chip),
-            ("memorychip", "内存", "\(mem) GB"),
-            ("internaldrive", "可用磁盘", m.diskText.replacingOccurrences(of: "可用磁盘 ", with: "")),
-            ("desktopcomputer", "系统", "macOS \(v.majorVersion).\(v.minorVersion)" + (v.patchVersion > 0 ? ".\(v.patchVersion)" : "")),
+        let facts: [(icon: String, label: String, value: String)] = [
+            (icon: "cpu", label: "芯片", value: chip.isEmpty ? "Apple 芯片" : chip),
+            (icon: "memory-stick", label: "内存", value: "\(mem) GB"),
+            (icon: "hard-drive", label: "可用磁盘", value: m.diskText.replacingOccurrences(of: "可用磁盘 ", with: "")),
+            (icon: "monitor", label: "系统", value: "macOS \(v.majorVersion).\(v.minorVersion)" + (v.patchVersion > 0 ? ".\(v.patchVersion)" : "")),
         ]
         let choice = Manifests.tierChoices(memGB: mem).first { $0.tier == m.tier }
         return VStack(alignment: .leading, spacing: 0) {
             LKTitle(title: "先看看这台 Mac", sub: m.memTooLow ? "这台 Mac 现在还装不了。" : nil)
             HStack(spacing: 8) {
-                ForEach(facts, id: \.1) { f in
-                    let bad = f.0 == "memorychip" && m.memTooLow
+                ForEach(facts, id: \.label) { f in
+                    let bad = f.label == "内存" && m.memTooLow
                     VStack(alignment: .leading, spacing: 2) {
-                        Image(systemName: f.0).font(.system(size: 14)).foregroundStyle(Color.lkMuted).padding(.bottom, 6)
-                        Text(f.1).font(.system(size: 12)).foregroundStyle(Color.lkMuted)
-                        Text(f.2).font(.system(size: 14, weight: .medium)).lineLimit(1).minimumScaleFactor(0.7)
+                        LKIcon(f.icon).foregroundStyle(Color.lkMuted).padding(.bottom, 6)
+                        Text(f.label).font(.system(size: 12)).foregroundStyle(Color.lkMuted)
+                        Text(f.value).font(.system(size: 14, weight: .medium)).lineLimit(1).minimumScaleFactor(0.7)
                             .foregroundStyle(bad ? Color.lkDanger : Color.lkForeground)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -687,7 +745,7 @@ struct FirstRunView: View {
                         let on = m.chosenTier == c.tier
                         Button { m.chosenTier = c.tier } label: {
                             HStack(alignment: .top, spacing: 10) {
-                                Image(systemName: on ? "largecircle.fill.circle" : "circle").foregroundStyle(on ? Color.lkPrimary : Color.lkInput)
+                                LKIcon(on ? "circle-dot" : "circle").foregroundStyle(on ? Color.lkPrimary : Color.lkInput)
                                 VStack(alignment: .leading, spacing: 2) {
                                     HStack(spacing: 8) {
                                         Text(c.label).font(.system(size: 14, weight: .medium))
@@ -719,7 +777,7 @@ struct FirstRunView: View {
                 .padding(14).background(Color.lkCard).clipShape(.rect(cornerRadius: 12))
                 .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.lkBorder))
             }
-            if let e = m.error { LKNote(icon: "exclamationmark.triangle", text: e, kind: .danger).padding(.top, 16) }
+            if let e = m.error { LKNote(icon: "triangle-alert", text: e, kind: .danger).padding(.top, 16) }
         }
     }
 
@@ -739,7 +797,7 @@ struct FirstRunView: View {
                             Text("在本机跑模型").font(.system(size: 13)).foregroundStyle(Color.lkMuted)
                         }
                         Spacer()
-                        Image(systemName: "checkmark").font(.system(size: 13, weight: .semibold)).foregroundStyle(Color.lkMuted)
+                        LKIcon("check", size: 15).foregroundStyle(Color.lkMuted)
                     }
                     .padding(.horizontal, 16).padding(.vertical, 14)
                     Divider().overlay(Color.lkBorder)
@@ -787,11 +845,11 @@ struct FirstRunView: View {
             VStack(spacing: 8) {
                 if m.oldIMEInTrash {
                     // luoke-ime#15：旧的输入法副本还在废纸篓里时，同一个登录会话里装新版，系统常常还绑着旧的、切不过去
-                    LKNote(icon: "trash", text: "废纸篓里有旧的螺壳输入法。先清空废纸篓、注销并重新登录一次再装，输入法更容易一次就能用；也可以直接装，装完切不过去时再重新登录。", kind: .warning)
+                    LKNote(icon: "trash-2", text: "废纸篓里有旧的螺壳输入法。先清空废纸篓、注销并重新登录一次再装，输入法更容易一次就能用；也可以直接装，装完切不过去时再重新登录。", kind: .warning)
                 }
                 if Manifests.hasRelease {
-                    LKNote(icon: "checkmark.shield", text: "螺壳和引擎来自 GitHub Releases，模型来自 ModelScope。每个文件核对过哈希才会用。")
-                    LKNote(icon: "magnifyingglass", text: "下载前会先在本机找同一个模型（oMLX、Hugging Face、LM Studio 的目录）。找到了就直接用，不再下载，也不动原来的文件。")
+                    LKNote(icon: "shield-check", text: "螺壳和引擎来自 GitHub Releases，模型来自 ModelScope。每个文件核对过哈希才会用。")
+                    LKNote(icon: "search", text: "下载前会先在本机找同一个模型（oMLX、Hugging Face、LM Studio 的目录）。找到了就直接用，不再下载，也不动原来的文件。")
                 }
             }
             .padding(.top, 16)
@@ -845,12 +903,14 @@ struct FirstRunView: View {
     }
 
     /// 下载页走到头的几种结果（样板 first-fetch-failed / first-smoke-failed / first-smoke-deferred / first-no-base / first-hub-down）
-    enum FetchOutcome { case working, ok, fetchFailed, smokeFailed, smokeDeferred, noBase, hubDown }
+    /// engineDown：主控在跑、引擎起不来（之前主控会整个退出、落到 hubDown；现在主控留着，向导要自己认出来，不然一直停在 working）
+    enum FetchOutcome { case working, ok, fetchFailed, smokeFailed, smokeDeferred, noBase, hubDown, engineDown }
 
     var fetchOutcome: FetchOutcome {
         guard m.step == .smoke else { return .working }
         guard let st = hub.status else { return m.previewDownloads == nil && hub.hubDown ? .hubDown : .working }
         if !m.failed.isEmpty { return .fetchFailed }
+        if st.engineDown { return .engineDown }
         if st.base == nil && st.engineReady { return .noBase }
         if st.smokeOK == false { return .smokeFailed }
         if st.smokeDeferred { return .smokeDeferred }
@@ -866,6 +926,7 @@ struct FirstRunView: View {
         case .smokeDeferred: return ("本机试跑推迟了", "内存空出来后会自动试跑。")
         case .noBase: return ("引擎里没有底座模型", nil)
         case .hubDown: return ("螺壳没有启动", nil)
+        case .engineDown: return ("引擎没有启动", nil)
         }
     }
 
@@ -875,7 +936,7 @@ struct FirstRunView: View {
         return VStack(alignment: .leading, spacing: 0) {
             LKTitle(title: fetchTitle.0, sub: fetchTitle.1)
             if outcome == .hubDown {
-                LKNote(icon: "exclamationmark.triangle", text: (hub.hubExit.map { "螺壳进程退出了（代码 \($0)）。" } ?? ((hub.hubError ?? "螺壳进程起不来") + "。"))
+                LKNote(icon: "triangle-alert", text: (hub.hubExit.map { "螺壳进程退出了（代码 \($0)）。" } ?? ((hub.hubError ?? "螺壳进程起不来") + "。"))
                        + "点「重试」，还不行就在「设置 › 关于」里导出诊断信息发给我们。", kind: .danger)
             } else {
             if outcome == .working {
@@ -913,12 +974,17 @@ struct FirstRunView: View {
                 }
                 switch outcome {
                 case .smokeFailed:
-                    LKNote(icon: "exclamationmark.triangle", text: "先点「重新检查」。还不行可以先继续，再在「设置 › 关于」里导出诊断信息发给我们。", kind: .danger)
+                    LKNote(icon: "triangle-alert", text: "先点「重新检查」。还不行可以先继续，再在「设置 › 关于」里导出诊断信息发给我们。", kind: .danger)
                         .padding(.top, 6)
                 case .smokeDeferred:
-                    LKNote(icon: "exclamationmark.triangle", text: "例如你自己的 oMLX 正加载着大模型。可以先继续，不影响使用。", kind: .warning).padding(.top, 6)
+                    LKNote(icon: "triangle-alert", text: "例如你自己的 oMLX 正加载着大模型。可以先继续，不影响使用。", kind: .warning).padding(.top, 6)
                 case .noBase:
-                    LKNote(icon: "exclamationmark.triangle", text: "退出螺壳、重新打开再走一遍，还不行就在「设置 › 关于」里导出诊断信息发给我们。", kind: .danger).padding(.top, 6)
+                    LKNote(icon: "triangle-alert", text: "退出螺壳、重新打开再走一遍，还不行就在「设置 › 关于」里导出诊断信息发给我们。", kind: .danger).padding(.top, 6)
+                case .engineDown:
+                    LKNote(icon: "triangle-alert",
+                           text: ((hub.status?.engineProblems ?? []).map { $0 + "\n" }.joined())
+                               + "点「重试」会重新启动螺壳。还不行可以先继续，再在「设置 › 关于」里导出诊断信息发给我们。", kind: .danger)
+                        .padding(.top, 6)
                 default: EmptyView()
                 }
             }
@@ -930,7 +996,7 @@ struct FirstRunView: View {
         guard m.step == .smoke, let st = hub.status else { return .wait }
         if st.smokeOK == true { return .done }
         if st.smokeDeferred { return .later }
-        if st.smokeOK == false || (st.base == nil && st.engineReady) { return .fail }
+        if st.smokeOK == false || st.engineDown || (st.base == nil && st.engineReady) { return .fail }
         return .busy
     }
 
@@ -941,6 +1007,7 @@ struct FirstRunView: View {
         if st.smokeDeferred { return "稍后自动做" }
         if st.smokeOK == true { return "通过" }
         if st.smokeOK == false { return "没通过" }
+        if st.engineDown { return "引擎没起来" }
         return st.phase == "starting" ? "加载模型…" : "等螺壳报告…"
     }
 
@@ -965,10 +1032,13 @@ struct FirstRunView: View {
                             if let img = LKAsset.image("app-mail.png") { Image(nsImage: img).resizable().frame(width: 36, height: 36).clipShape(.rect(cornerRadius: 8)) }
                             VStack(alignment: .leading, spacing: 2) {
                                 Text("螺壳邮件助手").font(.system(size: 14, weight: .medium))
-                                Text("已经在浏览器里打开了，第一次要连接邮箱。").font(.system(size: 13)).foregroundStyle(Color.lkMuted)
+                                Text("点「打开」，第一次要连接邮箱。").font(.system(size: 13)).foregroundStyle(Color.lkMuted)
                             }
                             Spacer()
-                            Button("打开") { if let a = Accessories.installed().first(where: { $0.accessory == "luoke-mail" }) { AppPlacement.open(a.app) } }
+                            Button("打开") {
+                                guard let a = Accessories.installed().first(where: { $0.accessory == "luoke-mail" }) else { return }
+                                if a.bundled, let b = BundledApps.named(a.accessory) { b.open() } else { AppPlacement.open(a.app) }    // 收进来的 a.app 是螺壳自己
+                            }
                                 .buttonStyle(LKSecondaryButton())
                         }
                         .padding(.horizontal, 16).padding(.vertical, 12)
@@ -987,6 +1057,46 @@ struct FirstRunView: View {
                 .padding(.bottom, 12)
             }
 
+            if SearchHelper.manifest != nil && SearchHelper.mayRun {
+                LKGroup {
+                    HStack(spacing: 12) {
+                        LKAppIcon(accessory: SearchHelper.accessory, size: 36)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("螺壳搜索").font(.system(size: 14, weight: .medium))
+                            Text("按内容找文件和照片。开启时 macOS 会问你让不让读。").font(.system(size: 13)).foregroundStyle(Color.lkMuted)
+                        }
+                        Spacer()
+                        if searchOn { LKBadge(text: "已开启", kind: .success) } else {
+                            Button("开启") { SearchActivation.show { searchOn = true } }.buttonStyle(LKPrimaryButton())
+                        }
+                    }
+                    .padding(.horizontal, 16).padding(.vertical, 12)
+                }
+                .padding(.bottom, 12)
+            }
+
+            if ScanHelper.manifest != nil {
+                LKGroup {
+                    HStack(spacing: 12) {
+                        LKAppIcon(accessory: ScanHelper.accessory, size: 36)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("螺壳扫描").font(.system(size: 14, weight: .medium))
+                            Text("查这台 Mac 的安全和空间。开启时要完全磁盘访问。").font(.system(size: 13))
+                        }
+                        Spacer()
+                        if scanOn { LKBadge(text: "已开启", kind: .success) } else {
+                            Button("开启") {
+                                PermissionWindow.show(app: ScanHelper.accessory, id: "fda", enabling: true) {
+                                    ScanHelper.enable { why in if why == nil { scanOn = true } }
+                                }
+                            }.buttonStyle(LKPrimaryButton())
+                        }
+                    }
+                    .padding(.horizontal, 16).padding(.vertical, 12)
+                }
+                .padding(.bottom, 12)
+            }
+
             if m.inputMethodReady { imeCard.padding(.bottom, 12) }
 
             if !m.notifyRows.isEmpty {
@@ -994,7 +1104,7 @@ struct FirstRunView: View {
                     ForEach(Array(m.notifyRows.enumerated()), id: \.offset) { i, r in
                         if i > 0 { Divider().overlay(Color.lkBorder) }
                         HStack(spacing: 10) {
-                            Image(systemName: "bell").font(.system(size: 14)).foregroundStyle(Color.lkMuted)
+                            LKIcon("bell").foregroundStyle(Color.lkMuted)
                             Text(r.name).font(.system(size: 14))
                             Spacer()
                             switch r.state {
@@ -1025,12 +1135,16 @@ struct FirstRunView: View {
     private var imeCard: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
-                Image(systemName: "keyboard").font(.system(size: 14))
+                LKIcon("keyboard")
                 Text(m.inputMethodState == "ready" ? "试试螺壳输入法" : "输入法还差一步：添加到系统").font(.system(size: 14, weight: .medium))
                 Spacer()
                 if m.inputMethodState == "ready" { LKBadge(text: "已添加", kind: .success) }
                 else if m.inputMethodState == "added_not_selectable" { LKBadge(text: "系统收录中", kind: .secondary) }
-                else { LKBadge(text: "待添加", kind: .warning) }
+                else {
+                    Button { m.tutorialStep = 0 } label: { LKLabel("图文教程", icon: "images", size: 15).font(.system(size: 13)) }
+                        .buttonStyle(.borderless).foregroundStyle(Color.lkForeground)
+                    LKBadge(text: "待添加", kind: .warning)
+                }
             }
             if m.inputMethodState == "ready" {
                 Text("切换到螺壳，在下面试着打 nihao。").font(.system(size: 13)).foregroundStyle(Color.lkMuted)
@@ -1046,7 +1160,7 @@ struct FirstRunView: View {
                 if m.selectFailed && m.reregistered {
                     // 重新登记过还是切不过去：多半是这次登录里系统的输入法服务（imklaunchagent 这类，不归我们结束），再点也没用；
                     // 原因没坐实，文案只说"没认上"（luoke-ime 10-22）。注销时这个窗口也会关，所以不说"页面会自己更新"
-                    LKNote(icon: "rectangle.portrait.and.arrow.right", text: "还是切不过去：系统这次没认上螺壳输入法。请注销并重新登录一次（苹果菜单 → 退出登录），回来以后在菜单栏的输入法里选「螺壳」就能用了。", kind: .warning)
+                    LKNote(icon: "log-out", text: "还是切不过去：系统这次没认上螺壳输入法。请注销并重新登录一次（苹果菜单 → 退出登录），回来以后在菜单栏的输入法里选「螺壳」就能用了。", kind: .warning)
                 } else if m.selectFailed || FirstRunModel.otherIMECopies > 0 {
                     Text(m.selectFailed ? "系统没切过去。多半是这台 Mac 上还登记着别的螺壳输入法副本（例如废纸篓里的旧版），系统绑到了那一份上。点下面的按钮重新登记，再切一次。"
                                         : "这台 Mac 上还登记着别的螺壳输入法副本（例如废纸篓里的旧版）。切不过去的话，点下面的按钮重新登记。")
@@ -1057,15 +1171,17 @@ struct FirstRunView: View {
             } else if m.inputMethodState == "added_not_selectable" {
                 Text("已经添加了，系统还在收录螺壳输入法，稍等几秒……").font(.system(size: 13)).foregroundStyle(Color.lkMuted)
             } else {
-                HStack(spacing: 4) {
-                    ForEach(Array(["键盘设置", "输入源 · 编辑…", "左下角 +", "简体中文", "螺壳", "添加"].enumerated()), id: \.offset) { i, x in
-                        Text(x).font(.system(size: 12)).lineLimit(1).fixedSize().padding(.horizontal, 5).padding(.vertical, 2)
-                            .background(Color.lkMutedBg).clipShape(.rect(cornerRadius: 4))
-                        if i < 5 { Image(systemName: "arrow.right").font(.system(size: 10)).foregroundStyle(Color.lkMuted) }
+                LKFlow(spacing: 4, lineSpacing: 6) {
+                    ForEach(Array(["打开键盘设置", "文字输入 · 输入法 · 编辑…", "左下角 +", "简体中文", "螺壳", "添加"].enumerated()), id: \.offset) { i, x in
+                        HStack(spacing: 4) {   // 箭头跟着前一步，换行时留在行尾，新的一行从步骤开始
+                            Text(x).font(.system(size: 12)).lineLimit(1).fixedSize().padding(.horizontal, 5).padding(.vertical, 2)
+                                .background(Color.lkMutedBg).clipShape(.rect(cornerRadius: 4))
+                            if i < 5 { LKIcon("arrow-right", size: 12).foregroundStyle(Color.lkMuted) }
+                        }
                     }
                 }
                 HStack(spacing: 12) {
-                    Button { m.openKeyboardSettings() } label: { Label("打开键盘设置", systemImage: "arrow.up.right.square") }
+                    Button { m.openKeyboardSettings() } label: { LKLabel("打开键盘设置", icon: "square-arrow-out-up-right") }
                         .buttonStyle(LKSecondaryButton())
                     Text("添加好了这里会自动更新").font(.system(size: 12)).foregroundStyle(Color.lkMuted)
                 }
@@ -1075,6 +1191,51 @@ struct FirstRunView: View {
         }
         .padding(16).background(Color.lkCard).clipShape(.rect(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.lkBorder))
+    }
+
+    /// 图文教程：每步一张系统设置的截图（Resources/ui/guide/step<N>.jpg，简体中文、浅色）配一句话。
+    /// 图和句子照输入法自己的添加引导拷过来（luoke-ime AddGuide.swift 的 AddGuideView.tutorial），两边要一致
+    static let imeTutorial = [
+        "打开系统设置的「键盘」，在「文字输入」下面找到「输入法」，点右边的「编辑…」。",
+        "在弹出的窗口里，点左下角的「+」。",
+        "左边选「简体中文」，右边选「螺壳」，点「添加」。回到列表里看到螺壳，点「完成」。",
+    ]
+
+    /// 完成页上点「图文教程」后整页换成教程（输入法还没加上时才有）；加上了 inputMethodState 一变就自动回到完成页
+    private func imeTutorial(_ step: Int) -> some View {
+        let count = Self.imeTutorial.count
+        return VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 8) {
+                Button { m.tutorialStep = nil } label: { LKLabel("返回", icon: "chevron-left", size: 15).font(.system(size: 13)) }
+                    .buttonStyle(.borderless).foregroundStyle(Color.lkMuted)
+                Spacer()
+                Text("添加螺壳输入法 · 第 \(step + 1) / \(count) 步").font(.system(size: 14, weight: .medium))
+                Spacer()
+                LKBadge(text: "待添加", kind: .warning)
+            }
+            Group {
+                if let image = LKAsset.image("guide/step\(step + 1).jpg") {
+                    Image(nsImage: image).resizable().interpolation(.high).aspectRatio(contentMode: .fit)
+                        .clipShape(.rect(cornerRadius: 8))
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.lkBorder))
+                } else {
+                    Color.lkMutedBg.clipShape(.rect(cornerRadius: 8))
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: 300)
+            Text(Self.imeTutorial[step]).font(.system(size: 14)).fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 8) {
+                Button { m.openKeyboardSettings() } label: { LKLabel("打开键盘设置", icon: "square-arrow-out-up-right") }
+                    .buttonStyle(LKSecondaryButton())
+                Spacer()
+                Button("上一步") { m.tutorialStep = step - 1 }.buttonStyle(LKSecondaryButton(ghost: true)).disabled(step == 0)
+                if step + 1 < count {
+                    Button("下一步") { m.tutorialStep = step + 1 }.buttonStyle(LKSecondaryButton())
+                } else {
+                    Button("看完了") { m.tutorialStep = nil }.buttonStyle(LKSecondaryButton())
+                }
+            }
+        }
     }
 
     // ---- 底栏：轻按钮在左、主按钮在右；下载开始后没有"上一步" ------------------------------------------------
@@ -1103,21 +1264,25 @@ struct FirstRunView: View {
                 switch fetchOutcome {
                 case .fetchFailed:
                     Button("先继续") { next() }.buttonStyle(LKSecondaryButton())
-                    Button { m.retryFailed() } label: { Label("重试", systemImage: "arrow.clockwise") }.buttonStyle(LKPrimaryButton())
+                    Button { m.retryFailed() } label: { LKLabel("重试", icon: "rotate-cw") }.buttonStyle(LKPrimaryButton())
                 case .smokeFailed:
-                    Button { m.rerunSmoke() } label: { Label("重新检查", systemImage: "arrow.clockwise") }.buttonStyle(LKSecondaryButton())
+                    Button { m.rerunSmoke() } label: { LKLabel("重新检查", icon: "rotate-cw") }.buttonStyle(LKSecondaryButton())
                     Button("继续") { next() }.buttonStyle(LKPrimaryButton())
                 case .ok, .smokeDeferred, .noBase:
                     Button("继续") { next() }.buttonStyle(LKPrimaryButton())
                 case .hubDown:
-                    Button { hub.startHub() } label: { Label("重试", systemImage: "arrow.clockwise") }
+                    Button { hub.startHub() } label: { LKLabel("重试", icon: "rotate-cw") }
                         .buttonStyle(LKPrimaryButton())
+                case .engineDown:
+                    // 重试 = 重启主控：熔断只在主控重启时清掉，引擎也跟着重新起
+                    Button("先继续") { next() }.buttonStyle(LKSecondaryButton())
+                    Button { hub.restartHub() } label: { LKLabel("重试", icon: "rotate-cw") }.buttonStyle(LKPrimaryButton())
                 case .working:
                     Button("继续") {}.buttonStyle(LKPrimaryButton()).disabled(true)
                 }
             case .done:
                 Spacer()
-                if !m.failed.isEmpty { Button { m.retryFailed() } label: { Label("重试", systemImage: "arrow.clockwise") }.buttonStyle(LKSecondaryButton()) }
+                if !m.failed.isEmpty { Button { m.retryFailed() } label: { LKLabel("重试", icon: "rotate-cw") }.buttonStyle(LKSecondaryButton()) }
                 Button("完成") { FirstRun.finish() }.buttonStyle(LKPrimaryButton())
             }
         }

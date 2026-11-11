@@ -12,9 +12,20 @@ enum Updater {
     // 内部版单独一个仓库（10-28，luoke-core#36）：外部的人从 luoke-releases 的发布列表里容易装错内部版，装了就一直跟内部版渠道
     static var repo: String { channel == .internalBuild ? "luokelabs/luoke-internal-builds" : "luokelabs/luoke-releases" }
     static let teamID = "NJQ5W3T9K5"
-    static let testAPI = ProcessInfo.processInfo.environment["LUOKE_UPDATE_API"]
+    /// 测试用的更新源只在开发时认：正式版认了的话，换个源就能递一个旧的或实验室的安装包
+    static var testAPI: String? { AppInfo.devEnvironment("LUOKE_UPDATE_API") }
     static let perPage = 100
     static func api(page: Int) -> String { testAPI ?? "https://api.github.com/repos/\(repo)/releases?per_page=\(perPage)&page=\(page)" }
+    // GitLab 镜像（10-29，luoke-core#39）：luoke-releases 每次发布同步到 gitlab.com 的同名仓库，文件同名同 sha256。
+    // 只有 beta 和正式版有镜像；连不上 GitHub 时去那边查、那边下。内部版只在 GitHub
+    static let mirrorProject = "https://gitlab.com/api/v4/projects/luokelabs%2Fluoke-releases"
+    static var testMirrorAPI: String? { AppInfo.devEnvironment("LUOKE_UPDATE_MIRROR_API") }
+    static var hasMirror: Bool { channel == .beta }
+    static func mirrorAPI(page: Int) -> String { testMirrorAPI ?? "\(mirrorProject)/releases?per_page=\(perPage)&page=\(page)" }
+    /// 镜像上某一版的某个文件（软件包库的地址，和 luoke-releases 的同步脚本一致）
+    static func mirrorFile(_ tag: String, _ name: String) -> URL? {
+        URL(string: "\(mirrorProject)/packages/generic/luoke-releases/\(tag)/\(name.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? name)")
+    }
     static var dir: URL { AppInfo.envDir.appendingPathComponent("downloads/update", isDirectory: true) }
     static var mountFile: URL { AppInfo.envDir.appendingPathComponent("run/update-mount.json") }
     static let autoKey = "autoCheckUpdates"
@@ -43,8 +54,9 @@ enum Updater {
     }
 
     /// notes：GitHub 发布页的正文（markdown），窗口里只列「## 更新说明」这一节
+    /// mirrored：这一版是从 GitLab 镜像查到的（GitHub 连不上），下载时先试镜像的地址
     struct Found {
-        let tag: String; let page: String; let manifest: [String: Any]; var notes: String = ""
+        let tag: String; let page: String; let manifest: [String: Any]; var notes: String = ""; var mirrored = false
         var hubSize: Int64? {
             let hub = (manifest["items"] as? [String: Any])?["hub"] as? [String: Any]
             return ((hub?["files"] as? [[String: Any]])?.first?["size"] as? NSNumber)?.int64Value
@@ -82,16 +94,35 @@ enum Updater {
         return try out.get()
     }
 
-    /// 这个渠道里比自己新的最新一版；没有就 nil。会阻塞（网络），别在主线程上调。
-    static func check() throws -> Found? {
-        guard channel == .internalBuild || channel == .beta else { return nil }
+    /// 发布列表，GitHub 的样子（tag_name、published_at、body、html_url、assets[].browser_download_url）；镜像的换成这个样子
+    private static func releases(mirror: Bool) throws -> [[String: Any]] {
         // 翻页，直到这一页里有这个渠道的版本（10-28：原来只看最新 40 条，内部版一天两版，三周后最近的 beta 就掉出第一页）
         var list: [[String: Any]] = []
         for page in 1...10 {
-            let data = try get(URL(string: api(page: page))!)
-            guard let batch = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { throw Failure.other("更新服务器的答复看不懂") }
+            let data = try get(URL(string: mirror ? mirrorAPI(page: page) : api(page: page))!, timeout: 15)
+            guard let raw = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { throw Failure.other("更新服务器的答复看不懂") }
+            let batch = mirror ? raw.map(fromMirror) : raw
             list += batch
-            if testAPI != nil || batch.count < perPage || list.contains(where: { matches($0["tag_name"] as? String ?? "") }) { break }
+            if (mirror ? testMirrorAPI : testAPI) != nil || batch.count < perPage || list.contains(where: { matches($0["tag_name"] as? String ?? "") }) { break }
+        }
+        return list
+    }
+
+    static func fromMirror(_ r: [String: Any]) -> [String: Any] {
+        let links = ((r["assets"] as? [String: Any])?["links"] as? [[String: Any]]) ?? []
+        return ["tag_name": r["tag_name"] ?? "", "published_at": r["released_at"] ?? "", "body": r["description"] ?? "",
+                "html_url": (r["_links"] as? [String: Any])?["self"] ?? "",
+                "assets": links.map { ["name": $0["name"] ?? "", "browser_download_url": $0["direct_asset_url"] ?? $0["url"] ?? ""] }]
+    }
+
+    /// 这个渠道里比自己新的最新一版；没有就 nil。会阻塞（网络），别在主线程上调。
+    static func check() throws -> Found? {
+        guard channel == .internalBuild || channel == .beta else { return nil }
+        var list: [[String: Any]], mirrored = false
+        do { list = try releases(mirror: false) }
+        catch {
+            guard hasMirror, let l = try? releases(mirror: true) else { throw error }
+            list = l; mirrored = true
         }
         let cands = list.filter { ($0["draft"] as? Bool) != true && matches($0["tag_name"] as? String ?? "") }
             .sorted { ($0["published_at"] as? String ?? "") > ($1["published_at"] as? String ?? "") }
@@ -100,10 +131,17 @@ enum Updater {
                   let assets = r["assets"] as? [[String: Any]],
                   let rel = assets.first(where: { ($0["name"] as? String) == "release.json" }),
                   let u = rel["browser_download_url"] as? String, let url = URL(string: u) else { continue }
-            guard let m = try? JSONSerialization.jsonObject(with: try get(url)) as? [String: Any] else { continue }
+            // GitHub 的列表查得到、文件下不来（国内常见：api.github.com 通，下载走的域名不通）：release.json 从镜像取
+            var fromMirror = mirrored
+            var data: Data?, failure: Error?
+            do { data = try get(url) } catch { failure = error }
+            if data == nil, !mirrored, hasMirror, let mu = mirrorFile(tag, "release.json") { data = try? get(mu); fromMirror = data != nil }
+            // 最新一版的清单取不到或看不懂：报出来让用户稍后再试，不退到次新的一版（11-04：退了的话升完还得再升一次）
+            guard let d = data else { throw failure ?? Failure.notFound("release.json") }
+            guard let m = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { throw Failure.other("\(tag) 的发布清单看不懂") }
             if ((m["built_at"] as? NSNumber)?.doubleValue ?? 0) > myBuiltAt {
                 return Found(tag: tag, page: r["html_url"] as? String ?? "https://github.com/\(repo)/releases/tag/\(tag)", manifest: m,
-                             notes: r["body"] as? String ?? "")
+                             notes: r["body"] as? String ?? "", mirrored: fromMirror)
             }
             return nil            // 最新的一版不比自己新：不往更旧的找
         }
@@ -112,10 +150,13 @@ enum Updater {
 
     /// 某一版发布页的「更新说明」（升级页用，brand #15：和检查更新窗口用同一份）。会阻塞（网络），连不上就空
     static func notes(for tag: String) -> String {
-        guard let url = URL(string: "https://api.github.com/repos/\(repo)/releases/tags/\(tag)"),
-              let data = try? get(url, timeout: 15),
+        if let url = URL(string: "https://api.github.com/repos/\(repo)/releases/tags/\(tag)"), let data = try? get(url, timeout: 15),
+           let o = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            return userNotes(o["body"] as? String ?? "")
+        }
+        guard hasMirror, let url = URL(string: "\(mirrorProject)/releases/\(tag)"), let data = try? get(url, timeout: 15),
               let o = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return "" }
-        return userNotes(o["body"] as? String ?? "")
+        return userNotes(o["description"] as? String ?? "")
     }
 
     /// 发布正文里给用户看的那一节（「## 更新说明」到下一个二级标题）；没有这一节就整篇
@@ -133,8 +174,12 @@ enum Updater {
         guard let hub = (f.manifest["items"] as? [String: Any])?["hub"] as? [String: Any],
               let file = (hub["files"] as? [[String: Any]])?.first, let name = file["path"] as? String,
               let sha = file["sha256"] as? String, let size = (file["size"] as? NSNumber)?.int64Value,
-              let base = (hub["urls"] as? [String])?.first else { throw Failure.other("这一版的发布清单里没有螺壳的安装包") }
-        guard let url = URL(string: base.replacingOccurrences(of: "{path}", with: name)) else { throw Failure.other("下载地址不对") }
+              let bases = hub["urls"] as? [String], !bases.isEmpty else { throw Failure.other("这一版的发布清单里没有螺壳的安装包") }
+        // 地址按清单的顺序试（GitHub、GitLab 镜像），一个不通或下坏了换下一个；查更新时就走了镜像的，镜像先试
+        let path = name.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? name
+        var urls = bases.compactMap { URL(string: $0.replacingOccurrences(of: "{path}", with: path)) }
+        if f.mirrored { urls = urls.filter { $0.host == "gitlab.com" } + urls.filter { $0.host != "gitlab.com" } }
+        guard !urls.isEmpty else { throw Failure.other("下载地址不对") }
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let dest = dir.appendingPathComponent("\(f.tag)-\(name)")
         // 上次下好了、只是没换成（授权取消等）：哈希对得上就直接用，不重下
@@ -143,20 +188,25 @@ enum Updater {
             progress(size, size)
             return dest
         }
-        progress(0, size)
-        let data = try FileDownload.fetch(url, timeout: 600) { done in progress(done, size) }
-        guard Int64(data.count) == size else { throw Failure.unverified("安装包大小不对，可能下载时断了") }
-        let got = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
-        guard got == sha else { throw Failure.unverified("安装包不完整，可能下载时断了") }
-        try data.write(to: dest, options: .atomic)
-        return dest
+        var failure: Error = Failure.other("没有答复")
+        for url in urls {
+            progress(0, size)
+            do {
+                let data = try FileDownload.fetch(url, timeout: 600) { done in progress(done, size) }
+                guard Int64(data.count) == size else { throw Failure.unverified("安装包大小不对，可能下载时断了") }
+                let got = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+                guard got == sha else { throw Failure.unverified("安装包不完整，可能下载时断了") }
+                try data.write(to: dest, options: .atomic)
+                return dest
+            } catch { failure = error }
+        }
+        throw failure
     }
 
     @discardableResult
     private static func run(_ cmd: String, _ args: [String]) -> (Int32, String) {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: cmd)
-        p.arguments = args
+        // 升级这条路照旧算螺壳（Spawn.swift）：只跑写死的 hdiutil、codesign、stapler，换包要螺壳的身份，出错了用户就收不到修复
+        let p = Spawn.process(cmd, args, access: .luoke)
         let pipe = Pipe()
         p.standardOutput = pipe
         p.standardError = pipe
@@ -169,9 +219,11 @@ enum Updater {
     /// 挂载、核签名和公证、把新版拷到暂存处、卸掉 DMG、起换包脚本，然后主控自己退出，脚本换好包再打开新版（ADR 0012）。
     /// 不再打开 DMG 里的安装器：同一个 bundle id 再起一个实例，旧的会作为它的父进程挂在程序坞上（10-24）。
     /// verified：核对都过了、脚本起来了，接下来主控退出
-    static func install(dmg: URL, to tag: String, notarized: Bool = true, verified: @escaping () -> Void) throws {
+    /// confirm：要输管理员密码时，下载完再问用户一次，密码框才紧跟他的点击。false 就不装
+    static func install(dmg: URL, to tag: String, notarized: Bool = true, verified: @escaping () -> Void,
+                        confirm: @escaping () -> Bool = { true }) throws {
         do {
-            try installChecked(dmg: dmg, to: tag, notarized: notarized, verified: verified)
+            try installChecked(dmg: dmg, to: tag, notarized: notarized, verified: verified, confirm: confirm)
         } catch Failure.keep(let why) {
             throw Failure.other(why)
         } catch {
@@ -181,7 +233,8 @@ enum Updater {
     }
 
     /// notarized = false 只给开发版的测试入口（--upgrade-from-dmg）：不核公证和团队签名
-    private static func installChecked(dmg: URL, to tag: String, notarized: Bool, verified: @escaping () -> Void) throws {
+    private static func installChecked(dmg: URL, to tag: String, notarized: Bool, verified: @escaping () -> Void,
+                                       confirm: () -> Bool) throws {
         guard !notarized || run("/usr/bin/xcrun", ["stapler", "validate", dmg.path]).0 == 0 else { throw Failure.unverified("安装包没通过苹果的安全检查") }
         let (rc, out) = run("/usr/bin/hdiutil", ["attach", "-nobrowse", "-readonly", "-plist", dmg.path])
         guard rc == 0, let plist = try? PropertyListSerialization.propertyList(from: Data(out.utf8), format: nil) as? [String: Any],
@@ -208,6 +261,11 @@ enum Updater {
         if Installer.targetTaken { try? FileManager.default.removeItem(at: staged); throw Failure.other(Installer.takenMessage) }
         Installer.writeUpgrade(from: myRelease, to: tag)
         verified()        // 卡片到「交给新版」这一步；授权取消、脚本没起来，失败就写在这一步上
+        guard !Installer.needsAdmin || confirm() else {
+            try? FileManager.default.removeItem(at: Installer.upgradeFile)
+            try? FileManager.default.removeItem(at: staged)
+            throw Failure.keep("这次没有升级")      // 安装包留着：「重试」不用整个重下
+        }
         if let why = Swap.start(current: Installer.installed ?? Bundle.main.bundleURL, staged: staged, target: Installer.target,
                                 waitPID: ProcessInfo.processInfo.processIdentifier, admin: Installer.needsAdmin) {
             try? FileManager.default.removeItem(at: Installer.upgradeFile)
@@ -289,11 +347,42 @@ enum Updater {
         }
     }
 
-    // ---- 窗口 ---------------------------------------------------------------------------------------
+    // ---- 窗口：带主窗口的这一份是主窗口里的一页 --------------------------------------------------------------
     static var window: NSWindow?
-    static func show(found: Found? = nil) {
+    static let hostID = "check-update"
+    /// 检查更新开着：主窗口里的那一页，或者自己的窗口
+    static var isOpen: Bool { MainWindow.showing(hostID) || window?.isVisible == true }
+    /// 开着的那一页（窗口）用的是哪一个 model：每次打开都是新的，只有升级还在跑的那一次会被原样放回来
+    private(set) static var current: UpdateModel?
+    /// 这一个 model 还开着：离开过、又打开过的，开着的是新的那个，旧的算关了
+    static func shows(_ m: UpdateModel) -> Bool { current === m && isOpen }
+
+    /// 「以后再说」「完成」「先用着」：关掉这一页（窗口）
+    static func close() {
+        MainWindow.dismiss(hostID)
+        window?.close()
+    }
+
+    /// 每次打开都现查（11-04：原来菜单「有新版本」把自动检查当时找到的那一版直接传进来，之后又发的新版看不到，得连升两次）
+    static func show() {
+        if MainWindow.showing(hostID) { MainWindow.show(); return }
         if let w = window, w.isVisible { Uninstall.bringFront(w); return }
-        let host = NSHostingController(rootView: UpdateView(m: UpdateModel(found: found)))
+        // 上一次的升级还在跑（下载、核对时离开了）：把它原样放回来，不另起一次。两次会碰同一个安装包、同一份 staged 和升级标记，
+        // 后退出的那次还会删掉先准备好的那次要用的文件
+        let running = current.flatMap { $0.upgrading ? $0 : nil }
+        let m = running ?? UpdateModel(found: nil, autoCheck: false)
+        // 用户离开了这一页（点了侧栏）：和原来关掉窗口一样，等着点「输入密码并升级」的算不升级
+        switch MainWindow.present(hostID, title: "检查更新", style: .page, closed: { m.answerUpgrade(false) }, { UpdateView(m: m) }) {
+        case .busy: return          // 别的页正忙着（正在卸载、删数据）：没开，主窗口停在那一页
+        case .shown:
+            current = m
+            if running == nil { m.check() }
+            return
+        case .noWindow: break
+        }
+        current = m
+        if running == nil { m.check() }
+        let host = NSHostingController(rootView: UpdateView(m: m))
         let w = NSWindow(contentViewController: host)
         w.title = "检查更新"
         w.styleMask = [.titled, .closable]
@@ -356,6 +445,7 @@ final class UpdateModel: ObservableObject {
         case latest
         case found
         case working(step: Int)     // 0 下载安装包、1 核对签名和公证、2 交给新版主控升级
+        case ready                  // 下载好了，要输密码：等用户点，密码框紧跟这一下
         case offline(String)        // 查更新时连不上
         case checkFailed(String)    // 查更新时别的错
         case unverified(String)     // 安装包核对不过：没有装
@@ -401,21 +491,57 @@ final class UpdateModel: ObservableObject {
         }
     }
 
+    private var answer: ((Bool) -> Void)?
+    /// 这一次的升级还在跑：upgrade() 起了后台线程，线程还没退出（下载、核对、等点「输入密码并升级」、交给新版）。
+    /// 跑着的时候再打开检查更新，放回来的就是这一次（Updater.show）；同一个 model 也不再起第二次。只在主线程上读写
+    var upgrading = false
+
+    /// 后台线程上调，等用户点了「输入密码并升级」。关窗口算不升级
+    private func waitForClick() -> Bool {
+        let got = DispatchSemaphore(value: 0)
+        var yes = false
+        DispatchQueue.main.async {
+            // 窗口（主窗口里的那一页）已经没了，或者离开以后又打开过、开着的是新的那一次：这一次算不升级
+            guard Updater.shows(self) else { got.signal(); return }
+            var closed: NSObjectProtocol?
+            self.answer = { on in
+                if let closed { NotificationCenter.default.removeObserver(closed) }
+                self.answer = nil
+                yes = on
+                if on { self.phase = .working(step: 2) }
+                got.signal()
+            }
+            // 主窗口里的那一页：用户离开时 Updater.show 给的 closed 答 false
+            if let window = Updater.window {
+                closed = NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: .main) { [weak self] _ in
+                    self?.answer?(false)
+                }
+            }
+            self.phase = .ready
+        }
+        got.wait()
+        return yes
+    }
+
+    func answerUpgrade(_ yes: Bool) { answer?(yes) }
+
     func upgrade() {
-        guard let f = found else { return }
+        guard let f = found, !upgrading else { return }
+        upgrading = true
         phase = .working(step: 0)
         done = 0
         total = f.hubSize ?? 0
         DispatchQueue.global().async {
+            defer { DispatchQueue.main.async { self.upgrading = false } }       // 排在失败时改 phase 的那一下后面
             var step = 0
             do {
                 let dmg = try Updater.download(f) { d, t in DispatchQueue.main.async { self.done = d; self.total = t } }
                 step = 1
                 DispatchQueue.main.async { self.phase = .working(step: 1) }
-                try Updater.install(dmg: dmg, to: f.tag) {
+                try Updater.install(dmg: dmg, to: f.tag, verified: {
                     step = 2
                     DispatchQueue.main.async { self.phase = .working(step: 2) }
-                }
+                }, confirm: { self.waitForClick() })
             } catch {
                 let msg = error.localizedDescription
                 DispatchQueue.main.async {
@@ -429,34 +555,24 @@ final class UpdateModel: ObservableObject {
 
 struct UpdateView: View {
     @ObservedObject var m: UpdateModel
+    @Environment(\.lkHost) private var host
 
     /// 一屏，不要左栏（10-23：自己跑完的流程不用分步导航，和设置页同一个思路）
     var body: some View {
-        HStack(spacing: 0) {
-            VStack(spacing: 0) {
-                VStack(alignment: .leading, spacing: 0) {
-                    header.padding(.bottom, 20)
-                    content
-                    Spacer(minLength: 0)
-                }
-                .frame(maxWidth: .infinity, alignment: .topLeading)
-                .padding(.horizontal, 32).padding(.top, 28).padding(.bottom, 12)
-                footer
-            }
-            .background(Color.lkBackground)
-        }
-        .foregroundStyle(Color.lkForeground)
-        .frame(width: 560, height: 460)
+        UpgradeCard(title: Self.title(m, inPage: host == .page), sub: subtitle) { content } footer: { footer }
     }
 
     // MARK: 标题
 
-    private var title: String {
+    /// 这一屏的标题：现在是什么状态。inPage：画在主窗口的一页里，页标题「检查更新」主窗口已经画了，
+    /// 不查更新的那一版（本机版、开发版）不再写一遍，直接从下面那句说明开始
+    static func title(_ m: UpdateModel, inPage: Bool) -> String {
         switch m.phase {
         case .checking: return "正在查有没有更新"
-        case .info: return "检查更新"
+        case .info: return inPage ? "" : "检查更新"
         case .latest: return m.appsWithUpdates.isEmpty ? "已经是最新的" : "螺壳已经是最新的"
         case .found: return "有新版本：\(m.found?.tag ?? "")"
+        case .ready: return "\(m.found?.tag ?? "新版")已经下载好了"
         case .working(let s): return s == 0 ? "正在下载 \(m.found?.tag ?? "")" : (s == 1 ? "正在核对安装包" : "正在升级到 \(m.found?.tag ?? "")")
         case .offline: return "连不上更新服务器"
         case .checkFailed: return "没查成"
@@ -472,24 +588,11 @@ struct UpdateView: View {
         case .latest: return ""
         case .found:
             return m.found?.hubSize.map { "约 \(Diagnostics.humanSize($0))" } ?? ""
-        case .working: return ""
+        case .working, .ready: return ""
         case .offline: return ""
         case .checkFailed: return ""
         case .unverified: return ""
         case .failed: return ""
-        }
-    }
-
-    private var header: some View {
-        HStack(alignment: subtitle.isEmpty ? .center : .top, spacing: 14) {
-            if let icon = LKAsset.image("app-core.png") {
-                Image(nsImage: icon).resizable().frame(width: 40, height: 40)
-            }
-            VStack(alignment: .leading, spacing: 4) {
-                Text(title).font(.system(size: 20, weight: .semibold))
-                if !subtitle.isEmpty { Text(subtitle).font(.system(size: 14)).foregroundStyle(Color.lkMuted) }
-            }
-            Spacer()
         }
     }
 
@@ -502,17 +605,19 @@ struct UpdateView: View {
             appsNote.padding(.top, 12)
         case .found:
             notes
-            LKNote(icon: "checkmark.shield", text: "这里只升级螺壳，数据都保留。说明里提到的应用在「应用」里单独升级。")
+            LKNote(icon: "shield-check", text: "螺壳里带的应用跟着一起升级，数据都保留。输入法在「应用」里单独升级。")
                 .padding(.top, 12)
+        case .ready:
+            LKNote(icon: "lock", text: "把新版放进「应用程序」要这台 Mac 的管理员密码。").padding(.top, 12)
         case .working(let s):
             UpgradeProgress(current: s, line: s == 0 ? (m.total > 0 ? "\(Diagnostics.humanSize(m.done)) / \(Diagnostics.humanSize(m.total))" : "开始下载") : (s == 1 ? "正在核对…" : "螺壳会先退出，换好新版后自己重新打开，大约一分钟。"),
                             fraction: s == 0 && m.total > 0 ? Double(m.done) / Double(m.total) : nil)
         case .offline(let why):
-            LKNote(icon: "wifi.slash", text: why + "。", kind: .danger)
+            LKNote(icon: "wifi-off", text: why + "。", kind: .danger)
         case .checkFailed(let why):
-            LKNote(icon: "exclamationmark.triangle", text: why, kind: .danger)
+            LKNote(icon: "triangle-alert", text: why, kind: .danger)
         case .unverified(let why):
-            LKNote(icon: "exclamationmark.triangle", text: "\(why)。重试，还不行就在「设置 › 关于」里导出诊断信息发给我们。", kind: .danger)
+            LKNote(icon: "triangle-alert", text: "\(why)。重试，还不行就在「设置 › 关于」里导出诊断信息发给我们。", kind: .danger)
         case .failed(let step, let why):
             UpgradeProgress(current: step, failed: why)
         case .latest:
@@ -525,7 +630,7 @@ struct UpdateView: View {
     /// 螺壳是最新的，但已装的应用有新版本（螺壳不再顺带升级应用）：在这里也提一句，免得以为全都升好了
     @ViewBuilder private var appsNote: some View {
         if !m.appsWithUpdates.isEmpty {
-            LKNote(icon: "arrow.up.circle", text: m.appsWithUpdates.joined(separator: "、") + " 有新版本，在「应用」里升级。", kind: .warning)
+            LKNote(icon: "circle-arrow-up", text: m.appsWithUpdates.joined(separator: "、") + " 有新版本，在「应用」里升级。", kind: .warning)
         }
     }
 
@@ -537,44 +642,46 @@ struct UpdateView: View {
     // MARK: 底栏：左边自动检查开关，右边按钮
 
     private var inUpgrade: Bool {
-        switch m.phase { case .working, .failed: return true; default: return false }
+        switch m.phase { case .working, .ready, .failed: return true; default: return false }
     }
 
-    private var footer: some View {
-        HStack(spacing: 8) {
-            // 升级卡片（下载起到出错）和安装器、新版那两段长得一样：都不放自动检查开关
-            if !inUpgrade {
-                Toggle("", isOn: Binding(get: { Updater.autoEnabled }, set: { Updater.autoEnabled = $0 }))
-                    .toggleStyle(.switch).controlSize(.mini).tint(.lkPrimary).labelsHidden()
-                Text("每天自动检查").font(.system(size: 12)).foregroundStyle(Color.lkMuted).lineLimit(1).fixedSize()
-            }
-            Spacer()
-            switch m.phase {
-            case .found:
-                Button("以后再说") { Updater.window?.close() }.buttonStyle(LKSecondaryButton(ghost: true))
-                let tag = m.found?.tag ?? ""
-                Button(tag.count <= 8 ? "升级到 \(tag)" : "升级") { m.upgrade() }.buttonStyle(LKPrimaryButton())
-            case .working:
-                Button("升级中") {}.buttonStyle(LKPrimaryButton()).disabled(true)
-            case .checking:
-                Button("完成") {}.buttonStyle(LKPrimaryButton()).disabled(true)
-            case .offline, .checkFailed:
-                Button { m.check() } label: { Label("重试", systemImage: "arrow.clockwise") }.buttonStyle(LKPrimaryButton())
-            case .unverified:
-                Button { m.upgrade() } label: { Label("重试", systemImage: "arrow.clockwise") }.buttonStyle(LKPrimaryButton())
-            case .failed:
-                Button("先用着") { Updater.window?.close() }.buttonStyle(LKSecondaryButton(ghost: true))
-                Button { m.upgrade() } label: { Label("重试", systemImage: "arrow.clockwise") }.buttonStyle(LKPrimaryButton())
-            case .latest, .info:
-                if m.appsWithUpdates.isEmpty {
-                    Button("完成") { Updater.window?.close() }.buttonStyle(LKPrimaryButton())
-                } else {
-                    Button("完成") { Updater.window?.close() }.buttonStyle(LKSecondaryButton(ghost: true))
-                    Button("去升级应用") { Updater.window?.close(); AppsWindow.show() }.buttonStyle(LKPrimaryButton())
-                }
+    @ViewBuilder private var footer: some View {
+        // 升级卡片（下载起到出错）和安装器、新版那两段长得一样：都不放自动检查开关
+        if !inUpgrade {
+            Toggle("", isOn: Binding(get: { Updater.autoEnabled }, set: { Updater.autoEnabled = $0 }))
+                .toggleStyle(.switch).controlSize(.mini).tint(.lkPrimary).labelsHidden()
+            Text("每天自动检查").font(.system(size: 12)).foregroundStyle(Color.lkMuted).lineLimit(1).fixedSize()
+        }
+        Spacer()
+        switch m.phase {
+        case .found:
+            Button("以后再说") { Updater.close() }.buttonStyle(LKSecondaryButton(ghost: true))
+            let tag = m.found?.tag ?? ""
+            Button(tag.count <= 8 ? "升级到 \(tag)" : "升级") { m.upgrade() }.buttonStyle(LKPrimaryButton())
+        case .ready:
+            Button("以后再说") { m.answerUpgrade(false) }.buttonStyle(LKSecondaryButton(ghost: true))
+            Button("输入密码并升级") { m.answerUpgrade(true) }.buttonStyle(LKPrimaryButton())
+        case .working:
+            Button("升级中") {}.buttonStyle(LKPrimaryButton()).disabled(true)
+        case .checking:
+            Button("完成") {}.buttonStyle(LKPrimaryButton()).disabled(true)
+        case .offline, .checkFailed:
+            // 主窗口里的一页没有「返回」、也没有关窗口的红点：自己给一个走的按钮
+            if host == .page { Button("以后再说") { Updater.close() }.buttonStyle(LKSecondaryButton(ghost: true)) }
+            Button { m.check() } label: { LKLabel("重试", icon: "rotate-cw") }.buttonStyle(LKPrimaryButton())
+        case .unverified:
+            if host == .page { Button("先用着") { Updater.close() }.buttonStyle(LKSecondaryButton(ghost: true)) }
+            Button { m.upgrade() } label: { LKLabel("重试", icon: "rotate-cw") }.buttonStyle(LKPrimaryButton())
+        case .failed:
+            Button("先用着") { Updater.close() }.buttonStyle(LKSecondaryButton(ghost: true))
+            Button { m.upgrade() } label: { LKLabel("重试", icon: "rotate-cw") }.buttonStyle(LKPrimaryButton())
+        case .latest, .info:
+            if m.appsWithUpdates.isEmpty {
+                Button("完成") { Updater.close() }.buttonStyle(LKPrimaryButton())
+            } else {
+                Button("完成") { Updater.close() }.buttonStyle(LKSecondaryButton(ghost: true))
+                Button("去升级应用") { Updater.close(); AppsWindow.show() }.buttonStyle(LKPrimaryButton())
             }
         }
-        .padding(.horizontal, 32).frame(height: 64)
-        .overlay(alignment: .top) { Rectangle().fill(Color.lkBorder).frame(height: 1) }
     }
 }

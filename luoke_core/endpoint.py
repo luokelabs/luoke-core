@@ -202,6 +202,7 @@ def set_key(env_dir: str, key: str) -> str:
 class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
     allow_reuse_address = True
+    request_queue_size = 128     # 同主控的 socket：默认 5，几个程序同时连会被拒
 
 
 def make_handler(hub, key_ref: dict):

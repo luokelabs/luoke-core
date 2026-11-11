@@ -37,5 +37,5 @@
 - 发布脚本 engine 阶段：拷 0.7.1 正式版（或这次验过的 rc1）、重签、公证、许可清单和 GPL 源码包。
 - 配方升 `engine.version`；已装用户经升级路径重新下引擎包。
 - 三档重评全部任务（本机 / 16 GB 测试机 / 32 GB 测试机）：MLX 0.32.2 → 0.32.4 改了数值，这次只验了 0.8B 的速度和嵌入，没验底座（9B、26B）的质量。
-- 嵌入：配方里给本档的 `digup.embed` 加上 `image_batch` / `audio_batch` 等，打开图片和声音；`luoke_core/worker/vendor/embedding_gemma2/` 那时可以删（工作进程会自动用引擎包自己的）。
+- 嵌入：配方里给本档的 `luoke-search.embed`（原 `digup.embed`）加上 `image_batch` / `audio_batch` 等，打开图片和声音；`luoke_core/worker/vendor/embedding_gemma2/` 那时可以删（工作进程会自动用引擎包自己的）。
 - 换到 0.7.1 以后各档在 M1（16 GB 测试机）上再测一遍打分延迟和单条查询延迟（digup 要 M1 上 p90 < 100 ms）。

@@ -16,7 +16,9 @@ import time
 import urllib.parse
 from typing import Callable, Optional
 
-from . import procs
+from . import procs, spawn
+
+UNLOAD_POLL_SECS = 0.2
 
 
 class EngineError(RuntimeError):
@@ -46,6 +48,7 @@ class Engine:
         self.ready = False          # 进程在跑且 /v1/models 已经能应答（alive 只说进程还在）
         self.loaded: Optional[str] = None
         self.extras: set = set()      # 和底座一起放得下、跟着加载的模型（本机端点登记的小模型）；不占"当前模型"那一格
+        self.unloaded_at = 0.0        # 最近一次卸模型的时刻：卸完以后 Metal 要几秒才把 wired 内存还回来（core#43）
         self.loading = False
         self.lock = threading.Lock()
         self.load_secs: Optional[float] = None
@@ -80,7 +83,8 @@ class Engine:
         env["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
         env["HF_HUB_OFFLINE"] = "1"     # 模型都在本机，下载归主控：找不到就报错，不去 Hugging Face 找
         logf = open(os.path.join(self.base_path, "engine.log"), "a")
-        self.proc = subprocess.Popen(cmd, env=env, stdout=logf, stderr=subprocess.STDOUT, cwd="/")
+        # 引擎在包外、解析模型和请求：disclaim，不借螺壳的授权（spawn.py）
+        self.proc = subprocess.Popen(spawn.disclaimed(cmd), env=env, stdout=logf, stderr=subprocess.STDOUT, cwd="/")
         self._write_pidfile()
         t0 = time.time()
         ids: list = []
@@ -96,11 +100,14 @@ class Engine:
                     if ok is False:
                         self.log(f"engine port {self.port} is not held by pid {self.proc.pid}")
                     self.ready = True
+                    # 再记一次：omlx-cli 是 shell 脚本，起来后才 exec 成 Python，刚起时记下的可执行文件可能还是 /bin/sh
+                    self._write_pidfile()
                     self.log(f"engine ready port={self.port} models={ids} in {time.time() - t0:.1f}s")
                     return ids
             except Exception:
                 pass
             time.sleep(0.5)
+        self.stop()      # 进程还在、却一直没就绪：停掉，"没在运行"才有人重启（主控的 _check_engine），不会卡在"正在启动"
         raise EngineError("oMLX 启动超时")
 
     def stop(self) -> None:
@@ -124,6 +131,8 @@ class Engine:
         return os.path.join(self.base_path, "engine.pid.json")
 
     def _write_pidfile(self) -> None:
+        # 经跳板起（spawn.py）：先等它换成引擎再记可执行文件，不然记下的是螺壳自己，下次 _reap_orphan 对不上
+        spawn.wait_exec(self.proc.pid)
         rec = {"pid": self.proc.pid, "start": procs.start_time(self.proc.pid), "exe": procs.exe_path(self.proc.pid)}
         tmp = self.pidfile + ".tmp"
         with open(tmp, "w") as f:
@@ -173,8 +182,8 @@ class Engine:
         if not self.alive():
             return False
         try:
-            out = subprocess.run(["/bin/sh", "-c", 'ulimit -n 1024 2>/dev/null; exec /usr/sbin/lsof "$@"', "lsof",
-                                  "-a", "-p", str(self.proc.pid), "-iTCP", "-sTCP:LISTEN", "-P", "-n"],
+            out = subprocess.run(spawn.disclaimed(["/bin/sh", "-c", 'ulimit -n 1024 2>/dev/null; exec /usr/sbin/lsof "$@"', "lsof",
+                                                   "-a", "-p", str(self.proc.pid), "-iTCP", "-sTCP:LISTEN", "-P", "-n"]),
                                  capture_output=True, text=True, timeout=10).stdout
         except (subprocess.TimeoutExpired, OSError):
             return None
@@ -216,6 +225,22 @@ class Engine:
         r.read()
         return r.status
 
+    def _unload(self, model: str, timeout: float = 60) -> None:
+        """卸模型，返回时已经卸掉。oMLX 0.7.2 起，模型手上有请求时卸载回 202、排队：这段时间 load 仍回 200，新请求全回 409
+        （11-02 重评 16 档分拣 48 封全错就是这么来的）。所以 202 要轮询到模型真的不在了；超时抛错，调用方照样记日志。"""
+        if self._model_op(model, "unload", timeout=timeout) != 202:
+            return
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            c = self.conn(10)
+            c.request("GET", "/v1/models/status", headers=self.headers())
+            r = c.getresponse()
+            body = r.read()
+            if r.status == 200 and not any(m.get("id") == model and m.get("loaded") for m in json.loads(body).get("models") or []):
+                return
+            time.sleep(UNLOAD_POLL_SECS)
+        raise EngineError(f"unload {model} still pending after {timeout:.0f}s")
+
     def load(self, model: str) -> float:
         """阻塞到加载完；返回秒数。507 = 内存放不下。
         一次只留一个生成模型（底座或用户登记的本机模型，ADR 0014 修订"给高级用户的本机端点"）：别的先卸掉，内存只由主控一处管。"""
@@ -224,18 +249,20 @@ class Engine:
                 return 0.0
             for x in list(self.extras):          # 独占加载：一起放着的也先卸
                 try:
-                    self._model_op(x, "unload", timeout=60)
+                    self._unload(x)
                 except Exception as e:  # noqa: BLE001
                     self.log(f"unload {x} failed: {e}")
                 self.extras.discard(x)
+                self.unloaded_at = time.time()
                 self.log(f"unloaded {x} (making room for {model})")
             if self.loaded:
                 prev = self.loaded
                 try:
-                    self._model_op(prev, "unload", timeout=60)
+                    self._unload(prev)
                 except Exception as e:  # noqa: BLE001
                     self.log(f"unload {prev} failed: {e}")
                 self.loaded = None
+                self.unloaded_at = time.time()
                 self.log(f"unloaded {prev} (making room for {model})")
             self.loading = True
             t0 = time.time()
@@ -279,12 +306,13 @@ class Engine:
             if not m:
                 return False
             try:
-                self._model_op(m, "unload", timeout=60)
+                self._unload(m)
             except Exception as e:
                 self.log(f"unload {m} failed: {e}")
             if self.loaded == m:
                 self.loaded = None
             self.extras.discard(m)
+            self.unloaded_at = time.time()
             self.log(f"unloaded {m}")
             return True
 

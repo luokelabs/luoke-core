@@ -15,36 +15,56 @@ enum UpgradeSteps {
     static let failedTitle = "升级未完成"
 }
 
-/// 升级卡片：和检查更新窗口同样大小（560×460），图标 + 标题，正文是进度和步骤（或更新说明），底栏放按钮
+/// 升级卡片（检查更新窗口也是它）：560×460，图标 + 标题和底栏不动，中间的正文（进度和步骤，或更新说明）放不下就滚。
+/// 窗口不能调大小，升级完成页连关闭按钮都没有，所以按钮不能被正文挤出去
 struct UpgradeCard<Content: View, Footer: View>: View {
     let title: String
     var sub: String = ""
     @ViewBuilder let content: () -> Content
     @ViewBuilder let footer: () -> Footer
+    @Environment(\.lkHost) private var host
+    @Environment(\.lkTopInset) private var topInset
 
     var body: some View {
-        VStack(spacing: 0) {
+        if host == .page {
+            // 主窗口里的「检查更新」那一页：页标题、滚动是主窗口的；这里的标题是现在的状态（「已经是最新的」……），
+            // 没有要说的状态（标题是空的）就不画这一行，下面的内容顶上来
             VStack(alignment: .leading, spacing: 0) {
-                HStack(alignment: sub.isEmpty ? .center : .top, spacing: 14) {
-                    if let icon = LKAsset.image("app-core.png") { Image(nsImage: icon).resizable().frame(width: 40, height: 40) }
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(title).font(.system(size: 20, weight: .semibold))
-                        if !sub.isEmpty { Text(sub).font(.system(size: 14)).foregroundStyle(Color.lkMuted).fixedSize(horizontal: false, vertical: true) }
-                    }
-                    Spacer()
-                }
-                .padding(.bottom, 20)
-                content()
-                Spacer(minLength: 0)
+                if !title.isEmpty { Text(title).font(.system(size: 17, weight: .semibold)) }
+                if !sub.isEmpty { Text(sub).font(.system(size: 14)).foregroundStyle(Color.lkMuted).fixedSize(horizontal: false, vertical: true).padding(.top, title.isEmpty ? 0 : 4) }
+                VStack(alignment: .leading, spacing: 0) { content() }.padding(.top, title.isEmpty && sub.isEmpty ? 0 : 16)
+                HStack(spacing: 8) { footer() }.padding(.top, 20)
             }
             .frame(maxWidth: .infinity, alignment: .topLeading)
-            .padding(.horizontal, 32).padding(.top, 28).padding(.bottom, 12)
+            .foregroundStyle(Color.lkForeground)
+        } else {
+            card
+        }
+    }
+
+    private var card: some View {
+        VStack(spacing: 0) {
+            HStack(alignment: sub.isEmpty ? .center : .top, spacing: 14) {
+                if let icon = LKAsset.image("app-core.png") { Image(nsImage: icon).resizable().frame(width: 40, height: 40) }
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(title).font(.system(size: 20, weight: .semibold))
+                    if !sub.isEmpty { Text(sub).font(.system(size: 14)).foregroundStyle(Color.lkMuted).fixedSize(horizontal: false, vertical: true) }
+                }
+                Spacer()
+            }
+            .padding(.horizontal, 32).padding(.top, max(28, topInset + 8)).padding(.bottom, 20)     // 占整个主窗口：图标在红黄绿下面
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) { content() }
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                    .padding(.horizontal, 32).padding(.bottom, 12)
+            }
+            .scrollBounceBehavior(.basedOnSize)      // 放得下时不让进度页跟着手势晃
             HStack(spacing: 8) { footer() }
                 .padding(.horizontal, 32).frame(height: 64)
                 .overlay(alignment: .top) { Rectangle().fill(Color.lkBorder).frame(height: 1) }
         }
         .background(Color.lkBackground).foregroundStyle(Color.lkForeground)
-        .frame(width: 560, height: 460)
+        .lkWindowSize(width: 560, height: 460)
     }
 }
 
@@ -85,7 +105,7 @@ struct UpgradeProgress: View {
                 }
             }
             if failed != nil && diagnose {
-                LKNote(icon: "exclamationmark.triangle", text: "重试还不行，就在「设置 › 关于」里导出诊断信息发给我们。", kind: .danger)
+                LKNote(icon: "triangle-alert", text: "重试还不行，就在「设置 › 关于」里导出诊断信息发给我们。", kind: .danger)
                     .padding(.top, 16)
             }
         }
@@ -181,9 +201,11 @@ final class UpgradeFlow: ObservableObject {
         done = true
     }
 
-    func close() {
-        UpgradeWindow.close()
-        if done, let id = then { AppsWindow.install(id) }
+    /// going：接着去「添加应用」升级应用，主窗口留着
+    func close(going: Bool = false) {
+        let next = done ? then : nil
+        UpgradeWindow.close(keepOpen: going || next != nil || MainWindow.openAfterSetup)
+        if let id = next { AppsWindow.install(id) } else { MainWindow.showAfterSetup() }    // 升级走完再开主窗口（#112）
     }
 
     func retry() {
@@ -200,7 +222,8 @@ final class UpgradeFlow: ObservableObject {
     func later() {
         timer?.invalidate()
         Installer.writeUpgrade(from: from, to: to)
-        UpgradeWindow.close()
+        UpgradeWindow.close(keepOpen: MainWindow.openAfterSetup)
+        MainWindow.showAfterSetup()
     }
 }
 
@@ -219,7 +242,7 @@ struct UpgradeView: View {
                     LKReleaseNotes(text: Updater.userNotes(notes.releaseNotes))
                 }
                 if !f.appsWithUpdates.isEmpty {
-                    LKNote(icon: "arrow.up.circle", text: f.appsWithUpdates.joined(separator: "、") + " 有新版本，在「应用」里升级。", kind: .warning).padding(.top, 12)
+                    LKNote(icon: "circle-arrow-up", text: f.appsWithUpdates.joined(separator: "、") + " 有新版本，在「应用」里升级。", kind: .warning).padding(.top, 12)
                 }
             } footer: {
                 Spacer()
@@ -227,7 +250,7 @@ struct UpgradeView: View {
                     Button("完成") { f.close() }.buttonStyle(LKPrimaryButton()).keyboardShortcut(.defaultAction)
                 } else {   // 10-24：完成页说了「在「应用」里升级」却没按钮，要回菜单找
                     Button("完成") { f.close() }.buttonStyle(LKSecondaryButton(ghost: true))
-                    Button("去升级应用") { f.close(); AppsWindow.show() }.buttonStyle(LKPrimaryButton()).keyboardShortcut(.defaultAction)
+                    Button("去升级应用") { f.close(going: true); AppsWindow.show() }.buttonStyle(LKPrimaryButton()).keyboardShortcut(.defaultAction)
                 }
             }
         } else if let e = f.failure {
@@ -236,7 +259,7 @@ struct UpgradeView: View {
             } footer: {
                 Spacer()
                 Button("先用着") { f.later() }.buttonStyle(LKSecondaryButton(ghost: true))
-                Button { f.retry() } label: { Label("重试", systemImage: "arrow.clockwise") }.buttonStyle(LKPrimaryButton()).keyboardShortcut(.defaultAction)
+                Button { f.retry() } label: { LKLabel("重试", icon: "rotate-cw") }.buttonStyle(LKPrimaryButton()).keyboardShortcut(.defaultAction)
             }
         } else {
             UpgradeCard(title: "正在升级到 \(f.to)") {
@@ -249,15 +272,25 @@ struct UpgradeView: View {
     }
 }
 
-/// 新版起来后接着显示的卡片：和检查更新窗口、安装器的卡片同样大小、同一个位置
+/// 新版起来后接着显示的卡片：和检查更新窗口、安装器的卡片同样大小、同一个位置。
+/// 带主窗口的这一份占整个主窗口，走完才露出「今天」；原来的窗口没有关闭按钮，主窗口这时也关不掉
 enum UpgradeWindow {
     static var window: NSWindow?
     static var flow: UpgradeFlow?
+    static let hostID = "upgrade"
+    /// 升级卡片开着：主窗口里的，或者自己的窗口
+    static var isOpen: Bool { MainWindow.showing(hostID) || window?.isVisible == true }
 
     /// then = 升级完要接着装的应用
     static func show(from: String, to: String, then: String? = nil) {
+        if MainWindow.showing(hostID) { MainWindow.show(); return }
         if let w = window, w.isVisible { Uninstall.bringFront(w); return }
         let f = UpgradeFlow(from: from, to: to, then: then)
+        if MainWindow.present(hostID, title: "检查更新", style: .takeover, lockClose: true, { UpgradeView(f: f) }) != .noWindow {   // 整窗不会是 busy
+            flow = f
+            f.start()
+            return
+        }
         let w = NSWindow(contentViewController: NSHostingController(rootView: UpgradeView(f: f)))
         w.title = "检查更新"
         w.styleMask = [.titled]
@@ -271,5 +304,38 @@ enum UpgradeWindow {
         f.start()
     }
 
-    static func close() { window?.close(); window = nil; flow = nil }
+    /// keepOpen：带主窗口时，主窗口留着（用户自己打开过螺壳，或者接着去「添加应用」装）；不然为升级开的主窗口跟着关
+    static func close(keepOpen: Bool = false) {
+        MainWindow.endSetup(hostID, keepOpen: keepOpen)
+        window?.close(); window = nil; flow = nil
+    }
+}
+
+/// 上一次换包没成（新版起来时发现跑的还是旧版，Swap.takeResult）：带主窗口时是盖在主窗口上的一张卡片，不弹框（11-10：只有一个窗口）
+enum UpgradeNotDone {
+    static let title = "升级没完成"
+    static let hostID = "upgrade-not-done"
+
+    /// 画进了主窗口答 true；这一份没带主窗口答 false，调用方照旧弹框。
+    /// 螺壳刚起来时就调，这时没有正忙着的卡片（开启螺壳搜索问着系统），不会是 busy
+    static func show(_ text: String) -> Bool {
+        MainWindow.present(hostID, title: title, style: .card) { UpgradeNotDoneView(text: text) } != .noWindow
+    }
+}
+
+struct UpgradeNotDoneView: View {
+    let text: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text(text).font(.system(size: 13)).fixedSize(horizontal: false, vertical: true)     // 标题是主窗口的卡片画的
+            HStack {
+                Spacer()
+                // 主窗口只是为这张卡片开的（用户没自己打开螺壳）：跟着关
+                Button("好") { MainWindow.endSetup(UpgradeNotDone.hostID, keepOpen: false) }
+                    .buttonStyle(LKPrimaryButton()).keyboardShortcut(.defaultAction)
+            }
+        }
+        .lkCardBody()
+    }
 }

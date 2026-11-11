@@ -3,7 +3,7 @@
 
     python3 -B tools/dmg/layout.py <某.app> <输出.dmg> <卷名>
 
-背景图来自 luokelabs/luoke-brand ui/dmg（742c5ba）：660×400，@2x 一并读进去。图标 128，app 在 (165,200)，「应用程序」在 (495,200)。"""
+背景图来自品牌素材的 ui/dmg（742c5ba）：660×400，@2x 一并读进去。图标 128，app 在 (165,200)，「应用程序」在 (495,200)。"""
 import os
 import sys
 

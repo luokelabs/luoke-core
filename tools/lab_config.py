@@ -4,7 +4,8 @@
 只放主机、路径、账号名这类，不放令牌、密码。没有这个文件时：内部版只能评本机这一档，出版守护进程不知道看哪个 issue。
 
   {"machines": {"16": {"host": ..., "core": ..., "models": ..., "engine_app": ..., "repos": {...}, "corpus": ...}, "32": {...}},
-   "release": {"issue": "<owner>/<repo>#<n>", "allowed": ["<GitHub 账号>"], "owner": "<GitHub 账号>"}}
+   "release": {"issue": "<owner>/<repo>#<n>", "allowed": ["<GitHub 账号>"], "owner": "<GitHub 账号>",
+               "rc_senders": ["<只能发候选版的账号>"], "rc_url_base": "http://<局域网 IP>:<端口>", "rc_serve_dir": "<那个地址对应的本机目录>"}}
 """
 import json
 import os

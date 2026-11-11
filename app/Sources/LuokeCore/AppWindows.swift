@@ -18,8 +18,9 @@ enum AppWindows {
         NSApp.setActivationPolicy(visible().isEmpty ? .accessory : .regular)
     }
 
+    /// 开着的窗口：最小化了也算（主窗口能最小化，不然它一最小化，别的窗口一关，程序坞里就找不回它了）
     private static func visible() -> [NSWindow] {
-        NSApp.windows.filter { $0.isVisible && $0.styleMask.contains(.titled) }
+        NSApp.windows.filter { ($0.isVisible || $0.isMiniaturized) && $0.styleMask.contains(.titled) }
     }
 
     /// 再次打开主控（访达、启动台、程序坞）时：有开着的窗口就叫到前面。叫回了答 true
@@ -31,11 +32,12 @@ enum AppWindows {
 }
 
 /// 再次打开主控、又没有开着的窗口时弹的小窗口（luoke-core#19）：菜单栏图标认不出、被挤掉或被关掉时，
-/// 卸载、记忆、检查更新这些只在菜单里的功能也有一条路。
+/// 卸载、记忆、检查更新这些只在菜单里的功能也有一条路。带主窗口的这一份不要它：开主窗口，这些都在主窗口里
 enum HomeWindow {
     static var window: NSWindow?
 
     static func show() {
+        if let p = MainWindow.presenter { p.show(); return }
         if let w = window, w.isVisible { Uninstall.bringFront(w); return }
         let host = NSHostingController(rootView: HomeView(model: HubModel.shared))
         let w = NSWindow(contentViewController: host)
@@ -70,20 +72,20 @@ struct HomeView: View {
                 }
             }
             .padding(.bottom, 16)
-            LKNote(icon: "menubar.rectangle", text: "螺壳在菜单栏的海螺图标里。找不到的话：图标太多时系统会把放不下的藏起来，也可能在系统设置的菜单栏里被关掉了。")
-            Button { HomeWindow.openMenuBarSettings() } label: { Label("打开菜单栏设置", systemImage: "arrow.up.right.square") }
+            LKNote(icon: "panel-top", text: "螺壳在菜单栏的海螺图标里。找不到的话：图标太多时系统会把放不下的藏起来，也可能在系统设置的菜单栏里被关掉了。")
+            Button { HomeWindow.openMenuBarSettings() } label: { LKLabel("打开菜单栏设置", icon: "square-arrow-out-up-right") }
                 .buttonStyle(LKSecondaryButton()).padding(.top, 10)
             // 菜单栏图标找不到时，菜单里的事在这里也做得了（luoke-core#19；10-24 luoke-top 核出 #26 之后只剩说明）
             LKGroup {
-                let rows: [(String, String, () -> Void)] = (Memory.bundled ? [("brain", "记忆", { Memory.open() })] : []) + [
-                    ("square.grid.2x2", "应用", { AppsWindow.show() }),
-                    ("arrow.triangle.2.circlepath", "检查更新", { Updater.show() }),
-                    ("gearshape", "设置", { SettingsWindow.show() }),
+                let rows: [(icon: String, title: String, open: () -> Void)] = (Memory.bundled ? [(icon: "brain", title: "记忆", open: { Memory.open() })] : []) + [
+                    (icon: "layout-grid", title: "应用", open: { AppsWindow.show() }),
+                    (icon: "refresh-cw", title: "检查更新", open: { Updater.show() }),
+                    (icon: "settings", title: "设置", open: { SettingsWindow.show() }),
                 ]
                 ForEach(Array(rows.enumerated()), id: \.offset) { i, r in
                     if i > 0 { Divider().overlay(Color.lkBorder) }
-                    Button { HomeWindow.window?.close(); r.2() } label: {
-                        LKSettingRow(icon: r.0, title: r.1) { Image(systemName: "chevron.right").font(.system(size: 12)).foregroundStyle(Color.lkMuted) }
+                    Button { HomeWindow.window?.close(); r.open() } label: {
+                        LKSettingRow(icon: r.icon, title: r.title) { LKIcon("chevron-right", size: 14).foregroundStyle(Color.lkMuted) }
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
@@ -125,7 +127,7 @@ struct InstallerProgressView: View {
                     Button("打开系统设置") { InstallerProgress.openAppManagement(); m.openedSettings = true }
                         .buttonStyle(LKPrimaryButton()).keyboardShortcut(.defaultAction)
                 } else {
-                    Button { m.failed = nil; m.retry() } label: { Label("重试", systemImage: "arrow.clockwise") }
+                    Button { m.failed = nil; m.retry() } label: { LKLabel("重试", icon: "rotate-cw") }
                         .buttonStyle(LKPrimaryButton()).keyboardShortcut(.defaultAction)
                 }
             }
@@ -149,6 +151,7 @@ enum InstallerProgress {
     static func show(title: String, text: String) {
         let m = InstallerProgressModel(title: title, text: text)
         let host = NSHostingController(rootView: InstallerProgressView(m: m))
+        // 一个窗口的例外：安装器在换包，旧螺壳已经退了、新的还没起，没有主窗口；这时只有这一个窗口
         let w = NSWindow(contentViewController: host)
         w.title = "检查更新"
         w.styleMask = [.titled]
@@ -179,20 +182,31 @@ enum InstallerProgress {
 }
 
 /// 点了主控以前发的通知（10-23 起首次安装、加装、升级都不再发通知，结果只在窗口里）：有开着的窗口就叫回来，没有就开主控小窗口
+/// （带主窗口的这一份开主窗口）
 enum DoneAttention {
     static func clicked(_ info: [AnyHashable: Any]) {
+        if FirstRun.showing { MainWindow.show(); return }
         if let w = FirstRun.window, w.isVisible { Uninstall.bringFront(w); return }
         if let tag = info["notes"] as? String { ReleaseNotesWindow.show(tag: tag); return }
         if !AppWindows.bringBack() { HomeWindow.show() }
     }
 }
 
-/// 「这一版有什么不同」的小窗口：点了升级通知、完成页已经关了时打开（和升级页、检查更新窗口用同一份发布页的更新说明）
+/// 「这一版有什么不同」：点了升级通知、完成页已经关了时打开（和升级页、检查更新窗口用同一份发布页的更新说明）。
+/// 带主窗口的这一份是主窗口里的一页
 enum ReleaseNotesWindow {
     static var window: NSWindow?
+    static let hostID = "release-notes"
+
+    static func close() {
+        MainWindow.dismiss(hostID)
+        window?.close()
+    }
 
     static func show(tag: String) {
         window?.close()
+        // 别的页正忙着（正在卸载、删数据）时没开（busy），主窗口停在那一页；更新说明以后在「检查更新」里也看得到
+        if MainWindow.present(hostID, title: ReleaseNotesView.title(tag), style: .page, { ReleaseNotesView(tag: tag) }) != .noWindow { return }
         let host = NSHostingController(rootView: ReleaseNotesView(tag: tag))
         let w = NSWindow(contentViewController: host)
         w.title = "螺壳 \(tag)"
@@ -209,27 +223,32 @@ enum ReleaseNotesWindow {
 struct ReleaseNotesView: View {
     let tag: String
     @State private var notes: String?
+    @Environment(\.lkHost) private var host
+
+    static func title(_ tag: String) -> String { "螺壳已升级到 \(tag)" }
 
     var body: some View {
         LKPage {
-            HStack(spacing: 14) {
-                LKAppIcon(accessory: "luoke-core", size: 48)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("螺壳已升级到 \(tag)").font(.system(size: 20, weight: .semibold))
+            if host != .page {      // 主窗口里的一页：这句是页标题
+                HStack(spacing: 14) {
+                    LKAppIcon(accessory: "luoke-core", size: 48)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(Self.title(tag)).font(.system(size: 20, weight: .semibold))
+                    }
                 }
+                .padding(.bottom, 16)
             }
-            .padding(.bottom, 16)
             if let n = notes {
-                if n.isEmpty { LKNote(icon: "wifi.exclamationmark", text: "这一版的更新说明没取到（连不上发布页）。可以稍后在菜单的「检查更新」里再看。") }
-                else { LKReleaseNotes(text: n, maxHeight: 240) }
+                if n.isEmpty { LKNote(icon: "wifi-off", text: "这一版的更新说明没取到（连不上发布页）。可以稍后在菜单的「检查更新」里再看。") }
+                else { LKReleaseNotes(text: n) }
             } else {
                 ProgressView().controlSize(.small)
             }
         } footer: {
             Spacer()
-            Button("完成") { ReleaseNotesWindow.window?.close() }.buttonStyle(LKPrimaryButton())
+            Button("完成") { ReleaseNotesWindow.close() }.buttonStyle(LKPrimaryButton())
         }
-        .frame(width: 480, height: 420)
+        .lkWindowSize(width: 480, height: 420)
         .onAppear {
             DispatchQueue.global().async {
                 let n = Updater.notes(for: tag)

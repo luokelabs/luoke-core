@@ -10,6 +10,8 @@ import re
 from typing import Optional
 
 TASK_NAME = re.compile(r"^[a-z0-9][a-z0-9-]*\.[a-z0-9][a-z0-9.-]*$")
+# 用专用模型（主控监管的工作进程）的任务：打分、联想、嵌入、转写（2026-11-05 加，core-private#22）；generate 用底座
+SPECIAL_KINDS = ("score", "predict", "embed", "transcribe")
 
 
 class RecipeError(ValueError):
@@ -51,8 +53,8 @@ class Recipe:
         for name, t in self.tasks.items():
             if not TASK_NAME.match(name):
                 raise RecipeError(f"任务名不合写法：{name}")
-            if t.get("kind") not in ("generate", "score", "predict", "embed"):
-                raise RecipeError(f"任务 {name} 的 kind 要是 generate、score、predict 或 embed")
+            if t.get("kind") not in ("generate", "score", "predict", "embed", "transcribe"):
+                raise RecipeError(f"任务 {name} 的 kind 要是 generate、score、predict、embed 或 transcribe")
             if not t.get("accessory") or not name.startswith(t["accessory"] + "."):
                 raise RecipeError(f"任务 {name} 的 accessory 和任务名前缀不一致")
             if "params" not in t:
@@ -103,7 +105,7 @@ class Recipe:
 
     def model_for_task(self, task: str, tier: str) -> Optional[str]:
         t = self.tasks[task]
-        if t["kind"] in ("score", "predict", "embed"):
+        if t["kind"] in SPECIAL_KINDS:
             return self.special_for(tier, task)
         return self.base_for(tier)
 
@@ -128,3 +130,15 @@ class Recipe:
             return False
         allowed = v.get("versions", [])
         return "*" in allowed or version in allowed
+
+    def task_on_tier(self, task: str, tier: str) -> bool:
+        """任务的 tiers 有没有把这一档排除。没写 tiers（开发配方、没进支持台账的任务）就是每档都行；发布脚本按支持台账填，
+        写的是开着的档，空的就是哪一档都没开（support.on_tiers；release.py 的 diff 阶段对主要任务也这么读）。"""
+        t = self.tasks.get(task)
+        return bool(t) and (t.get("tiers") is None or tier in t["tiers"])
+
+    def task_open(self, task: str, tier: str) -> bool:
+        """配方认的、这一档开着的任务：配件在 verified 里有认的版本，task_on_tier。开发配方 verified 是 "*"，都开。
+        主控只给开着的任务下专用模型（2026-11-03 起，Hub.tier_models）；应用的 Manifests.taskOpen 照同一条规则。"""
+        t = self.tasks.get(task)
+        return bool(t) and bool((self.verified.get(t["accessory"]) or {}).get("versions")) and self.task_on_tier(task, tier)

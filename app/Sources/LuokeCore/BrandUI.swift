@@ -31,6 +31,56 @@ extension Color {
     static let lkDanger     = Color(light: 0xC2412D, dark: 0xF07A66)
 }
 
+/// 这块界面画在哪（11-10：螺壳只有一个窗口）：自己的小窗口（没带主窗口的这一份、安装器），或者主窗口里的一页、一张卡片、整个窗口
+/// （`MainWindow.present` 设）。主窗口里的一页：主窗口给标题和滚动（没有「返回」，用户点侧栏或界面里自己的按钮离开）；
+/// 卡片：主窗口给标题、× 和边距；整个窗口：内容顶到窗口上沿，红黄绿压在左上角，照 `lkTopInset` 让开
+enum LKHostForm { case window, page, card, takeover }
+
+private struct LKHostFormKey: EnvironmentKey { static let defaultValue = LKHostForm.window }
+
+extension EnvironmentValues {
+    var lkHost: LKHostForm {
+        get { self[LKHostFormKey.self] }
+        set { self[LKHostFormKey.self] = newValue }
+    }
+    /// 顶上要给红黄绿让开多高：占整个主窗口时由主窗口给（它的 `lkHostTopInset`），自己的小窗口有标题栏，是 0
+    var lkTopInset: CGFloat {
+        get { self[LKTopInsetKey.self] }
+        set { self[LKTopInsetKey.self] = newValue }
+    }
+}
+
+private struct LKTopInsetKey: EnvironmentKey { static let defaultValue: CGFloat = 0 }
+
+struct LKWindowSize: ViewModifier {
+    let width: CGFloat
+    let height: CGFloat?
+    @Environment(\.lkHost) private var host
+
+    func body(content: Content) -> some View {
+        switch host {
+        case .window, .card: content.frame(width: width, height: height)
+        case .page: content.frame(maxWidth: .infinity, alignment: .topLeading)        // 主窗口那一栏的宽度，高度由主窗口滚
+        case .takeover: content.frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+}
+
+/// 问一句话的小卡片（要权限、开启搜索）：自己的小窗口里四周留 24、宽 460；主窗口的卡片自己留边、定宽，这里铺满它（按钮和 × 对齐）
+struct LKCardBody: ViewModifier {
+    @Environment(\.lkHost) private var host
+
+    func body(content: Content) -> some View {
+        if host == .card { content.frame(maxWidth: .infinity, alignment: .leading) } else { content.padding(24).frame(width: 460) }
+    }
+}
+
+extension View {
+    /// 原来那个小窗口的大小；画在主窗口里时跟着主窗口
+    func lkWindowSize(width: CGFloat, height: CGFloat? = nil) -> some View { modifier(LKWindowSize(width: width, height: height)) }
+    func lkCardBody() -> some View { modifier(LKCardBody()) }
+}
+
 /// 主按钮：lkPrimary 底 + 背景色的字，高 36、圆角 10、14/500（规范 §11：系统 .borderedProminent 深色下字看不清）
 /// destructive：只用于把东西移到废纸篓（卸载），lkDanger 底白字（规范 §11 Button）
 struct LKPrimaryButton: ButtonStyle {
@@ -65,7 +115,23 @@ struct LKSecondaryButton: ButtonStyle {
 struct LKPage<Content: View, Footer: View>: View {
     @ViewBuilder var content: Content
     @ViewBuilder var footer: Footer
+    @Environment(\.lkHost) private var host
+
     var body: some View {
+        if host == .page {
+            // 主窗口里的一页：标题、滚动、边距是主窗口的；按钮接在正文下面
+            VStack(alignment: .leading, spacing: 0) {
+                content
+                HStack(spacing: 8) { footer }.padding(.top, 20)
+            }
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+            .foregroundStyle(Color.lkForeground)
+        } else {
+            window
+        }
+    }
+
+    private var window: some View {
         VStack(spacing: 0) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) { content }
@@ -90,7 +156,7 @@ struct LKSettingRow<Control: View>: View {
     @ViewBuilder var control: Control
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
-            Image(systemName: icon).font(.system(size: 16)).foregroundStyle(Color.lkMuted).frame(width: 20)
+            LKIcon(icon).foregroundStyle(Color.lkMuted).frame(width: 20)
             VStack(alignment: .leading, spacing: 2) {
                 Text(title).font(.system(size: 14))
                 if let d = detail { Text(d).font(.system(size: 13)).foregroundStyle(Color.lkMuted).fixedSize(horizontal: false, vertical: true) }
@@ -115,15 +181,15 @@ enum ModelName {
     }
 }
 
-/// 「这一版有什么不同」：发布正文的更新说明一节，列在窗口里（检查更新窗口、升级页共用）。短的照原样高，长的固定高度可以滚
+/// 「这一版有什么不同」：发布正文的更新说明一节，列在窗口里（检查更新窗口、升级页共用）。有多长画多长，
+/// 滚动交给外面的正文区（UpgradeCard、LKPage）：段数看不出实际高度，几段长的就能把窗口撑破
 struct LKReleaseNotes: View {
     let text: String
-    var maxHeight: CGFloat = 210
     var body: some View {
         if !text.isEmpty {
             let lines = Self.lines(text)
             Text("这一版有什么不同").font(.system(size: 14, weight: .semibold)).padding(.bottom, 8)
-            let list = VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: 6) {
                 ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
                     if line.bullet {
                         HStack(alignment: .top, spacing: 8) {
@@ -138,9 +204,6 @@ struct LKReleaseNotes: View {
             .font(.system(size: 13)).tint(.lkForeground)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(14)
-            Group {
-                if lines.count <= 8 { list } else { ScrollView { list }.scrollIndicators(.never).frame(height: maxHeight) }
-            }
             .background(Color.lkCard).clipShape(.rect(cornerRadius: 12))
             .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.lkBorder))
         }
@@ -163,11 +226,12 @@ struct LKAppIcon: View {
     let accessory: String
     var size: CGFloat = 36
     var body: some View {
-        let asset = ["luoke-mail": "app-mail.png", "luoke-ime": "app-ime.png", "luoke-core": "app-core.png"][accessory]
+        let asset = ["luoke-mail": "app-mail.png", "luoke-ime": "app-ime.png", "luoke-core": "app-core.png",
+                     "luoke-scan": "app-scan.png", "luoke-search": "app-search.png"][accessory]
         if let a = asset, let img = LKAsset.image(a) {
             Image(nsImage: img).resizable().frame(width: size, height: size).clipShape(.rect(cornerRadius: size * 0.22))
         } else {
-            Image(systemName: "app").font(.system(size: size * 0.6)).foregroundStyle(Color.lkMuted).frame(width: size, height: size)
+            LKIcon("app-window", size: size * 0.6).foregroundStyle(Color.lkMuted).frame(width: size, height: size)
         }
     }
 }
@@ -199,7 +263,7 @@ struct LKNote: View {
     }
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
-            Image(systemName: icon).font(.system(size: 13)).foregroundStyle(colors.fg)
+            LKIcon(icon, size: 15).foregroundStyle(colors.fg)
             Text(text).font(.system(size: 13)).foregroundStyle(colors.text).fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 0)
         }
@@ -252,27 +316,72 @@ struct LKBadge: View {
     }
 }
 
-/// 状态小图标：完成（绿底勾）、进行中（转圈）、等待（空心圆）
+/// 状态小图标：完成（绿底勾）、进行中（转圈）、等待（空心圆）、没成（红底叉）
 struct LKStateIcon: View {
     enum State { case done, busy, wait, fail, later }
     let state: State
     var body: some View {
         switch state {
         case .done:
-            Image(systemName: "checkmark").font(.system(size: 9, weight: .bold)).foregroundStyle(.white)
+            LKIcon("check", size: 11).foregroundStyle(.white)
                 .frame(width: 16, height: 16).background(Circle().fill(Color.lkSuccess))
         case .busy: ProgressView().controlSize(.small).scaleEffect(0.7).frame(width: 16, height: 16).tint(.lkBrand)
         case .wait: Circle().stroke(Color.lkInput, lineWidth: 1.5).frame(width: 14, height: 14).frame(width: 16, height: 16)
         case .fail:
-            Image(systemName: "exclamationmark").font(.system(size: 9, weight: .bold)).foregroundStyle(.white)
+            LKIcon("x", size: 11).foregroundStyle(.white)
                 .frame(width: 16, height: 16).background(Circle().fill(Color.lkDanger))
         case .later:       // 推迟了：warning 色的描边圆 + 叹号
-            Image(systemName: "exclamationmark.circle").font(.system(size: 15)).foregroundStyle(Color.lkWarning).frame(width: 16, height: 16)
+            LKIcon("circle-alert").foregroundStyle(Color.lkWarning)
         }
     }
 }
 
 /// 打在主控里的品牌素材（app/Resources/ui，来自 luoke-brand ui/public/img）
+/// 一行放不下就换行的横排（输入法添加步骤的标签用）
+struct LKFlow: Layout {
+    var spacing: CGFloat = 4
+    var lineSpacing: CGFloat = 6
+
+    private func rows(_ width: CGFloat, _ subviews: Subviews) -> [[(Int, CGSize)]] {
+        var rows: [[(Int, CGSize)]] = [[]]
+        var x: CGFloat = 0
+        for (i, v) in subviews.enumerated() {
+            let size = v.sizeThatFits(.unspecified)
+            if x > 0 && x + size.width > width { rows.append([]); x = 0 }
+            rows[rows.count - 1].append((i, size))
+            x += size.width + spacing
+        }
+        return rows
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let width = proposal.width ?? .infinity
+        // 分开写、标明类型：写成一个表达式时 release 构建的类型检查超时（internal-1029-3 卡在这里）
+        var height: CGFloat = 0, used: CGFloat = 0
+        for (n, r) in rows(width, subviews).enumerated() {
+            var w: CGFloat = 0, h: CGFloat = 0
+            for (_, size) in r { w += size.width; h = max(h, size.height) }
+            w += spacing * CGFloat(max(r.count - 1, 0))
+            used = max(used, w)
+            height += h + (n > 0 ? lineSpacing : 0)
+        }
+        return CGSize(width: proposal.width ?? used, height: height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var y = bounds.minY
+        for r in rows(bounds.width, subviews) {
+            let h = r.map(\.1.height).max() ?? 0
+            var x = bounds.minX
+            for (i, size) in r {
+                subviews[i].place(at: CGPoint(x: x, y: y + (h - size.height) / 2), proposal: ProposedViewSize(size))
+                x += size.width + spacing
+            }
+            y += h + lineSpacing
+        }
+    }
+}
+
 enum LKAsset {
     static func image(_ name: String) -> NSImage? {
         if let dir = ProcessInfo.processInfo.environment["LUOKE_UI_ASSETS"] {
@@ -287,6 +396,7 @@ enum LKAsset {
 struct LKRail: View {
     let steps: [String]
     let current: Int
+    @Environment(\.lkTopInset) private var topInset
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
@@ -296,13 +406,14 @@ struct LKRail: View {
                 Text("螺壳").font(.system(size: 14, weight: .semibold))
             }
             .padding(.horizontal, 4).padding(.bottom, 28)
+            .padding(.top, topInset)       // 占整个主窗口：左栏顶到窗口上沿，logo 在红黄绿下面
             VStack(alignment: .leading, spacing: 2) {
                 ForEach(Array(steps.enumerated()), id: \.offset) { i, name in
                     HStack(spacing: 10) {
                         ZStack {
                             if i < current {
                                 Circle().fill(Color.lkPrimary)
-                                Image(systemName: "checkmark").font(.system(size: 9, weight: .bold)).foregroundStyle(Color.lkOnPrimary)
+                                LKIcon("check", size: 11).foregroundStyle(Color.lkOnPrimary)
                             } else {
                                 Circle().stroke(i == current ? Color.lkPrimary : Color.lkBorder, lineWidth: 1)
                                 Text("\(i + 1)").font(.system(size: 11)).foregroundStyle(i == current ? Color.lkForeground : Color.lkMuted)
@@ -334,9 +445,11 @@ struct LKRail: View {
 struct LKTitle: View {
     let title: String
     var sub: String? = nil
+    @Environment(\.lkHost) private var host
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(title).font(.system(size: 20, weight: .semibold)).foregroundStyle(Color.lkForeground)
+            // 主窗口里的一页上面已经有页标题：这一句小一号，当这一步的小标题
+            Text(title).font(.system(size: host == .page ? 17 : 20, weight: .semibold)).foregroundStyle(Color.lkForeground)
             if let s = sub { Text(s).font(.system(size: 14)).foregroundStyle(Color.lkMuted).fixedSize(horizontal: false, vertical: true) }
         }
         .padding(.bottom, 20)
@@ -400,6 +513,8 @@ enum UIRender {
             ("install-0", cardModel), ("first-tier", tierModel), ("install-1", model(.accessories)), ("install-2", model(.consent)),
             ("install-3", fetching(model(.fetching))), ("install-4", done(model(.done), ime: "not_added")),
             ("done-ime-ready", done(model(.done), ime: "ready")),
+            ("done-ime-tutorial-1", { let m = done(model(.done), ime: "not_added"); m.tutorialStep = 0; return m }()),
+            ("done-ime-tutorial-3", { let m = done(model(.done), ime: "not_added"); m.tutorialStep = 2; return m }()),
             ("done-ime-relogin", { let m = done(model(.done), ime: "ready"); m.selectFailed = true; m.reregistered = true; return m }()),
         ]
         let notes = """
@@ -409,6 +524,8 @@ enum UIRender {
         - 检查更新窗口照规范重做：更新说明直接列在这里，下载有进度。
         - 菜单栏换成单色海螺图标，菜单左右排布。
         """
+        // 说明长到正文区放不下时：标题、底栏不动，正文滚
+        let longNotes = "## 更新说明\n\n" + (1...14).map { "- 第 \($0) 条：这一条写得比较长，一行放不下，要折成两行才看得完，用来看正文区能不能滚到底，标题和底栏的按钮还在不在。" }.joined(separator: "\n")
         let manifest: [String: Any] = ["items": ["hub": ["files": [["path": "luoke-core.dmg", "size": 41_900_000, "sha256": ""]]]]]
         func upd(_ phase: UpdateModel.Phase, done: Int64 = 0) -> UpdateModel {
             let u = UpdateModel(found: Updater.Found(tag: "internal-1022", page: "https://github.com/luokelabs/luoke-releases", manifest: manifest, notes: notes), autoCheck: false)
@@ -422,6 +539,7 @@ enum UIRender {
             ("update-latest", upd(.latest)),
             ("update-latest-apps", { let u = upd(.latest); u.appsWithUpdates = ["螺壳邮件助手"]; return u }()),
             ("update-found", upd(.found)),
+            ("update-found-long", { let u = upd(.found); u.found?.notes = longNotes; return u }()),
             ("update-downloading", upd(.working(step: 0), done: 26_400_000)),
             ("update-offline", upd(.offline("更新服务器没有答复（请求超时）"))),
             ("update-unverified", upd(.unverified("安装包不完整，可能下载时断了"))),
@@ -549,6 +667,7 @@ enum UIRender {
         shot("upgrade-fetch", up { $0.line = "正在更新推理引擎 oMLX 0.7.2"; $0.fraction = 0.47 }, NSSize(width: 560, height: 460))
         shot("upgrade-smoke", up { $0.step = 4; $0.line = "正在本机试跑一次…" }, NSSize(width: 560, height: 460))
         shot("upgrade-done", up { $0.done = true; $0.model.releaseNotes = notes }, NSSize(width: 560, height: 460))
+        shot("upgrade-done-long", up { $0.done = true; $0.model.releaseNotes = longNotes }, NSSize(width: 560, height: 460))
         shot("upgrade-done-apps", up { $0.done = true; $0.model.releaseNotes = notes; $0.appsWithUpdates = ["螺壳邮件助手"] }, NSSize(width: 560, height: 460))
         shot("upgrade-failed", up { $0.failure = UpgradeFlow.Failure(step: 3, title: "升级未完成", detail: "推理引擎 oMLX 0.7.2 没更新上：连不上更新服务器。没更新上的还是原来的，照常能用。", retry: .downloads) }, NSSize(width: 560, height: 460))
         let api = AppsModel()
@@ -581,10 +700,92 @@ enum UIRender {
         apf.rows = api.rows
         apf.phase = .done("螺壳输入法没装上：连不上更新服务器。可以再点「安装」重试。", false)
         shot("apps-install-failed", AnyView(AppsView(m: apf)), NSSize(width: 560, height: 460))
+        appsPages(dir: dir)
+    }
+
+    /// 主窗口「添加应用」页（对照稿 luoke-agent docs/主窗口原型.html 的「应用」）：目录三段、详情。
+    /// 照 1004 宽的主窗口画内容区（减去 220 的侧栏是 784）：主窗口给的页标题（26 半粗，下面空 16）、边距（上 28、左右 32）这里照着画
+    @MainActor
+    static func appsPages(dir: String) {
+        func pageShot(_ name: String, _ v: AnyView, height: CGFloat) {
+            let page = AnyView(VStack(alignment: .leading, spacing: 0) {
+                Text("应用").font(.system(size: 26, weight: .semibold)).tracking(-0.26).foregroundStyle(Color.lkForeground).padding(.bottom, 16)
+                v.fixedSize(horizontal: false, vertical: true)      // 和滚动区里一样按内容的高度画，不被截图的高度撑开
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 32).padding(.top, 28)
+            .frame(width: 784, height: height, alignment: .topLeading)
+            .background(Color.lkBackground))
+            for (suffix, scheme) in [("", ColorScheme.light), ("-dark", ColorScheme.dark)] {
+                save(AnyView(page.environment(\.colorScheme, scheme)), scheme: scheme, to: dir, name: name + suffix, size: NSSize(width: 784, height: height))
+            }
+        }
+        typealias Need = AppsModel.Need
+        func mail() -> AppsModel.Row {
+            var r = AppsModel.Row(id: "luoke-mail", name: "螺壳邮件助手", type: "app", installed: "0.19.46", latest: nil, size: 0, unavailable: nil, bundled: true)
+            r.tagline = "用本机模型整理邮箱，每一步都能撤销"
+            r.needs = [Need(title: "邮箱", kind: "account", facts: ["用授权码连接，授权码只存在这台 Mac 的钥匙串里", "邮件内容不离开这台 Mac", "不发信，不永久删除"])]
+            r.memory = true
+            r.reports = ["要你处理的邮件", "可疑邮件", "可以整理的邮件", "按习惯自动处理的邮件", "还没连邮箱"]
+            r.actions = ["按方案处理邮件（归档、删除、移到垃圾邮件、加星标、写草稿）", "撤销刚才的处理", "打开搜到的邮件"]
+            r.data = ["~/.luoke-mail"]
+            r.minTier = "16"
+            return r
+        }
+        func scan() -> AppsModel.Row {
+            var r = AppsModel.Row(id: "luoke-scan", name: "螺壳扫描", type: "app", installed: "0.3.27", latest: nil, size: 0, unavailable: nil, bundled: true)
+            r.tagline = "它为这台 Mac 加护：拂去你不会想念的，无一不可复还。"
+            r.needs = [Need(title: "完全磁盘访问", kind: "system", facts: ["看文件名、大小、修改时间", "重复文件、散落的密钥、AI 的 skill 和说明文件在本机读内容", "结果不出这台 Mac"],
+                            tcc: "SystemPolicyAllFiles"),
+                       Need(title: "不用点就清 4 类", kind: "delegate", facts: []),
+                       Need(title: "删除系统目录里的东西（要 Mac 的密码）", kind: "each-time", facts: [])]
+            r.memory = true
+            r.reports = ["安全问题", "空间被吃掉", "扫描结果", "需要你允许", "自动清掉的"]
+            r.actions = ["执行你点过的清理方案", "把某项标成不用管", "把清理时移进废纸篓的放回原处", "开或关不用点就清的四类"]
+            r.data = ["~/.luoke-scan"]
+            r.minTier = "16"
+            return r
+        }
+        func search(off: Bool = false) -> AppsModel.Row {
+            var r = AppsModel.Row(id: "luoke-search", name: "螺壳搜索", type: "app", installed: "0.1.18", latest: nil, size: 0, unavailable: nil, bundled: true, disabled: off)
+            r.tagline = "在这台 Mac 上找文件和照片，答案带出处"
+            r.needs = [Need(title: "照片图库", kind: "system", facts: ["仅在开启照片搜索时读取", "只读，不修改图库"], tcc: "Photos"),
+                       Need(title: "读你选的文件夹", kind: "each-time", facts: ["仅读取你选择的文件夹", "首次读取时由 macOS 询问"])]
+            r.reports = ["螺壳搜索还没选要搜的地方", "螺壳搜索需要你允许读取", "第一遍索引建好了"]
+            r.actions = ["改螺壳搜索的设置（搜哪些文件夹、要不要照片图库）", "在 Mac 上打开搜到的文件，或在访达中显示"]
+            r.minTier = "16"
+            return r
+        }
+        func ime(installed: String?, latest: String = "0.1.89") -> AppsModel.Row {
+            var r = AppsModel.Row(id: "luoke-ime", name: "螺壳输入法", type: "input-method", installed: installed, latest: latest, size: 20_520_779, unavailable: nil)
+            r.tagline = "小鹤、自然码双拼和全拼，本机模型帮你挑词、往下联想，从你打的字里学"
+            r.memory = true
+            r.minTier = "16"
+            if installed != nil { r.reports = []; r.actions = []; r.data = ["~/.luoke/ime"] }
+            return r
+        }
+        let catalog = AppsModel()
+        catalog.rows = [ime(installed: nil), mail(), scan(), search()]
+        pageShot("apps-page", AnyView(AppsView(m: catalog, inWindow: true)), height: 560)
+        let withUpdate = AppsModel()
+        withUpdate.rows = [ime(installed: "0.1.87"), mail(), scan(), search()]
+        pageShot("apps-page-update", AnyView(AppsView(m: withUpdate, inWindow: true)), height: 520)
+        pageShot("apps-detail-ime", AnyView(AppDetailView(m: catalog, r: ime(installed: nil))), height: 520)
+        let installing = AppsModel()
+        installing.rows = [ime(installed: nil)]
+        installing.phase = .updating("luoke-ime")
+        installing.progress = "正在下载 61%（12.5 MB / 20.5 MB）"
+        installing.fraction = 0.61
+        pageShot("apps-detail-ime-installing", AnyView(AppDetailView(m: installing, r: installing.rows[0])), height: 520)
+        pageShot("apps-detail-scan", AnyView(AppDetailView(m: catalog, r: scan())), height: 820)
+        pageShot("apps-detail-mail", AnyView(AppDetailView(m: catalog, r: mail())), height: 820)
+        let off = AppsModel()
+        off.rows = [ime(installed: "0.1.89"), mail(), scan(), search(off: true)]
+        pageShot("apps-page-off", AnyView(AppsView(m: off, inWindow: true)), height: 420)
     }
 
     @MainActor
-    private static func save(_ view: AnyView, scheme: ColorScheme, to dir: String, name: String, size: NSSize = NSSize(width: 760, height: 540)) {
+    static func save(_ view: AnyView, scheme: ColorScheme, to dir: String, name: String, size: NSSize = NSSize(width: 760, height: 540)) {
         let host = NSHostingView(rootView: view)
         host.frame = NSRect(origin: .zero, size: size)
         host.appearance = NSAppearance(named: scheme == .dark ? .darkAqua : .aqua)

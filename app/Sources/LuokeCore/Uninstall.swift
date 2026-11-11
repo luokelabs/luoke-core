@@ -8,17 +8,41 @@ import SwiftUI
 
 enum Uninstall {
     static var window: NSWindow?
+    private static var model: UninstallModel?
+    static let hostID = "uninstall"
 
-    /// back = 从哪个窗口点进来的（「应用」或「设置」）：已经选好了，直接到确认；取消、完成都回那个窗口
+    /// 关掉卸载页（窗口）
+    static func close() {
+        MainWindow.dismiss(hostID)
+        window?.close()
+    }
+
+    /// back = 从哪儿点进来的（「添加应用」或「设置 · 隐私」）：已经选好了，直接到确认；取消、完成都回那儿。
+    /// 带主窗口的这一份是主窗口里的一页，删着的时候不让走开
     static func show(preselect: String? = nil, back: (() -> Void)? = nil) {
-        if let w = window, w.isVisible {
+        let open = MainWindow.showing(hostID) || window?.isVisible == true
+        if open, let m = model {
             // 开着时又从别处点了「卸载」另一个：没开始删就换成新的；正在删就只叫到前面（10-24 核出：之前一律忽略新的预选）
-            guard preselect != nil, let m = (w.contentViewController as? NSHostingController<UninstallView>)?.rootView.m, !m.busy else { bringFront(w); return }
-            w.close()
+            guard preselect != nil, !m.busy, m.step != .working else {
+                if let w = window, w.isVisible { bringFront(w) } else { MainWindow.show() }
+                return
+            }
+            window?.close()
         }
         let m = UninstallModel()
         // 从「应用」或「设置」点进来：已经选好了，直接到确认（同一时间只一个窗口）
-        if let p = preselect, p == UninstallModel.all || m.items.contains(where: { $0.accessory == p }) { m.chosen = p; m.back = back; m.prepare() }
+        let chosen = preselect.map { p in p == UninstallModel.all || m.items.contains(where: { $0.accessory == p }) } ?? false
+        if chosen, let p = preselect { m.chosen = p; m.back = back }
+        switch MainWindow.present(hostID, title: "卸载", style: .page, canLeave: { m.step != .working }, { UninstallView(m: m) }) {
+        case .busy: return          // 别的页正忙着（正在删数据）：没开，主窗口停在那一页
+        case .shown:
+            model = m
+            if chosen { m.prepare() }
+            return
+        case .noWindow: break
+        }
+        model = m
+        if chosen { m.prepare() }
         let host = NSHostingController(rootView: UninstallView(m: m))
         let w = NSWindow(contentViewController: host)
         w.title = "卸载"
@@ -73,9 +97,7 @@ enum Uninstall {
     /// （10-21 在 macOS 26.4.1 上复现：停用写不进系统、缓存却改成"没有螺壳"，于是没拦住，删了 .app 留下失效的输入源）。
     static func inputSourceEnabled(bundleID: String) -> Bool {
         if ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 26 {
-            let p = Process()
-            p.executableURL = URL(fileURLWithPath: "/usr/bin/defaults")
-            p.arguments = ["export", "com.apple.inputsources", "-"]
+            let p = Spawn.process("/usr/bin/defaults", ["export", "com.apple.inputsources", "-"])
             let out = Pipe()
             p.standardOutput = out
             p.standardError = FileHandle.nullDevice
@@ -104,7 +126,10 @@ enum Uninstall {
     }
 
     static func openInputSettings() {
-        if let u = URL(string: "x-apple.systempreferences:com.apple.Keyboard-Settings.extension?InputSources") { NSWorkspace.shared.open(u) }
+        // 11-02 16 GB 测试机：点了系统设置没开、没有痕迹。打不开就退回打开系统设置本身，并记进日志
+        if let u = URL(string: "x-apple.systempreferences:com.apple.Keyboard-Settings.extension?InputSources"), NSWorkspace.shared.open(u) { return }
+        NSLog("luoke: keyboard settings URL did not open, falling back to System Settings")
+        Installer.shell("/usr/bin/open", ["-b", "com.apple.systempreferences"])
     }
 }
 
@@ -138,7 +163,7 @@ final class UninstallModel: ObservableObject {
     init() {
         // 螺壳记忆排最后：别的配件要忘记忆得靠它
         // 记忆在主控里时，~/Applications 里残留的旧螺壳记忆.app 不列（主控不让单独卸，列出来也删不掉；审查 2026-10-17）
-        items = Accessories.installed().filter { !(Memory.bundled && $0.bundleID == Accessories.memoryBundleID) }.sorted { a, b in
+        items = Accessories.installed(includeDisabled: true).filter { !(Memory.bundled && $0.bundleID == Accessories.memoryBundleID) }.sorted { a, b in
             (a.bundleID == Accessories.memoryBundleID ? 1 : 0, a.name) < (b.bundleID == Accessories.memoryBundleID ? 1 : 0, b.name)
         }
     }
@@ -146,9 +171,9 @@ final class UninstallModel: ObservableObject {
     var isAll: Bool { chosen == UninstallModel.all }
     var targets: [Accessories.Manifest] { isAll ? items : items.filter { $0.accessory == chosen } }
 
-    /// 关掉卸载窗口；从哪个窗口来的回到哪个窗口
+    /// 关掉卸载页；从哪儿来的回到哪儿
     func leave() {
-        Uninstall.window?.close()
+        Uninstall.close()
         if isAll && step == .done && errors.isEmpty { return }     // 全部卸载完了：螺壳马上退出，不再开设置
         back?()
     }
@@ -163,7 +188,7 @@ final class UninstallModel: ObservableObject {
                     let (_, o) = try HubModel.shared.client.request("POST", "/uninstall", body: ["accessory": m.accessory, "dry_run": true], timeout: 150)
                     let f = o["forget"] as? [String: Any]
                     plans.append(Plan(accessory: m.accessory, name: o["name"] as? String ?? m.name, type: o["type"] as? String ?? m.type,
-                                      bundleID: m.bundleID, app: o["app"] as? String ?? m.app.path, data: o["data"] as? [String] ?? [],
+                                      bundleID: m.bundleID, app: m.bundled ? "" : o["app"] as? String ?? m.app.path, data: o["data"] as? [String] ?? [],
                                       forgetRecords: f?["records"] as? Int ?? -1, forgetNotes: f?["notes"] as? Int ?? -1,
                                       memoryNeededBy: o["memory_needed_by"] as? [String] ?? []))
                 }
@@ -190,6 +215,8 @@ final class UninstallModel: ObservableObject {
             var removed: [String] = [], errors: [String] = []
             for p in plans {
                 Uninstall.terminate(bundleID: p.bundleID, markNoRestart: false)
+                let inBody = BundledApps.named(p.accessory)
+                if let inBody { DispatchQueue.main.sync { inBody.stop() } }    // 本体起的，不在 NSRunningApplication 里
                 do {
                     let (_, o) = try HubModel.shared.client.request("POST", "/uninstall",
                                                                      body: ["accessory": p.accessory, "data": data, "forget": forget && p.canForget], timeout: 300)
@@ -197,12 +224,13 @@ final class UninstallModel: ObservableObject {
                     errors += (o["errors"] as? [String] ?? []).map { p.name + "：" + $0 }
                 } catch {
                     errors.append(p.name + "：" + ((error as? HubError)?.message ?? error.localizedDescription))
+                    if let inBody { DispatchQueue.main.async { inBody.start() } }    // 没记下停用：不起来就再没有入口了
                 }
             }
             for p in plans where p.type == "input-method" {
                 // 删完再核一次：同意列表里还有它，就照实说要去系统设置里移除（不只说"卸载完成"）
                 if Uninstall.inputSourceEnabled(bundleID: p.bundleID) {
-                    errors.append("\(p.name)：系统的输入源列表里还有它。请到「系统设置 → 键盘 → 文字输入 → 输入源 → 编辑…」里移除「螺壳」。")
+                    errors.append("\(p.name)：系统的输入源列表里还有它。请到「系统设置 → 键盘 → 文字输入 → 输入法 → 编辑…」里移除「螺壳」。")
                 }
                 // 输入法自己的临时目录和单实例锁（luoke-ime 的 uninstall.sh 也删这两样）
                 let tmp = URL(fileURLWithPath: NSTemporaryDirectory())
@@ -289,7 +317,7 @@ struct UninstallView: View {
         } footer: {
             footer
         }
-        .frame(width: 560, height: 460)
+        .lkWindowSize(width: 560, height: 460)
     }
 
     // MARK: 选
@@ -305,7 +333,7 @@ struct UninstallView: View {
                 if !m.items.isEmpty { Divider().overlay(Color.lkBorder) }
                 choiceRow(id: UninstallModel.all, title: "全部", detail: "所有应用、模型，以及螺壳本身") { LKAppIcon(accessory: "luoke-core") }
             }
-            if let e = m.error { LKNote(icon: "exclamationmark.triangle", text: e, kind: .danger).padding(.top, 12) }
+            if let e = m.error { LKNote(icon: "triangle-alert", text: e, kind: .danger).padding(.top, 12) }
         }
     }
 
@@ -319,7 +347,7 @@ struct UninstallView: View {
                     if let d = detail { Text(d).font(.system(size: 13)).foregroundStyle(Color.lkMuted) }
                 }
                 Spacer()
-                Image(systemName: on ? "largecircle.fill.circle" : "circle").font(.system(size: 16))
+                LKIcon(on ? "circle-dot" : "circle", size: 18)
                     .foregroundStyle(on ? Color.lkPrimary : Color.lkInput)
             }
             .padding(.horizontal, 16).padding(.vertical, 12).contentShape(Rectangle())
@@ -333,6 +361,16 @@ struct UninstallView: View {
         VStack(alignment: .leading, spacing: 0) {
             LKTitle(title: m.isAll ? "卸载全部" : "卸载\(m.plans.first?.name ?? "")",
                     sub: m.isAll ? "所有应用、模型和引擎都会删掉，记忆文件保留。" : nil)
+            // 放在最上面：「全部」的清单比窗口长，放底下要滚动才看得到，点了像没反应（11-02 16 GB 测试机）
+            if let name = m.inputSourceBlocked {
+                // 文案与 luoke-ime 的添加引导一致（luoke-community 2026-10-16 核对）：列表里叫「螺壳」（英文系统「Luoke 螺壳」）
+                VStack(alignment: .leading, spacing: 8) {
+                    LKNote(icon: "keyboard", text: "「\(name)」的输入源还开着。请先在「系统设置 → 键盘 → 文字输入 → 输入法 → 编辑…」里移除「螺壳」，再点「卸载」。", kind: .warning)
+                    Button { Uninstall.openInputSettings() } label: { LKLabel("打开输入法设置", icon: "square-arrow-out-up-right") }
+                        .buttonStyle(LKSecondaryButton())
+                }
+                .padding(.bottom, 12)
+            }
             VStack(spacing: 10) {
                 ForEach(m.plans, id: \.accessory) { p in
                     VStack(alignment: .leading, spacing: 6) {
@@ -340,10 +378,14 @@ struct UninstallView: View {
                             LKAppIcon(accessory: p.accessory, size: 28)
                             Text(p.name).font(.system(size: 14, weight: .medium))
                         }
-                        Text(p.app).font(.system(size: 12, design: .monospaced)).foregroundStyle(Color.lkMuted).textSelection(.enabled)
+                        if p.app.isEmpty {
+                            Text("它在螺壳里，跟螺壳一起删。").font(.system(size: 12)).foregroundStyle(Color.lkMuted)
+                        } else {
+                            Text(p.app).font(.system(size: 12, design: .monospaced)).foregroundStyle(Color.lkMuted).textSelection(.enabled)
+                        }
                         ForEach(p.data, id: \.self) { Text($0).font(.system(size: 12, design: .monospaced)).foregroundStyle(Color.lkMuted) }
                         if !p.memoryNeededBy.isEmpty {
-                            LKNote(icon: "exclamationmark.triangle", text: p.memoryNeededBy.joined(separator: "、") + "还在用记忆，记忆文件不动。", kind: .warning)
+                            LKNote(icon: "triangle-alert", text: p.memoryNeededBy.joined(separator: "、") + "还在用记忆，记忆文件不动。", kind: .warning)
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -366,15 +408,6 @@ struct UninstallView: View {
                             Toggle("", isOn: $m.forget).toggleStyle(.switch).controlSize(.small).tint(.lkPrimary).labelsHidden()
                         }
                     }
-                }
-                .padding(.top, 12)
-            }
-            if let name = m.inputSourceBlocked {
-                // 文案与 luoke-ime 的添加引导一致（luoke-community 2026-10-16 核对）：列表里叫「螺壳」（英文系统「Luoke 螺壳」）
-                VStack(alignment: .leading, spacing: 8) {
-                    LKNote(icon: "keyboard", text: "「\(name)」的输入源还开着。请先在「系统设置 → 键盘 → 文字输入 → 输入源 → 编辑…」里移除「螺壳」，再点「卸载」。", kind: .warning)
-                    Button { Uninstall.openInputSettings() } label: { Label("打开输入源设置", systemImage: "arrow.up.right.square") }
-                        .buttonStyle(LKSecondaryButton())
                 }
                 .padding(.top, 12)
             }
@@ -423,7 +456,7 @@ struct UninstallView: View {
         switch m.step {
         case .pick:
             Spacer()
-            Button("取消") { Uninstall.window?.close() }.buttonStyle(LKSecondaryButton(ghost: true))
+            Button("取消") { Uninstall.close() }.buttonStyle(LKSecondaryButton(ghost: true))
             Button("下一步") { m.prepare() }.buttonStyle(LKPrimaryButton()).keyboardShortcut(.defaultAction).disabled(m.chosen.isEmpty || m.busy)
         case .confirm:
             if m.back != nil {

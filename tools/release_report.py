@@ -97,6 +97,10 @@ def summary(tag: str, prev: str = None) -> list:
     ne = not_evaluated(tag)
     if ne:
         lines.append("没评成（沿用上一版的开关）：" + "、".join(f"{t} {g} GB" for t, g in ne) + "。")
+    for repo, note in sorted((tl.get("kept") or {}).items()):
+        lines.append(note + "。")
+    for repo, why in sorted((tl.get("dropped") or {}).items()):
+        lines.append(f"这一版没带 {repo}（{why}）。")
     if tl.get("failed"):
         lines.append("停在：" + tl["failed"])
     return lines

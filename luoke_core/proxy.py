@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 from typing import Optional
 
+from .worker.textops import neutralize, tokenizer_markers  # noqa: F401   三路（对话、打分、嵌入）共用一份；hub 从这里取
+
 ROLES = ("system", "user", "assistant")
 
 
@@ -22,14 +24,6 @@ def _text_of(content) -> str:
     if isinstance(content, list):   # OpenAI 的分段内容，只认文字段
         return "".join(p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text")
     return ""
-
-
-def neutralize(text: str, special_tokens: list) -> str:
-    """把消息里出现的底座特殊 token 串中和掉（插一个零宽空格），免得配件文字冒充模板。"""
-    for tok in special_tokens:
-        if tok and tok in text:
-            text = text.replace(tok, tok[0] + "​" + tok[1:])
-    return text
 
 
 def build_engine_payload(body: dict, task_params: dict, base_params: dict, model_id: str,
@@ -102,5 +96,5 @@ def error_body(code: str, message: str, retry_after: Optional[float] = None, **e
     return json.dumps(d, ensure_ascii=False).encode("utf-8")
 
 
-STATUS = {"invalid_request": 400, "forbidden": 403, "unknown_accessory": 403, "task_unavailable": 404, "unsupported": 404,
-          "input_too_long": 413, "busy": 503, "paused": 503, "not_ready": 503, "needs_user": 503, "engine_failed": 503}
+STATUS = {"invalid_request": 400, "forbidden": 403, "unknown_accessory": 403, "undeclared": 403, "task_unavailable": 404, "unsupported": 404,
+          "input_too_long": 413, "session_lost": 409, "superseded": 409, "busy": 503, "paused": 503, "not_ready": 503, "needs_user": 503, "engine_failed": 503}

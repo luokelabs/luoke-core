@@ -56,6 +56,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import support  # noqa: E402  任务 × 档的支持台账
 sys.path.insert(0, os.path.join(ROOT, "tools"))
 import minos_check  # noqa: E402  发布前核对每一项里 Mach-O 的最低 macOS
+import vm_build  # noqa: E402  实验室配置开了就在一次性 VM 里编
 
 PY = "/usr/bin/python3"
 SH_ENV = dict(os.environ, LANG="en_US.UTF-8", LC_ALL="en_US.UTF-8")   # shell 脚本里有中文：没有 UTF-8 locale 时 bash 会把 $var 后面的中文标点当变量名
@@ -63,8 +64,24 @@ STAGES = ["eval", "diff", "recipe", "engine", "manifest", "build", "sign", "dmg"
 EVALS = os.path.join(ROOT, "tools", "release_evals.json")
 MODELSCOPE_URL = "https://modelscope.cn/api/v1/models/{org}/{repo}/repo?Revision={rev}&FilePath={{path}}"
 GITHUB_URL = "https://github.com/{repo}/releases/download/{tag}"
+# GitLab 镜像（顶层 ADR 0017 的 10-29 修订，luoke-core#39）：luoke-releases 每次发布由它的 GitHub Actions 同步到 gitlab.com 的同名仓库，
+# 文件放在软件包库里（路径照 luoke-releases 的 .github/gitlab-mirror.sh）；同名同 sha256，清单里每样东西多一个地址，主控连不上 GitHub 时换着下
+GITLAB_URL = "https://gitlab.com/api/v4/projects/{project}/packages/generic/{package}/{tag}"
 HUGGINGFACE_URL = "https://huggingface.co/{org}/{repo}/resolve/main/{{path}}"   # 第二地址（2026-10-16 定）；主控测速后选快的、断了换
 APP_NAME = "螺壳"
+BUNDLE_ID = "ai.luoke.core"     # 正式版的身份（2026-10-13 定，发布后不改）
+
+
+def file_bases(a, tag: str, local_dir: str) -> list:
+    """发布文件（配件包、引擎包、主控 DMG）的地址前缀，按顺序：测试托管，或 GitHub（加上 GitLab 镜像）；都没给就是本机 file://"""
+    if a.url_base:
+        return [a.url_base.rstrip("/")]
+    if not a.github:
+        return ["file://" + local_dir]
+    out = [GITHUB_URL.format(repo=a.github, tag=tag)]
+    if a.gitlab:
+        out.append(GITLAB_URL.format(project=urllib.parse.quote(a.gitlab, safe=""), package=a.gitlab.split("/")[-1], tag=tag))
+    return out
 
 
 def say(msg: str) -> None:
@@ -129,13 +146,21 @@ def run_tier(tiers: list) -> str:
     return max(tiers, key=lambda t: int(t))
 
 
+def prompt_detail(result: dict) -> dict:
+    """提示词搬进文件以后（顶层 ADR 0019 的 11-04 修订），评测结果顶层带 prompt_sha256（这个任务用到的全部提示词文件合起来的哈希）
+    和 prompt_files：抄进证据的 detail，看得出这一版评的是哪一份提示词。没带的（搬之前的版本）不加这两项。"""
+    return {k: result[k] for k in ("prompt_sha256", "prompt_files") if result.get(k) is not None}
+
+
 def summarize_mail_triage(result: dict) -> dict:
     s = result["score"]
     hard_ok = s.get("false_alarm", 0) == 0 and s.get("safety", 0) >= s.get("safety_n", 0) - 1
     return {"hard_ok": hard_ok, "score": s["basic"] + s["hard"], "score_max": s["basic_n"] + s["hard_n"], "n": s.get("n"),
             "latency": {"avg_seconds": s.get("avg_seconds")},
-            "detail": {k: s.get(k) for k in ("basic", "basic_n", "hard", "hard_n", "action", "safety", "safety_n",
-                                              "false_alarm", "normal_n", "json_first_try", "wall_seconds")},
+            # watch：新加、只观察的题（luoke-mail 0.19 起），不进分数和硬性条目，差异报告和证据里照实看得到
+            "detail": {**{k: s.get(k) for k in ("basic", "basic_n", "hard", "hard_n", "action", "safety", "safety_n",
+                                                "false_alarm", "normal_n", "json_first_try", "wall_seconds",
+                                                "watch", "watch_n", "watch_wrong")}, **prompt_detail(result)},
             "machine": result.get("machine"), "date": result.get("date")}
 
 
@@ -159,7 +184,7 @@ def summarize_mail_task(result: dict) -> dict:
     s = result["score"]
     return {"hard_ok": bool(s.get("passes")), "score": s["ok"], "score_max": s["n"], "n": s["n"],
             "latency": {"seconds": s.get("seconds")},
-            "detail": {k: v for k, v in s.items() if k not in ("ok", "n", "passes", "seconds")},
+            "detail": {**{k: v for k, v in s.items() if k not in ("ok", "n", "passes", "seconds")}, **prompt_detail(result)},
             "evalset_sha256": result.get("set_sha256"), "machine": result.get("machine"), "date": result.get("date")}
 
 
@@ -167,9 +192,11 @@ def summarize_ime_result(result: dict) -> dict:
     """luoke-ime engines/xiaohe/bench.py --result：score.final_top1_pct 是总分，latency.settled 是最后一个键到不标 more 的答复。"""
     sc, lat = result["score"], result.get("latency") or {}
     settled = lat.get("settled") or {}
-    return {"hard_ok": True, "score": float(sc["final_top1_pct"]), "score_max": 100.0, "n": (result.get("evalset") or {}).get("n"),
+    # 硬性条目由评测程序自己判（luoke-ime 0.1.41 起 score.hard_ok：改错的条数 broke ≤ broke_max）；旧证据没有这个字段时照旧算过
+    return {"hard_ok": bool(sc.get("hard_ok", True)), "score": float(sc["final_top1_pct"]), "score_max": 100.0, "n": (result.get("evalset") or {}).get("n"),
             "latency": {"p50_ms": settled.get("p50_ms"), "p90_ms": settled.get("p90_ms"), "first_p90_ms": (lat.get("first") or {}).get("p90_ms")},
             "detail": {"settled_top1_pct": sc.get("settled_top1_pct"), "fast_top1_pct": sc.get("fast_top1_pct"), "space": sc.get("space"),
+                       "fixed": sc.get("fixed"), "broke": sc.get("broke"), "broke_max": sc.get("broke_max"),
                        "hub": result.get("hub"), "engine_options": (result.get("combo") or {}).get("engine_options")},
             "evalset_sha256": (result.get("evalset") or {}).get("sha256"), "machine": result.get("machine"), "date": result.get("date")}
 
@@ -177,9 +204,32 @@ def summarize_ime_result(result: dict) -> dict:
 def summarize_ime_predict(result: dict) -> dict:
     """luoke-ime engines/personal/eval_predict.py --result：总分 = 给出联想时第一个对的比例（现在用的门槛）。"""
     sc, lat = result["score"], result.get("latency") or {}
-    return {"hard_ok": True, "score": float(sc["top1_when_shown_pct"]), "score_max": 100.0, "n": (result.get("evalset") or {}).get("n"),
+    # 硬性条目由评测程序自己判（luoke-ime 0.1.41 起 score.hard_ok：shown_pct、top1_when_shown_pct 都过 floors）；旧证据没有时照旧算过
+    return {"hard_ok": bool(sc.get("hard_ok", True)), "score": float(sc["top1_when_shown_pct"]), "score_max": 100.0, "n": (result.get("evalset") or {}).get("n"),
             "latency": {"p50_ms": lat.get("p50_ms"), "p90_ms": lat.get("p90_ms")},
-            "detail": {"shown_pct": sc.get("shown_pct"), "top3_when_shown_pct": sc.get("top3_when_shown_pct"), "gate": sc.get("gate"), "gates": sc.get("gates")},
+            "detail": {"shown_pct": sc.get("shown_pct"), "top3_when_shown_pct": sc.get("top3_when_shown_pct"), "gate": sc.get("gate"), "gates": sc.get("gates"),
+                       "floors": sc.get("floors")},
+            "evalset_sha256": (result.get("evalset") or {}).get("sha256"), "machine": result.get("machine"), "date": result.get("date")}
+
+
+def summarize_ime_transcribe(result: dict) -> dict:
+    """luoke-ime evals/transcribe/eval_transcribe.py --result：总分 = 字准确率（score.char_accuracy_pct，不算数字写法）；硬性条目由评测程序判
+    （score.hard_ok：按住不说话不出字）；延迟看终稿（latency.final），草稿另记。"""
+    sc, lat = result["score"], result.get("latency") or {}
+    final = lat.get("final") or {}
+    return {"hard_ok": bool(sc.get("hard_ok")), "score": float(sc["char_accuracy_pct"]), "score_max": 100.0, "n": (result.get("evalset") or {}).get("n"),
+            "latency": {"p50_ms": final.get("p50_ms"), "p90_ms": final.get("p90_ms"), "draft": lat.get("draft")},
+            "detail": {"by_category_cer_pct": sc.get("by_category_cer_pct"), "voices": sc.get("voices"), "cer_pct": sc.get("cer_pct")},
+            "evalset_sha256": (result.get("evalset") or {}).get("sha256"), "machine": result.get("machine"), "date": result.get("date")}
+
+
+def summarize_ime_tidy(result: dict) -> dict:
+    """luoke-ime evals/tidy/eval_tidy.py --result：总分 = 整理后的字准确率；硬性条目由评测程序判（score.hard_ok：本来通顺的、像在给模型下指令的
+    一个字不改，算上引擎的长度检查）；不算长度检查时模型自己过没过（model_hard_ok）、被长度检查换回原文的几条在 detail 里。"""
+    sc, lat = result["score"], result.get("latency") or {}
+    return {"hard_ok": bool(sc.get("hard_ok")), "score": float(sc["char_accuracy_pct"]), "score_max": 100.0, "n": (result.get("evalset") or {}).get("n"),
+            "latency": {"p50_ms": lat.get("p50_ms"), "p90_ms": lat.get("p90_ms")},
+            "detail": {k: sc.get(k) for k in ("exact", "exact_n", "by_category_exact", "model_hard_ok", "guarded", "prompt_sha256")},
             "evalset_sha256": (result.get("evalset") or {}).get("sha256"), "machine": result.get("machine"), "date": result.get("date")}
 
 
@@ -193,8 +243,20 @@ def summarize_mem_topics(result: dict) -> dict:
     return {"hard_ok": bool(result.get("hard_pass")), "score": pct("interest_recall") or 0.0, "score_max": 100.0, "n": int(result.get("cases") or 1),
             "latency": {"seconds": sc.get("seconds")},
             "detail": {"dislike_recall": pct("dislike_recall"), "dislikes_unsaid": sc.get("dislikes_unsaid"), "specific": pct("specific"),
-                       "hard_failures": sc.get("hard_failures")},
+                       "hard_failures": sc.get("hard_failures"), **prompt_detail(result)},
             "evalset_sha256": result.get("set_sha256"), "machine": result.get("machine"), "date": result.get("date")}
+
+
+def summarize_scan_task(result: dict) -> dict:
+    """luoke-scan bench/run_eval.py --task <任务>：一次只跑一个任务，tasks 里就这一项。硬性条目 = hard_passed 等于 hard_total
+    （一次都不能错）且没有没跑成的；总分 = 过了的条数（score / total）；提示词版本和哈希、没跑成的条数在 detail 里。
+    它的 machine 是一行字（不是 machine_summary 那样的 dict），放进 detail，不盖掉评测这一步记的机器。"""
+    (t,) = result["tasks"].values()
+    return {"hard_ok": t["hard_passed"] == t["hard_total"] and not t.get("not_run"), "score": t["score"], "score_max": t["total"],
+            "n": t["total"], "latency": {"seconds_median": t.get("seconds_median")},
+            "detail": {**{k: t.get(k) for k in ("hard_passed", "hard_total", "not_run", "repeat", "prompt_version", "prompt_sha256", "evalset_version")},
+                       "machine_reported": result.get("machine")},
+            "evalset_sha256": t.get("evalset_sha256"), "date": result.get("date")}
 
 
 def summarize_mem_typing(result: dict) -> dict:
@@ -204,8 +266,21 @@ def summarize_mem_typing(result: dict) -> dict:
     return {"hard_ok": bool(result.get("hard_pass")), "score": round(100 * float(sc["term_recall"]), 1), "score_max": 100.0, "n": cases,
             "latency": {"seconds": sc.get("seconds")},
             "detail": {"interest_recall": round(100 * float(sc["interest_recall"]), 1), "common_terms_per_case": round(float(sc["common_terms"]) / cases, 2),
-                       "common_terms": sc.get("common_terms"), "hard_failures": sc.get("hard_failures")},
+                       "common_terms": sc.get("common_terms"), "hard_failures": sc.get("hard_failures"), **prompt_detail(result)},
             "evalset_sha256": result.get("set_sha256"), "machine": result.get("machine"), "date": result.get("date")}
+
+
+def summarize_embed_parity(result: dict) -> dict:
+    """tools/embed_parity.py --result：硬性条目 = 参考向量每条余弦都 ≥ 阈值（顶层 ADR 0018）；总分 = 过了几条。
+    请求没成（这一档的嵌入进程起不来、答不上）也是这一档没过，原因在 detail.error。"""
+    rows = result.get("rows") or []
+    th = float(result.get("threshold") or 0.999)
+    return {"hard_ok": bool(result.get("ok")) and not result.get("error"), "score": sum(1 for r in rows if r["cosine"] >= th),
+            "score_max": int(result.get("expected") or len(rows)), "n": int(result.get("expected") or len(rows)),
+            "latency": {"ms": result.get("ms")},
+            "detail": {"min_cosine": result.get("min_cosine"), "cosines": {r["name"]: r["cosine"] for r in rows}, "tier": result.get("tier"),
+                       "vector_space": result.get("vector_space"), "media": result.get("media"), "error": result.get("error")},
+            "evalset_sha256": result.get("vectors_sha256")}
 
 
 # 评测程序没跑完、原因是主控 / 引擎说内存放不下：这一档不支持，不是评测出了毛病
@@ -286,8 +361,9 @@ def run_watched(cmd: list, cwd: str, env: dict, task: str, kind: str, hub_log: s
 
 MEMORY_REFUSAL = re.compile(r"(内存不够|memory guard rejected|too_large)[^\n]*")
 
-SUMMARIZERS = {"mail-triage": "result", "mail-task": "result", "ime-result": "result", "ime-predict-result": "result",
-               "mem-typing": "result", "mem-topics": "result", "ime-rerank-stdout": "stdout"}
+SUMMARIZERS = {"mail-triage": "result", "mail-task": "result", "ime-result": "result", "ime-predict-result": "result", "ime-transcribe-result": "result", "ime-tidy-result": "result",
+               "mem-typing": "result", "mem-topics": "result", "embed-parity": "result", "scan-task": "result",
+               "ime-rerank-stdout": "stdout"}
 
 
 def apply_known_issues(summ: dict, spec: dict, tier: str, result_path: Optional[str]) -> None:
@@ -324,6 +400,9 @@ def summarize(kind: str, result_path: Optional[str], stdout: str) -> dict:
     if kind == "mail-triage":
         with open(result_path, encoding="utf-8") as f:
             return summarize_mail_triage(json.load(f))
+    if kind == "embed-parity":
+        with open(result_path, encoding="utf-8") as f:
+            return summarize_embed_parity(json.load(f))
     if kind == "mail-task":
         with open(result_path, encoding="utf-8") as f:
             return summarize_mail_task(json.load(f))
@@ -333,9 +412,18 @@ def summarize(kind: str, result_path: Optional[str], stdout: str) -> dict:
     if kind == "mem-topics":
         with open(result_path, encoding="utf-8") as f:
             return summarize_mem_topics(json.load(f))
+    if kind == "scan-task":
+        with open(result_path, encoding="utf-8") as f:
+            return summarize_scan_task(json.load(f))
     if kind in ("ime-result", "ime-predict-result"):
         with open(result_path, encoding="utf-8") as f:
             return (summarize_ime_result if kind == "ime-result" else summarize_ime_predict)(json.load(f))
+    if kind == "ime-transcribe-result":
+        with open(result_path, encoding="utf-8") as f:
+            return summarize_ime_transcribe(json.load(f))
+    if kind == "ime-tidy-result":
+        with open(result_path, encoding="utf-8") as f:
+            return summarize_ime_tidy(json.load(f))
     if kind == "ime-rerank-stdout":
         return summarize_ime_rerank(stdout)
     raise RuntimeError(f"不认识的汇总方式 {kind}")
@@ -564,7 +652,8 @@ def stage_eval(a, paths: Paths, recipe: Recipe) -> None:
             for c in by_tier[tier]:
                 spec = evals[c["task"]]
                 repo = os.path.normpath(a.repo_override.get(spec["accessory"]) or os.path.join(ROOT, spec["repo"]))   # --repo 指定的冻结副本优先
-                subs = {"hub": hub.sock, "label": f"release-{paths.release}-{tier}", "repo": repo, "ime_corpus": a.ime_corpus, "raw": paths.raw}
+                subs = {"hub": hub.sock, "label": f"release-{paths.release}-{tier}", "repo": repo, "ime_corpus": a.ime_corpus, "raw": paths.raw,
+                        "core": ROOT}      # 评测程序在主控这边的（嵌入的 tools/embed_parity.py，参考向量在配件仓库里）
                 for req in spec.get("requires", []):
                     if not subs.get(req) or not os.path.exists(subs[req]):
                         die(f"{c['task']} 需要 {req}（给 --{req.replace('_', '-')}）")
@@ -690,6 +779,15 @@ def published(rec: str) -> bool:
         return False
 
 
+def evaluated(rec: str) -> bool:
+    """这一版真评过吗：--no-eval 出的版（pins.json 的 eval_mode 是 none）只拷了上一版的证据，不算"""
+    try:
+        with open(os.path.join(rec, "pins.json"), encoding="utf-8") as f:
+            return json.load(f).get("eval_mode") != "none"
+    except (OSError, ValueError, AttributeError):
+        return True
+
+
 def previous_release(current: str, explicit: Optional[str]) -> Optional[str]:
     if explicit:
         return explicit
@@ -697,9 +795,9 @@ def previous_release(current: str, explicit: Optional[str]) -> Optional[str]:
     pat = re.compile(r"^(beta\d+(\.\d+)?|internal-\d{4}(-\d+)?)$")
     root = os.path.join(ROOT, "releases")
     # 只挑真发出去了的（steps.json 记了 publish）：没出成的那版只有半截证据、没有台账，拿它比，台账从头算、证据也缺
-    # （10-26：internal-1026-2 两次没出成，新开的 1026-5 按证据时间会挑到它）
+    # （10-26：internal-1026-2 两次没出成，新开的 1026-5 按证据时间会挑到它）；--no-eval 出的版也跳过，往前找真评过的
     names = [n for n in os.listdir(root) if n != current and pat.match(n) and os.path.isdir(os.path.join(root, n, "evidence"))
-             and published(os.path.join(root, n))] if os.path.isdir(root) else []
+             and published(os.path.join(root, n)) and evaluated(os.path.join(root, n))] if os.path.isdir(root) else []
     names.sort(key=lambda n: os.path.getmtime(os.path.join(root, n, "evidence")))
     return names[-1] if names else None
 
@@ -724,6 +822,70 @@ def stage_diff(a, paths: Paths) -> None:
         die("有总分回退：看过报告后加 --accept 再跑后面的阶段。", 2)
 
 
+def bundled_verified(repo_override: dict) -> dict:
+    """打进主控的 agent 核心（luoke-core#68，--repo luoke-agent=<钉住的提交的检出>）没有评测的任务，评测证据里不会有它；
+    照那份 luoke_agent/__init__.py 的版本号写进已验证版本，不然主控对它的 GET /tasks、GET /accessories 都答 403，
+    窗口里看不到任何应用。没给 --repo luoke-agent=… 就不写（这一版不带 agent）。"""
+    src = repo_override.get("luoke-agent")
+    if not src:
+        return {}
+    path = os.path.join(src, "luoke_agent", "__init__.py")
+    try:
+        with open(path, encoding="utf-8") as f:
+            m = re.search(r'^__version__\s*=\s*["\']([^"\']+)["\']', f.read(), re.M)
+    except OSError:
+        m = None
+    if not m:
+        die(f"要打进主控的 agent 核心读不到版本号：{path}")
+    return {"luoke-agent": {"versions": [m.group(1)]}}
+
+
+def bundled_unverified(src: str, verified: dict) -> Optional[str]:
+    """收进本体的应用版本不在配方里时答那个版本：主控不给它干活。它有评测的任务，版本由评测证据写进配方，
+    不像 agent 核心那样照源码补，补了就绕过了评测。清单在 Resources（螺壳搜索）或 packaging（螺壳邮件助手）。"""
+    path = os.path.join(src, "Resources", "luoke-accessory.json")
+    for other in (os.path.join(src, "packaging", "accessory.json"), os.path.join(src, "packaging", "luoke-accessory.json")):
+        if not os.path.exists(path):
+            path = other
+    with open(path, encoding="utf-8") as f:
+        m = json.load(f)
+    versions = (verified.get(m["accessory"]) or {}).get("versions", [])
+    return None if m["version"] in versions or "*" in versions else m["version"]
+
+
+def check_scan_evidence(tag: str, src: str, verified: dict) -> None:
+    """要打进主控的螺壳扫描版本没有评测证据：主控不给它的生成任务（说明、认应用、看 skill）干活，扫描照扫，卡片上少了模型的话。
+    内部版、本机版照出（写进流程报告），RC、正式版停（#102 审查：和搜索一样）。在配方这一步停，不等打包。"""
+    bad = bundled_unverified(src, verified)
+    if not bad:
+        return
+    why = f"要打进主控的螺壳扫描 {bad} 没有评测证据：主控不给它的生成任务干活"
+    if not tag.startswith(("internal-", "local-")):
+        die(f"{why}。这一版的评测要跑 luoke-scan 的任务")
+    say(f"{why}；内部版照出")
+
+
+def check_bundled_evidence(tag: str, src: str, verified: dict) -> None:
+    """要打进主控的螺壳搜索版本没有评测证据（这一格关着挪到发布后，或者没评成）：主控不给它算向量，只能按字词搜。
+    内部版、本机版照出，internal_build.py 写进流程报告（11-05 定：不为这个挡住内部版）；RC、正式版停。在这里停，不等打包：打包失败会被当成主窗口编不过"""
+    bad = bundled_unverified(src, verified)
+    if not bad:
+        return
+    why = f"要打进主控的螺壳搜索 {bad} 没有评测证据：主控不给它算向量，只能按字词搜"
+    if not tag.startswith(("internal-", "local-")):
+        die(f"{why}。这一版的评测要跑 luoke-search.embed")
+    say(f"{why}；内部版照出")
+
+
+def evidence_conclusion(d: dict) -> str:
+    """配方里一条证据的结论。--no-eval 改记了钉住版本的（evaluated_version）照实写没评过"""
+    return (f"{d['accessory']} {d['accessory_version']} 的 {d['task']} 在 {d['model']}（{'/'.join(d['tiers'])} GB 档）上 "
+            f"{d['score']}/{d['score_max']}，硬性条目{'过' if d['hard_ok'] else '没过'}"
+            + (f"（已知问题例外：{'、'.join(k['tag'] for k in d['known_issues'])}）" if d.get("known_issues") else "")
+            + (f"（未评测，沿用 {d['evaluated_version']} 的结果）" if d.get("evaluated_version") else "")
+            + f"（{d['machine'].get('chip', '')}，{d['date']}）")
+
+
 def stage_recipe(a, paths: Paths) -> None:
     with open(a.template, encoding="utf-8") as f:
         r = json.load(f)
@@ -743,12 +905,22 @@ def stage_recipe(a, paths: Paths) -> None:
         v["tasks"].setdefault(task, []).append({"model": model, "tiers": d["tiers"], "accessory_version": d["accessory_version"],
                                                 "score": d["score"], "score_max": d["score_max"], "hard_ok": d["hard_ok"], "evidence": ev_sha})
         evidence.append({"accessory": d["accessory"], "version": d["accessory_version"], "task": task, "model": model, "tiers": d["tiers"],
-                         "conclusion": f"{d['accessory']} {d['accessory_version']} 的 {task} 在 {model}（{'/'.join(d['tiers'])} GB 档）上 "
-                                       f"{d['score']}/{d['score_max']}，硬性条目{'过' if d['hard_ok'] else '没过'}"
-                                       + (f"（已知问题例外：{'、'.join(k['tag'] for k in d['known_issues'])}）" if d.get("known_issues") else "")
-                                       + f"（{d['machine'].get('chip', '')}，{d['date']}）",
+                         "conclusion": evidence_conclusion(d),
                          **({"known_issues": d["known_issues"]} if d.get("known_issues") else {}),
                          "evalset_sha256": d["evalset"]["sha256"], "evidence_sha256": ev_sha, "machine": d["machine"], "date": d["date"]})
+    for acc, v in bundled_verified(a.repo_override).items():
+        have = verified.setdefault(acc, {"versions": []})["versions"]
+        have.extend(x for x in v["versions"] if x not in have)
+    search_src = a.repo_override.get("luoke-search")
+    if search_src:
+        check_bundled_evidence(paths.release, search_src, verified)
+    scan_src = a.repo_override.get("luoke-scan")
+    if scan_src:
+        check_scan_evidence(paths.release, scan_src, verified)
+    mail_src = a.repo_override.get("luoke-mail")
+    bad = bundled_unverified(mail_src, verified) if mail_src else None
+    if bad:      # 和搜索不一样，内部版也停：它的任务主控全拒，这一版的邮件助手用不了
+        die(f"要打进主控的螺壳邮件助手 {bad} 没有评测证据：主控不给它干活。这一版的评测要跑 luoke-mail 的任务")
     r["verified"] = verified
     r["evidence"] = evidence
     # 哪一档开：只看支持台账（tools/support.py；diff 阶段算好存在 support.json，没跑 diff 就现算）
@@ -883,7 +1055,7 @@ def stage_manifest(a, paths: Paths) -> None:
         src = next((os.path.join(a.model_source, c) for c in (m.get("source"), m["dir"]) if c and os.path.isdir(os.path.join(a.model_source, c))), None)
         if not src:
             die(f"模型目录里没有 {name}（{m.get('source') or m['dir']}），--model-source {a.model_source}")
-        if a.url_base:
+        if a.url_base and not (a.modelscope or a.huggingface):     # 测试托管时模型也给了真实地址的，照真实地址下
             item = download.make_item_from_dir(src, name, "model", r["recipe_version"], a.url_base.rstrip("/") + "/models/" + urllib.parse.quote(m["dir"]))
         elif a.modelscope or a.huggingface:
             item = download.make_item_from_dir(src, name, "model", r["recipe_version"], "")
@@ -912,6 +1084,7 @@ def stage_manifest(a, paths: Paths) -> None:
             die(f"{app} 的配件标识是 {m.get('accessory')}，不是 {name}")
         if subprocess.run(["spctl", "-a", "-t", "exec", app], capture_output=True).returncode != 0:
             die(f"{app} 没过 Gatekeeper 评估（没签名公证？），不能进清单")
+        leak_check(app, name)
         apps._ls("-u", app)      # spctl 会把这份 .app 登记进 LaunchServices：注销，别和负责人在用的那份抢 bundle id（登记只在 luoke_core/apps.py 管）
         limit, bad = minos_check.check_app(app)     # 包里任何 Mach-O 要的系统高于它声称的最低 macOS 就不出清单（2026-10-15 启动器、输入法引擎都中过招）
         if bad:
@@ -921,9 +1094,9 @@ def stage_manifest(a, paths: Paths) -> None:
         if os.path.exists(zip_path):
             os.remove(zip_path)
         subprocess.run(["ditto", "-c", "-k", "--keepParent", app, zip_path], check=True)
-        base = a.url_base.rstrip("/") if a.url_base else (GITHUB_URL.format(repo=a.github, tag=paths.release) if a.github else "file://" + paths.acc_dir)
+        bases = file_bases(a, paths.release, paths.acc_dir)
         local = local or not (a.github or a.url_base)
-        item = download.make_item_from_file(zip_path, "accessory", m["version"], base)
+        item = download.make_item_from_file(zip_path, "accessory", m["version"], *bases)
         item.update({"accessory": name, "bundle_id": m["bundle_id"], "type": m.get("type", "app"), "name": m.get("name", name),
                      "memory": bool(m.get("memory")), "installer": f"安装{m.get('name', name).replace('螺壳', '')}.app"})
         if m.get("min_macos"):
@@ -936,9 +1109,8 @@ def stage_manifest(a, paths: Paths) -> None:
     if os.path.exists(paths.engine_info):
         with open(paths.engine_info, encoding="utf-8") as f:
             e = json.load(f)
-        base = a.url_base.rstrip("/") if a.url_base else (GITHUB_URL.format(repo=a.github, tag=paths.release) if a.github else "file://" + paths.engine_dir)
         local = local or not (a.github or a.url_base)
-        items["engine"] = download.make_item_from_file(e["zip"], "engine", e["version"], base)
+        items["engine"] = download.make_item_from_file(e["zip"], "engine", e["version"], *file_bases(a, paths.release, paths.engine_dir))
         if e.get("min_macos"):
             items["engine"]["min_macos"] = e["min_macos"]     # 引擎包实际要求的 macOS（engine 阶段按包里的 Mach-O 算出）
         r["engine"]["version"] = e["version"]
@@ -968,13 +1140,86 @@ def stage_build(a, paths: Paths) -> None:
         mem_ver = json.load(f)["version"]
     if not Recipe.load(paths.recipe).version_verified("luoke-mem", mem_ver):
         die(f"要打进主控的螺壳记忆 {mem_ver} 不在配方的已验证版本里：learn 会被拒")
+    # 主窗口和 agent 核心（luoke-core#68）：--repo luoke-agent=<钉住的提交的检出> 给了才带；没给传空的，
+    # 不让 build_app.sh 退回并排的工作区（出版机上那份不是钉住的提交）
+    agent_src = a.repo_override.get("luoke-agent", "")
+    say(f"主窗口和 agent 核心：{agent_src}" if agent_src else "这一版不带主窗口和 agent 核心（没给 --repo luoke-agent=…）")
+    if agent_src:
+        agent_ver = bundled_verified(a.repo_override)["luoke-agent"]["versions"][0]
+        if not Recipe.load(paths.recipe).version_verified("luoke-agent", agent_ver):
+            die(f"要打进主控的 agent 核心 {agent_ver} 不在配方的已验证版本里：主控会拒它，窗口里看不到应用。"
+                "recipe 阶段也要带上 --repo luoke-agent=…")
+    # 螺壳搜索（ADR 0022）：--repo luoke-search=<钉住的提交的检出> 给了才带，放进 Contents/Helpers
+    search_src = a.repo_override.get("luoke-search", "")
+    if search_src:
+        say(f"螺壳搜索：{search_src}")
+    # 螺壳邮件助手（ADR 0022）：--repo luoke-mail=<钉住的提交的检出> 给了才带，代码进自带的 Python
+    mail_src = a.repo_override.get("luoke-mail", "")
+    if mail_src:
+        say(f"螺壳邮件助手：{mail_src}")
+    # 螺壳扫描（ADR 0022 的 11-05 修订）：--repo luoke-scan=<release 的 tag 的检出> 给了才带，程序放进 Contents/Helpers、
+    # 库放 Contents/Frameworks、数据放 Contents/Resources/scan，不生成 .app
+    scan_src = a.repo_override.get("luoke-scan", "")
+    scan_env = {}
+    if scan_src:
+        say(f"螺壳扫描：{scan_src}")
+        team = release_team()
+        if team:
+            scan_env["LUOKE_RELEASE_TEAM"] = team
+        elif paths.release.startswith(("internal-", "local-")):
+            say("注意：定不了编进扫描的团队标识（设 LUOKE_RELEASE_TEAM）：扫描起它的工具前只核标识、不核团队；内部版照出")
+        else:
+            die("定不了编进扫描的团队标识：签名钥匙串里的 Developer ID Application 证书不是正好一个团队。设 LUOKE_RELEASE_TEAM 再打；"
+                "RC、正式版不出只核标识的扫描")
     env = dict(SH_ENV, LUOKE_RECIPE_FILE=paths.recipe, LUOKE_RELEASE_FILE=paths.manifest, LUOKE_MEM_SRC=mem_src,
-               LUOKE_BUNDLE_ID="ai.luoke.core")      # 正式版的身份；build_app.sh 默认是开发版（ai.luoke.core.dev，10-23）
-    subprocess.run(["sh", os.path.join(ROOT, "app", "build_app.sh"), out], check=True, env=env)
+               LUOKE_AGENT_SRC=agent_src, LUOKE_SEARCH_SRC=search_src, LUOKE_MAIL_SRC=mail_src, LUOKE_SCAN_SRC=scan_src,
+               LUOKE_BUNDLE_ID=BUNDLE_ID, **scan_env)      # build_app.sh 默认是开发版（ai.luoke.core.dev，10-23）
+    if vm_build.enabled(paths.release):
+        # 编在一次性 VM 里，拷回来；下面的 minos 和泄漏词照样在宿主机上查（词表不进 VM）
+        say(f"在 VM 里编（{vm_build.image_version()}）")
+        try:
+            rec = vm_build.build_app(env, out, os.path.basename(paths.app))
+        except vm_build.ERRORS as e:
+            die(f"VM 里编主控：{type(e).__name__}：{e}")
+        say(f"VM 编完：镜像 {rec['image']}，病毒库 daily {rec.get('clamav_daily', '—')}，构建记录 {os.path.join(out, 'vm-build.json')}")
+    else:
+        subprocess.run(["sh", os.path.join(ROOT, "app", "build_app.sh"), out], check=True, env=env)
     limit, bad = minos_check.check_app(paths.app)
     if bad:
         die(f"主控 .app 声称最低 macOS {limit}，但这些程序 / 库要更高的系统：\n  " + "\n  ".join(f"{v}  {p}" for p, v in sorted(bad)[:20]))
     say(f"主控：{paths.app}（所有 Mach-O 的 minos ≤ {limit}）")
+    leak_check(paths.app, "主控 .app")
+
+
+def leak_check(app: str, what: str) -> None:
+    """上传前查安装包里的文本有没有泄漏词（人名、实验室机器名、私有仓库名；10-30 早会定每次出版都查）。命中就停。
+    两份词表：tools/public_tree.py（不随公开代码导出，钉私有提交时才有）和 tools/public_sync.py 的通用规则 + 本机词表
+    （~/.config/luoke/leak-patterns，LUOKE_LEAK_PATTERNS 可以指别处）。公开版钉的是公开提交，里面没有 public_tree.py，
+    所以出版机上要有本机词表；两份都没有就停"""
+    import public_sync
+    hits, notes = [], []
+    try:
+        import public_tree
+    except ImportError:
+        public_tree = None
+    else:
+        hits += [(p, n, l) for p, n, l in public_tree.scan_package(app)]
+    path = os.environ.get("LUOKE_LEAK_PATTERNS", public_sync.DEFAULT_PATTERNS)
+    if os.path.exists(os.path.expanduser(path)):
+        try:
+            found, notes = public_sync.scan_dir(app, public_sync.load_patterns(path))
+        except public_sync.Stop as e:
+            die(f"{what}：查不了泄漏词：{e}")
+        seen = {(p, n) for p, n, _ in hits}
+        hits += [(p, n, l) for p, n, _, l in found if (p, n) not in seen]
+    elif public_tree is None:
+        die(f"钉的提交里没有 tools/public_tree.py，出版机上也没有本机词表 {path}：查不了安装包里的泄漏词")
+    if hits:
+        die(f"{what} 里有 {len(hits)} 行泄漏词，不能上传（先在源码里清掉）：\n  " +
+            "\n  ".join(f"{p}:{n}: {l}" for p, n, l in hits[:30]) + ("" if len(hits) <= 30 else f"\n  …共 {len(hits)} 行"))
+    for p, _, _, l in notes[:10]:
+        say(f"{what}：{p} 里有编译机路径 {l}（不在本机词表里，只提示）")
+    say(f"{what}：安装包里没有泄漏词")
 
 
 def resolve_identity(identity: str) -> str:
@@ -1004,24 +1249,65 @@ def confirm_identity(identity: str, yes: bool) -> str:
     return sha1
 
 
+def check_bundle_id(app: str) -> None:
+    """发出去的只能是正式版的身份：Info.plist 和签名都要是 BUNDLE_ID。开发版的身份打进去的话，邮件助手对它不查签名，
+    release_sign.sh、make_dmg.sh 和检查更新都不看 bundle id，这里是最后一道"""
+    with open(os.path.join(app, "Contents", "Info.plist"), "rb") as f:
+        declared = plistlib.load(f).get("CFBundleIdentifier")
+    shown = subprocess.run(["codesign", "-dv", app], capture_output=True, text=True).stderr      # codesign 把这些写在 stderr
+    found = re.search(r"^Identifier=(.+)$", shown, re.M)
+    signed = found.group(1) if found else None
+    if declared != BUNDLE_ID or signed != BUNDLE_ID:
+        die(f"{app} 的身份不对：Info.plist 是 {declared}，签名是 {signed}，正式版要 {BUNDLE_ID}")
+
+
 def stage_sign(a, paths: Paths) -> None:
     if not os.path.isdir(paths.app):
         die(f"没有主控 .app：{paths.app}（先跑 build）")
     sha1 = confirm_identity(a.identity, a.yes)
     cmd = ["sh", os.path.join(ROOT, "tools", "release_sign.sh"), paths.app, "--identity", sha1] + (["--notarize"] if a.notarize else [])
     subprocess.run(cmd, check=True, env=SH_ENV)
+    check_bundle_id(paths.app)
+    check_scan(a, paths.app)
+
+
+def check_scan(a, app: str) -> None:
+    """螺壳里的扫描签好以后照它自己那一版的核对再过一遍（scripts/package_app.py --verify-app）：各程序的标识还在、hardened runtime、
+    和螺壳同一个团队、没有「可以载入别人签的库」，再用包里的工具离了 Homebrew 认一遍 EICAR。没带扫描就不查。"""
+    scan_src = a.repo_override.get("luoke-scan", "")
+    if not scan_src or not os.path.isdir(os.path.join(app, "Contents", "Resources", "scan")):
+        return
+    r = subprocess.run([sys.executable, "-I", os.path.join(scan_src, "scripts", "package_app.py"), "--verify-app", app],
+                       capture_output=True, text=True, encoding="utf-8", errors="replace")
+    print(((r.stdout or "") + (r.stderr or ""))[-2500:], flush=True)
+    if r.returncode != 0:
+        die("螺壳里的扫描核对没过（见上面）")
+
+
+def release_team() -> str:
+    """出版用的 Developer ID 的团队标识（编进扫描：root 那一步和扫描起它的工具前用它核签名）：LUOKE_RELEASE_TEAM，没给就从
+    签名钥匙串（LUOKE_SIGN_KEYCHAIN）里的 Developer ID Application 证书读；读不到或不止一个团队就是 ""。"""
+    team = os.environ.get("LUOKE_RELEASE_TEAM", "")
+    if not team:
+        kc = os.environ.get("LUOKE_SIGN_KEYCHAIN", "")
+        r = subprocess.run(["security", "find-identity", "-v", "-p", "codesigning"] + ([kc] if kc else []), capture_output=True, text=True)
+        teams = set(re.findall(r'"Developer ID Application: .*\(([A-Z0-9]{10})\)"', r.stdout or ""))
+        team = teams.pop() if len(teams) == 1 else ""
+    return team if re.fullmatch(r"[A-Z0-9]{10}", team) else ""
 
 
 def stage_dmg(a, paths: Paths) -> None:
     if not os.path.isdir(paths.app):
         die(f"没有主控 .app：{paths.app}")
+    check_bundle_id(paths.app)
     sha1 = resolve_identity(a.identity)
     cmd = ["sh", os.path.join(ROOT, "tools", "make_dmg.sh"), paths.app, paths.dmg, "--identity", sha1, "--drag"] + (["--notarize"] if a.notarize else [])
     subprocess.run(cmd, check=True, env=SH_ENV)
     with open(paths.manifest, encoding="utf-8") as f:
         manifest = json.load(f)
-    base = a.url_base.rstrip("/") if a.url_base else (GITHUB_URL.format(repo=a.github, tag=paths.release) if a.github else "file://" + paths.out)
-    manifest["items"]["hub"] = download.make_item_from_file(paths.dmg, "hub", HUB_VERSION, base)
+    bases = file_bases(a, paths.release, paths.out)
+    base = bases[0]
+    manifest["items"]["hub"] = download.make_item_from_file(paths.dmg, "hub", HUB_VERSION, *bases)
     # 发布只出螺壳一个 DMG（10-26，luoke#7："装一个螺壳，在里面开启不同的应用"）：应用都在螺壳的「应用」窗口里装、升级，
     # 不再出按应用命名的安装器 DMG（ADR 0002 的做法，螺壳里认这种安装器的代码留着，旧的 DMG 打开照样能用）。--installer-dmgs 还能出
     manifest["installers"] = {}
@@ -1072,9 +1358,10 @@ def main() -> None:
     ap.add_argument("--engine-app", default="/Applications/oMLX.app")
     ap.add_argument("--accessory", action="append", default=[], help="名字=公证过的 .app 路径（例如 luoke-mail=~/Codes/luoke/luoke-mail/build.noindex/螺壳邮件助手.app），可写多次；进清单供首次运行安装，并各出一个安装器 DMG")
     ap.add_argument("--github", default=None, help="<账号>/<仓库>：主控 DMG 和引擎包放它的 Releases，tag 就是发布号")
+    ap.add_argument("--gitlab", default=None, help="<组>/<仓库>：--github 那个仓库在 gitlab.com 上的镜像（luoke-releases 的 Actions 同步过去），清单里每个发布文件多一个地址；没有 --github 时不用")
     ap.add_argument("--huggingface", default=None, help="Hugging Face 的组织或账号名（模型的第二地址；主控下载时测速选快的、断了换）")
-    ap.add_argument("--modelscope", default=None, help="ModelScope 的组织或账号名（封闭测试用负责人的个人账号，公开版用组织；模型仓库名 = 模型目录名）")
-    ap.add_argument("--url-base", default=None, help="测试托管：所有条目的地址前缀（例如 http://100.x.y.z:8765），模型在 <前缀>/models/<目录>/；盖过 --github / --modelscope")
+    ap.add_argument("--modelscope", default=None, help="ModelScope 的组织或账号名（流水线用组织；模型仓库名 = 模型目录名，要有 luoke-* 版本标签）")
+    ap.add_argument("--url-base", default=None, help="测试托管：配件包、引擎包、主控的地址前缀（例如 http://100.x.y.z:8765），盖过 --github；没给 --modelscope / --huggingface 时模型也从这里下（<前缀>/models/<目录>/）")
     ap.add_argument("--prev", default=None, help="和哪个发布比（默认 releases/ 里最近的一个）")
     ap.add_argument("--identity", default="Developer ID Application")
     ap.add_argument("--installer-dmgs", action="store_true", help="另出按应用命名的安装器 DMG（10-26 起默认不出，只出螺壳一个）")

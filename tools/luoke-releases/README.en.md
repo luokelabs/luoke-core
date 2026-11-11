@@ -1,5 +1,3 @@
-<!-- English source of the luokelabs/luoke-releases README, maintained by luoke-core next to README.md (Chinese); change and upload both together. -->
-
 [简体中文](README.md) | English
 
 # luoke-releases: Luoke releases

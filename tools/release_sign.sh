@@ -4,6 +4,8 @@
 # - 默认证书 "Developer ID Application"（钥匙串里按前缀找到唯一一张），默认公证条目 luoke.ai。
 # - 自带 Python 的 .app（打包脚本的产物、主控）：先签 Resources 里所有 Mach-O（python 可执行文件、.so、.dylib），再签启动器/主程序，最后签 .app。
 #   Python 要的 entitlements 默认用 tools/entitlements-python.plist（允许未签名的可执行内存；不关库校验——所有库都是同一个 Team 签的）。
+# - 螺壳本体和 .app 用 tools/entitlements-core.plist：Contents/Helpers 里的程序要照片、Apple Events，系统看的是外层。
+# - Contents/Helpers 里的裸程序：沿用打包时定的 id 和 entitlements（螺壳搜索靠 id 认自己，丢了就起不来），签完核一遍。
 # - 只签、只公证，不上传到别处、不替换任何已装的东西。输出放在原 .app 旁边：<名字>.zip（公证提交用）和 <名字>.notarize.log。
 set -eu
 set -o pipefail     # `… | tail` 之后取的是 tail 的退出码：签名、公证、staple 失败会被吞掉（审查 2026-10-17）
@@ -22,7 +24,10 @@ done
 [ -d "$app" ] || { echo "用法：$0 <某.app> [--notarize]" >&2; exit 64; }
 app=$(cd "$app" && pwd)
 here=$(cd "$(dirname "$0")" && pwd)
+main_ent=$ent
 [ -n "$ent" ] || ent="$here/entitlements-python.plist"
+# 带着 Contents/Helpers 的螺壳：里面的程序用的照片、Apple Events 算在外层头上，外层要有这些 entitlement
+[ -n "$main_ent" ] || { [ -x "$app/Contents/MacOS/LuokeCore" ] && [ -d "$app/Contents/Helpers" ] && main_ent="$here/entitlements-core.plist" || main_ent=$ent; }
 name=$(basename "$app" .app)
 
 # 证书：按前缀找，必须唯一
@@ -54,10 +59,20 @@ done
 if [ -d "$app/Contents/Frameworks" ]; then
   find "$app/Contents/Frameworks" -depth -name "*.framework" -o -depth -name "*.dylib" | while read -r f; do sign "$f"; done
 fi
-# 3. 启动器 / 主程序，带 entitlements（它们 exec python）
-for exe in "$app"/Contents/MacOS/*; do sign --entitlements "$(ent_for "$exe")" "$exe"; done
-# 4. 整个 .app
-sign --entitlements "$(ent_for "$app")" "$app"
+# 3. Helpers 里的裸程序
+if [ -d "$app/Contents/Helpers" ]; then
+  for f in "$app"/Contents/Helpers/*; do
+    want=$(codesign -dv "$f" 2>&1 | sed -n 's/^Identifier=//p')
+    sign --preserve-metadata=identifier,entitlements "$f"
+    got=$(codesign -dv "$f" 2>&1 | sed -n 's/^Identifier=//p')
+    [ -n "$got" ] && [ "$got" = "$want" ] || { echo "$f 签完 id 是 ${got}，原来是 ${want}" >&2; exit 1; }
+  done
+fi
+# 4. 启动器 / 主程序，带 entitlements（它们 exec python）
+main_ent_for() { if [ "$preserve" = 1 ]; then ent_for "$1"; else echo "$main_ent"; fi; }
+for exe in "$app"/Contents/MacOS/*; do sign --entitlements "$(main_ent_for "$exe")" "$exe"; done
+# 5. 整个 .app
+sign --entitlements "$(main_ent_for "$app")" "$app"
 codesign --verify --deep --strict --verbose=2 "$app" 2>&1 | tail -2
 echo "== 签名完成（${identity}，hardened runtime，时间戳）"
 

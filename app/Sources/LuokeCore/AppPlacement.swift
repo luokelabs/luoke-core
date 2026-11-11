@@ -45,11 +45,11 @@ enum AppPlacement {
             guard bundleID(dst) != nil, bundleID(dst) == bundleID(src) else { return false }
             ls("-u", dst); try? fm.removeItem(at: dst)
         }
-        guard Installer.shell("/usr/bin/ditto", [src.path, dst.path]) == 0 else {
+        guard Installer.shell("/usr/bin/ditto", [src.path, dst.path], access: .luoke) == 0 else {
             try? fm.removeItem(at: dst)
             return false
         }
-        Installer.shell("/usr/bin/xattr", ["-dr", "com.apple.quarantine", dst.path])   // 公证过的拷贝：去掉下载标记，免得被 App Translocation
+        Installer.shell("/usr/bin/xattr", ["-dr", "com.apple.quarantine", dst.path], access: .luoke)   // 公证过的拷贝：去掉下载标记，免得被 App Translocation
         if src.standardizedFileURL.path != dst.standardizedFileURL.path { ls("-u", src) }
         ls(register ? "-f" : "-u", dst)
         return true
@@ -71,6 +71,12 @@ enum AppPlacement {
         if fm.fileExists(atPath: keep.path) { ls("-u", keep); try fm.removeItem(at: keep) }
         try move(app, to: keep, register: false)
         return keep
+    }
+
+    /// 注销登记，挪进废纸篓（用户看得见，要找回也在那里）
+    static func trash(_ app: URL) throws {
+        ls("-u", app)
+        try FileManager.default.trashItem(at: app, resultingItemURL: nil)
     }
 
     /// 两个位置对调（回滚：a 是现在用的，b 是 *.noindex 里的旧版；对调后 a 处登记、b 处注销）

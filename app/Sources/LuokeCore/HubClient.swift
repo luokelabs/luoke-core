@@ -93,6 +93,8 @@ struct HubStatus {
     let loaded: String?
     let engineAlive: Bool
     let engineReady: Bool
+    let engineMissing: Bool          // 引擎包还没装（首次运行下载中或下载失败、点了「先继续」）：不算出错
+    let engineError: String?         // 最近一次引擎没起来的原因
     let interactive: Bool
     let backgroundState: String
     let backgroundReasons: [String]
@@ -128,6 +130,8 @@ struct HubStatus {
         loaded = o["loaded"] as? String
         engineAlive = o["engine_alive"] as? Bool ?? false
         engineReady = o["engine_ready"] as? Bool ?? false
+        engineMissing = o["engine_missing"] as? Bool ?? false
+        engineError = o["engine_error"] as? String
         interactive = o["interactive"] as? Bool ?? false
         let bg = o["background"] as? [String: Any] ?? [:]
         backgroundState = bg["state"] as? String ?? "?"
@@ -150,12 +154,17 @@ struct HubStatus {
     /// 菜单第一行：出错了 / 启动中 / 工作中 / 空闲（和菜单栏图标同一套判断，HubModel.lightState）
     enum State: String { case error = "出错了", starting = "启动中", working = "工作中", idle = "空闲" }
     var state: State {
-        if breaker != nil || !engineAlive { return .error }
+        if breaker != nil || (!engineAlive && !engineMissing) { return .error }
         if !engineReady { return .starting }
         if job != nil || interactive { return .working }
         return .idle
     }
     var stateValue: String { state.rawValue }
+
+    /// 引擎起不来：熔断了，或者没在跑、包已装上、主控报了原因（刚起、正在重启时还没有原因，不算）
+    var engineDown: Bool { breaker != nil || (!engineAlive && !engineMissing && engineError != nil) }
+    /// 引擎出错时照实说的几行：熔断和最近一次没起来的原因都写（熔断后原因还在：退出码、日志在哪）
+    var engineProblems: [String] { [breaker, engineError].compactMap { $0 } }
 
     /// 后台暂停时菜单上多出的一行；在跑就不说
     var backgroundPaused: String? {

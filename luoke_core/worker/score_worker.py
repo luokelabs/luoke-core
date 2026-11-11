@@ -25,7 +25,7 @@ from mlx_lm import load
 from mlx_lm.models.cache import ArraysCache, KVCache, make_prompt_cache
 
 try:
-    from luoke_core.worker.textops import hit_stop, token_texts
+    from luoke_core.worker.textops import hit_stop, neutralize, token_texts, tokenizer_markers
 except ImportError:      # 工作进程跑在引擎包的 Python 里，luoke_core 不在它的路径上：按文件名读旁边的 textops.py
     import importlib.util as _ilu
     import os as _os
@@ -33,16 +33,22 @@ except ImportError:      # 工作进程跑在引擎包的 Python 里，luoke_cor
     _textops = _ilu.module_from_spec(_spec)
     _spec.loader.exec_module(_textops)
     hit_stop, token_texts = _textops.hit_stop, _textops.token_texts
+    neutralize, tokenizer_markers = _textops.neutralize, _textops.tokenizer_markers
 
 PREFIX = "\n"
+MARKERS: list = []     # 模型分词器里的记号（main 里读）：配件的前文和候选先中和再分词，免得一封邮件里夹的 <|endoftext|> 被认成真的控制 token
+
+
+def encode(tok, text):
+    return tok.encode(neutralize(text, MARKERS))
 
 
 def tokenize(tok, ctx, cands):
     ctx = PREFIX + ctx
-    ctx_ids = tok.encode(ctx)
+    ctx_ids = encode(tok, ctx)
     seqs, shared = [], []
     for c in cands:
-        full = tok.encode(ctx + c)
+        full = encode(tok, ctx + c)
         k = 0
         while k < min(len(ctx_ids), len(full)) and ctx_ids[k] == full[k]:
             k += 1
@@ -125,7 +131,7 @@ STOP = set("，。！？、；：,.!?;:\n\r\t 　“”‘’\"'（）()《》�
 def continuations(model, tok, ctx, store, k=8, steps=6, chars=6):
     """联想（算法来自 luoke-ime 的 scorer.py）：前文后面最可能的 k 个开头，各贪心续到标点、steps 个 token 或 chars 个字。
     返回 [(text, 总 log 概率, 第一个 token 的文字, 它的 log 概率), ...]，最好的在前；开头就是标点的、空的丢掉。"""
-    ids = tok.encode(PREFIX + ctx)
+    ids = encode(tok, PREFIX + ctx)
     cache, first, hit = store.prefix(ids)
     top = mx.argsort(-first[0])[:k]
     lp0 = first[0][top]
@@ -185,7 +191,7 @@ def continue_branches(model, tok, ctx, store, k=8, max_tokens=6, stop=None):
     不丢、不并、不截任何一支；停止串所在的那个 token 照样交回。"""
     stop = [s for s in (stop or []) if s]
     eos = getattr(tok, "eos_token_id", None)
-    ids = tok.encode(PREFIX + ctx)
+    ids = encode(tok, PREFIX + ctx)
     cache, first, hit = store.prefix(ids)
     top = mx.argsort(-first[0])[:k]
     lp0 = first[0][top]
@@ -259,6 +265,7 @@ def main():
     a = ap.parse_args()
     mx.set_cache_limit(max(64, a.cache_mb) * 2**20)
     model, tok = load(a.model_dir)
+    MARKERS[:] = tokenizer_markers(a.model_dir)
     store = PrefixStore(model, size=max(1, a.snapshots))
     score(model, tok, "预热", ["一下", "已下"], store)
     print(json.dumps({"ready": True, "snapshots": a.snapshots, "cache_limit_mb": a.cache_mb, **mem_mb()}), flush=True)

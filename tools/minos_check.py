@@ -129,10 +129,40 @@ def offenders(root: str, max_version: str) -> list:
     return [(p, v) for p, v in iter_machos(root) if version_tuple(v) > mx]
 
 
+def helper_min(app: str, rel: str) -> Optional[str]:
+    """打进螺壳的配件里的程序和库自己声称的最低 macOS：Resources/x 里清单的 min_macos。它可以比螺壳声称的高，本体在低的系统上不起它；
+    算 x 的有：Contents/Helpers/luoke-x、luoke-x-*（luoke-scan-admin），以及 Resources/x/bundled-tools.json 里列的
+    Helpers/、Frameworks/ 下的文件（扫描带的 ClamAV、YARA 和它们的库）。都不是就 None，按 .app 声称的查。"""
+    import json
+    parts = rel.split(os.sep)
+    if len(parts) != 3 or parts[0] != "Contents" or parts[1] not in ("Helpers", "Frameworks"):
+        return None
+    res = os.path.join(app, "Contents", "Resources")
+    for x in sorted(os.listdir(res)) if os.path.isdir(res) else []:
+        mp = os.path.join(res, x, "luoke-accessory.json")
+        if not os.path.isfile(mp):
+            continue
+        owns = parts[1] == "Helpers" and (parts[2] == f"luoke-{x}" or parts[2].startswith(f"luoke-{x}-"))
+        if not owns:
+            try:
+                with open(os.path.join(res, x, "bundled-tools.json"), encoding="utf-8") as f:
+                    owns = f"{parts[1]}/{parts[2]}" in {t.get("file") for t in json.load(f) if isinstance(t, dict)}
+            except (OSError, ValueError, TypeError):
+                owns = False
+        if owns:
+            try:
+                with open(mp, encoding="utf-8") as f:
+                    v = json.load(f).get("min_macos")
+            except (OSError, ValueError):
+                return None
+            return str(v) if v else None
+    return None
+
+
 def check_app(app: str, max_version: Optional[str] = None) -> tuple:
     """返回 (声称的最低版本, 超过的列表)。max_version 没给就用 .app 自己声称的；两样都没有就按 14.0（打包脚本的默认）。"""
     limit = max_version or declared_min(app) or "14.0"
-    return limit, offenders(app, limit)
+    return limit, [(p, v) for p, v in iter_machos(app) if version_tuple(v) > version_tuple(helper_min(app, p) or limit)]
 
 
 def main(argv: list) -> int:

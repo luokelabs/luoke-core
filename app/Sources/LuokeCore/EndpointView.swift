@@ -18,7 +18,7 @@ struct EndpointView: View {
 
     var body: some View {
         LKGroup {
-            LKSettingRow(icon: "point.3.connected.trianglepath.dotted", title: "本机接口",
+            LKSettingRow(icon: "network", title: "本机接口",
                          detail: "让其他 AI 工具用螺壳的模型，只在这台 Mac 上能连。") {
                 Toggle("", isOn: Binding(get: { enabled }, set: { set(enabled: $0) }))
                     .toggleStyle(.switch).controlSize(.small).tint(.lkPrimary).labelsHidden().disabled(busy)

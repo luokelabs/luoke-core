@@ -5,6 +5,7 @@ Copyright 2026 螺壳实验室 Luoke Labs
 
 仓库里带的第三方代码各按自己的许可，没有改动（除注明的文件头）：
 - luoke_core/worker/vendor/embedding_gemma2/：取自 mlx-vlm，MIT（Copyright © 2025 Prince Canuma），见该目录的 README.md 和 LICENSE。
+- app/Resources/lucide/：Lucide 图标（lucide-static 1.64.0，https://lucide.dev），ISC，见同目录的 LICENSE；打包后在 螺壳.app 的 Contents/Resources/lucide/。
 - tools/vendor/：dmgbuild、ds_store、mac_alias，MIT，只给出版工具用、不进 螺壳.app，见 tools/vendor/README.md。
 - tools/runtime-licenses/：螺壳自带的 Python 运行时（python-build-standalone）各组件的许可原文。
 

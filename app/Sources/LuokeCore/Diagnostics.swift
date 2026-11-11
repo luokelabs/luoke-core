@@ -1,13 +1,25 @@
-// 导出诊断信息（V1 §9）：只含机型、芯片、内存、档位、版本、任务状态、冒烟结果和速度、错误码、主控日志（只有元数据）。不含请求文字。
+// 导出诊断信息（V1 §9）：只含机型、芯片、内存、档位、版本、任务状态、冒烟结果和速度、错误码、主控日志（只有元数据）、各应用最近的日志（过 redacted）。不含请求文字。
 import AppKit
 import Foundation
 
 enum Diagnostics {
+    /// 选存到哪：带主窗口的这一份挂在主窗口上（打开主窗口），不另弹一个框（11-10：只有一个窗口）
     static func export(model: HubModel) {
         let panel = NSSavePanel()
         panel.nameFieldStringValue = "螺壳诊断-\(dateStamp()).txt"
         panel.canCreateDirectories = true
+        if let w = MainWindow.sheetParent() {
+            panel.beginSheetModal(for: w) { r in
+                guard r == .OK, let url = panel.url else { return }
+                write(model: model, to: url)
+            }
+            return
+        }
         guard panel.runModal() == .OK, let url = panel.url else { return }
+        write(model: model, to: url)
+    }
+
+    private static func write(model: HubModel, to url: URL) {
         var lines: [String] = []
         lines.append("螺壳 \(AppInfo.version)  \(ISO8601DateFormatter().string(from: Date()))")
         lines.append("机型：\(sysctl("hw.model"))  芯片：\(sysctl("machdep.cpu.brand_string"))  内存：\(memGB()) GB  macOS \(ProcessInfo.processInfo.operatingSystemVersionString)")
@@ -38,7 +50,35 @@ enum Diagnostics {
         lines.append("== app.log（最近 50 行）==")
         let app = (try? String(contentsOf: AppInfo.envDir.appendingPathComponent("logs/app.log"), encoding: .utf8)) ?? ""
         lines.append(app.split(separator: "\n").suffix(50).joined(separator: "\n"))
+        for (name, file) in appLogs {
+            lines.append("")
+            lines.append("== \(name)（最近 50 行，去掉了邮箱地址和用户目录）==")
+            lines.append(appLogTail(file))
+        }
         try? lines.joined(separator: "\n").write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    private static var appLogs: [(String, URL)] {
+        let dir = AppInfo.envDir.appendingPathComponent("logs")
+        return [("mail.log", dir.appendingPathComponent("mail.log")), ("邮件助手 service.log", MailHelper.serviceLog),
+                ("search.log", dir.appendingPathComponent("search.log")), ("luoke-scan.log", dir.appendingPathComponent("luoke-scan.log")),
+                ("agent.log", dir.appendingPathComponent("agent.log"))]
+    }
+
+    /// 文件里可能有写坏的半个字符：照读，别整份丢掉
+    static func appLogTail(_ file: URL, lines: Int = 50) -> String {
+        guard let data = try? Data(contentsOf: file) else { return "（无）" }
+        return String(decoding: data, as: UTF8.self).split(separator: "\n").suffix(lines).map { redacted(String($0)) }.joined(separator: "\n")
+    }
+
+    private static let contentAfter = [#"(\] notification \([^)]*\)).*"#, #"(one-click unsubscribe refused for).*"#, #"(could not restore label).*"#]
+
+    /// 应用的日志不全是元数据：邮件助手的通知标题和退订这两种行带着邮件里的文字，只留前半句；邮箱地址、用户目录哪一行都去掉
+    static func redacted(_ line: String) -> String {
+        var s = line
+        for p in contentAfter { s = s.replacingOccurrences(of: p, with: "$1", options: .regularExpression) }
+        s = s.replacingOccurrences(of: #"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"#, with: "<邮箱>", options: .regularExpression)
+        return s.replacingOccurrences(of: #"/Users/[^/\s]+"#, with: "~", options: .regularExpression)
     }
 
     static func sysctl(_ key: String) -> String {

@@ -50,6 +50,8 @@ digup 想先把图缩到预算对应的目标尺寸再送（算法和 Gemma 4 �
 
 ## 还要做的（主控这边，等换引擎包）
 
+**2026-11-03 打开了 32、128 两档**：配方 `recipes/dev.json` 的 `luoke-search.embed` 在这两档加了 `image_batch` 等参数（值和 luoke-search 实验室主控用的一样），引擎包 oMLX 0.7.2（mlx-vlm 0.7.8）；16 档先只收文字，等在 16 GB 测试机上量过开了媒体的嵌入进程再说。开了媒体的嵌入进程按模型的 `media_wired_gb`（4.4 GB）算预算。发布评测的 `embed_parity.py` 带 `--media auto`，收媒体的档再核 4 条媒体参考向量。11-04 起一次请求的图片 budget 加起来不超过 `max_image_tokens`（2240），`single_image_budgets`（560、1120）的图一次只许一张（8 张 1120 把嵌入进程涨到 13.3 GB）；换档时模式不一样的嵌入进程换新的。`max_audio_secs` 只在嵌入进程解码以后查。下面 10-19 那段是当时的情形。
+
 **2026-10-19 已写好代码、还没打开**（10-19 说要换 oMLX 0.7.1；用哪个版本、什么时候换还在问）：主控按任务参数校验 `inputs`（`_check_embed_inputs`），任务参数有 `image_batch` / `audio_batch` 时嵌入进程带 `--media` 起（整个模型 + 处理器），工作进程的 `embed_inputs` 照下面的做法算、逐条出错（`worker/mediaops.py` 是分批的纯逻辑）；图片走 data URL、声音用 `mlx_audio` 的 read 从内存读，都不落盘。现在的配方里没有这两个参数，所以 beta1 里不打开；在 0.7.0 的引擎包上硬开，嵌入进程会在 ready 行里说"要 mlx-vlm ≥ 0.7.8"、不起来。只在假工作进程上测过，真模型和 4 条媒体参考向量要等换上 0.7.1 的引擎包。
 
 - 工作进程加 `image`、`audio` 两种输入（用 mlx-vlm 0.7.8 的处理器，每张图按 `budget` 缩一次），逐条出错；主控校验字段和上限；`tools/embed_parity.py` 加 4 条媒体参考向量，送法和 digup 做参考向量、它的 `HubParityTests` 一样：`screen-280` ← `Reference/screen.png` 预算 280；`photo-140` ← `Reference/photo.jpg` 预算 140；`frame-70` ← **同一张** `photo.jpg` 预算 70（不是另一张帧图）；`speech` ← `Reference/speech.wav` 整段送。

@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
 import subprocess
@@ -11,8 +12,11 @@ import threading
 import time
 from typing import Callable, Optional
 
+from . import spawn
+
 WORKER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "worker", "score_worker.py")
 EMBED_WORKER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "worker", "embed_worker.py")
+TRANSCRIBE_WORKER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "worker", "transcribe_worker.py")
 
 
 class ScorerError(RuntimeError):
@@ -21,7 +25,7 @@ class ScorerError(RuntimeError):
 
 class _Worker:
     """专用模型工作进程的监管骨架：起子进程、等就绪、按行协议请求、看门狗。
-    打分（ScoreWorker）和嵌入（EmbedWorker）共用，差别只在子进程脚本和启动参数（_argv）、以及名字（kind）。"""
+    打分（ScoreWorker）、嵌入（EmbedWorker）和转写（TranscribeWorker）共用，差别只在子进程脚本和启动参数（_argv）、以及名字（kind）。"""
     kind = "worker"
     log_name = "worker"
 
@@ -57,9 +61,10 @@ class _Worker:
                "PYTHONDONTWRITEBYTECODE": "1", "PYTHONUNBUFFERED": "1", "HF_HUB_OFFLINE": "1"}     # 和引擎一样不去 Hugging Face 找（luoke-core#35）
         t0 = time.time()
         try:
-            self.proc = subprocess.Popen(self._argv(), env=env, cwd="/", stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            # 打分、嵌入、转写的进程读用户给的文字和媒体：disclaim，不借螺壳的授权（spawn.py）
+            self.proc = subprocess.Popen(spawn.disclaimed(self._argv()), env=env, cwd="/", stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                          stderr=subprocess.DEVNULL, text=True)
-        except OSError:
+        except (OSError, ValueError):     # ValueError：spawn.disclaimed 要绝对路径
             with self.lock:      # 起不来就记失败：不然一直停在 loading，下次请求也不会重起
                 self.state = "failed"
                 self.failures += 1
@@ -93,9 +98,12 @@ class _Worker:
     def alive(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
 
-    def _ask(self, req: dict, timeout: float) -> dict:
+    def _ask(self, req: dict, timeout: float, still_wanted: Optional[Callable[[], bool]] = None) -> dict:
+        """still_wanted：排到这个进程时再问一次还要不要算（转写的草稿：等的时候来了更新的请求就不算，答 superseded）"""
         with self.lock:
             self.last_used = time.time()
+            if still_wanted is not None and not still_wanted():
+                raise ScorerError("superseded")
             if self.state != "ready" or not self.alive():
                 raise ScorerError("not_ready" if self.state == "loading" else "engine_failed")
             p = self.proc
@@ -177,3 +185,44 @@ class EmbedWorker(_Worker):
         """多模态（草案，docs/research/embed-multimodal-draft.md）：返回 {"vectors", "errors", "dims", "ms"}，都和 inputs 对齐。"""
         return self._ask({"op": "embed_inputs", "inputs": inputs, "max_tokens": max_tokens, "image_batch": image_batch,
                           "audio_batch": audio_batch, "max_audio_secs": max_audio_secs}, timeout)
+
+
+class TranscribeWorker(_Worker):
+    """语音识别模型（Qwen3-ASR）的工作进程：无状态，每次送一次听写到目前为止的整段音频（worker/transcribe_worker.py）。
+    会话、音频由主控攒着（Hub.transcribe），这里只转写。"""
+    kind = "transcribe"
+    log_name = "transcriber"
+
+    def _argv(self) -> list:
+        return [self.python, "-B", TRANSCRIBE_WORKER, self.model_dir, "--cache-mb", str(self.cache_mb)]
+
+    rewarming = False
+
+    def transcribe(self, audio_b64: str, context: str, max_tokens: int, timeout: float,
+                   still_wanted: Optional[Callable[[], bool]] = None, language: str = "") -> dict:
+        """audio_b64：PCM16LE 16 kHz 单声道。返回 {"text", "audio_secs", "ms"}；没就绪抛 ScorerError("not_ready")，超时或崩溃抛
+        ScorerError("engine_failed")。"""
+        return self._ask({"op": "transcribe", "audio": audio_b64, "context": context, "language": language, "max_tokens": max_tokens},
+                         timeout, still_wanted)
+
+    def rewarm(self) -> bool:
+        """已经起来的进程解一次 1 秒静音、1 个 token：闲久了 macOS 会把权重换出内存，按下说话键时先读回来，和用户说话同时进行。
+        没就绪、正在算（权重是热的）或已经在热就不做；返回做没做。"""
+        if not self.lock.acquire(blocking=False):      # 正在算：权重是热的；也不让预热的答复等它
+            return False
+        try:
+            if self.state != "ready" or self.rewarming:
+                return False
+            self.rewarming = True
+        finally:
+            self.lock.release()
+
+        def run():
+            try:
+                self.transcribe(base64.b64encode(bytes(32000)).decode("ascii"), "", 1, timeout=30.0)
+            except ScorerError:
+                pass
+            finally:
+                self.rewarming = False
+        threading.Thread(target=run, daemon=True).start()
+        return True

@@ -1,5 +1,3 @@
-<!-- luokelabs/luoke-releases 的 README 源稿，由 luoke-core 维护（顶层 projects/luoke-core.md），上传前先确认；英文版是同目录的 README.en.md，两份一起改、一起传。 -->
-
 简体中文 | [English](README.en.md)
 
 # luoke-releases：螺壳的发布

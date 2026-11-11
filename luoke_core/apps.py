@@ -8,10 +8,24 @@
 from __future__ import annotations
 
 import os
+import plistlib
 import shutil
 import subprocess
+import xml.parsers.expat
+from typing import Optional
 
 LSREGISTER = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+
+
+def read_plist(path: str) -> Optional[dict]:
+    """读一个 Info.plist；读不了、格式坏了、不是字典都是 None，不抛错（core#128：废纸篓里一个 Info.plist 只有 XML 声明的
+    .app，plistlib 抛的是 ExpatError，不是 ValueError，升级配件就整个失败）。"""
+    try:
+        with open(path, "rb") as f:
+            v = plistlib.load(f)
+    except (OSError, ValueError, plistlib.InvalidFileException, xml.parsers.expat.ExpatError):
+        return None
+    return v if isinstance(v, dict) else None
 
 
 def _ls(flag: str, path: str) -> None:
@@ -92,7 +106,6 @@ def swap_app(a: str, b: str) -> None:
 
 def registered_copies(bundle_id: str) -> list:
     """LaunchServices 登记着的、这个 bundle id 的所有 .app 路径（lsregister -dump 里 identifier 往上最近的 path:），加上废纸篓里同 bundle id 的。"""
-    import plistlib
     import re
     out: list = []
     if os.path.exists(LSREGISTER):
@@ -112,12 +125,8 @@ def registered_copies(bundle_id: str) -> list:
         p = os.path.join(trash, n)
         if not n.endswith(".app") or os.path.islink(p):
             continue
-        try:
-            with open(os.path.join(p, "Contents", "Info.plist"), "rb") as f:
-                if plistlib.load(f).get("CFBundleIdentifier") == bundle_id:
-                    out.append(p)
-        except (OSError, ValueError):
-            continue
+        if (read_plist(os.path.join(p, "Contents", "Info.plist")) or {}).get("CFBundleIdentifier") == bundle_id:
+            out.append(p)
     return list(dict.fromkeys(out))
 
 

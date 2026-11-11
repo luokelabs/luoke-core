@@ -4,6 +4,7 @@ from __future__ import annotations
 import glob
 import json
 import os
+import platform
 import plistlib
 import shutil
 import signal
@@ -12,7 +13,7 @@ import sys
 import time
 from typing import Optional
 
-from . import apps, procs
+from . import apps, procs, spawn
 
 MANIFEST_REL = "Contents/Resources/luoke-accessory.json"
 PYTHON_REL = "Contents/Resources/python/bin/python3"
@@ -114,7 +115,75 @@ def installed(extra_dirs: Optional[list] = None, only: Optional[list] = None, hu
     mem = bundled_memory(hub) if bundled and (only is None or hub) else None
     if mem:
         out[mem["bundle_id"]] = mem
+    for m in bundled_helpers(hub) if bundled and (only is None or hub) else []:
+        out[m["bundle_id"]] = m
     return out
+
+
+HELPERS_REL = "Contents/Helpers"       # 收进主控 .app 的 Swift 应用（ADR 0022）：程序 luoke-x 在这里，由本体当子进程起，清单在 Resources/x
+SITE_PACKAGES_GLOB = "Contents/Resources/python/lib/python3.*/site-packages"       # 收进来的 Python 应用：包 luoke_x 在这里，清单同样在 Resources/x
+
+
+def bundled_helpers(app: Optional[str] = None) -> list:
+    """主控 .app 里带的应用的清单；_helper：没有单独的 .app，_app 指主控 .app，不能当它的 .app 去动。"""
+    app = app or hub_app()
+    out = []
+    for name in _bundled_names(app) if app else []:
+        try:
+            with open(os.path.join(app, "Contents", "Resources", name[len("luoke-"):], "luoke-accessory.json"), encoding="utf-8") as f:
+                m = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if m.get("contract") == 1 and m.get("accessory") == name and m.get("bundle_id") and _macos_at_least(m.get("min_macos")):
+            out.append(dict(m if _is_installed_hub(app) else _own_data(m), _app=app, _bundled=True, _helper=True))
+    return out
+
+
+def _bundled_names(app: str) -> list:
+    names = {os.path.basename(p) for p in glob.glob(os.path.join(app, HELPERS_REL, "luoke-*"))}
+    names |= {"luoke-" + os.path.basename(os.path.dirname(p))[len("luoke_"):] for p in glob.glob(os.path.join(app, SITE_PACKAGES_GLOB, "luoke_*", "__init__.py"))}
+    return sorted(names)
+
+
+def _macos_at_least(need: Optional[str]) -> bool:
+    """它要的系统比主控声称的新（外层 14.0，程序可以更高）：这台 Mac 不够就当没带，本体也不起它。"""
+    have = _macos_version()
+    return not need or not have or _version_tuple(have) >= _version_tuple(need)
+
+
+_macos = ""
+
+
+def _macos_version() -> str:
+    """不用 platform.mac_ver：它读 SystemVersion.plist，而自带的 Python 是按旧 SDK 编的，系统可能给它兼容用的版本号（macOS 26 报成 16.0）。
+    只记住读到的：一次超时不能算到主控退出。"""
+    global _macos
+    if not _macos:
+        try:
+            _macos = subprocess.run(["/usr/bin/sw_vers", "-productVersion"], capture_output=True, text=True, timeout=5).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return _macos
+
+
+def _own_data(m: dict) -> dict:
+    """开发版里的程序用 ~/Library/Application Support/<编号>（SearchHelper.swift、MailHelper.swift），清单写的是正式版的：删数据、连 socket
+    都不能落到正式版那份上。这个位置也是 agent 和卸载认的数据目录（和编号绑在一起的几种之一），放别处 agent 不接它。
+    清单的 data_env 是它认数据目录的环境变量：这里跑它的命令、空闲任务时要给（_env），否则它们用的是正式版的数据。"""
+    home = f"~/Library/Application Support/{m['accessory']}"
+    text = json.dumps(m, ensure_ascii=False)
+    for d in m.get("data") or []:
+        text = text.replace(json.dumps(d)[1:-1], json.dumps(home)[1:-1])
+    out = json.loads(text)
+    if m.get("data_env"):
+        out["_env"] = {m["data_env"]: os.path.expanduser(home)}
+    return out
+
+
+def _is_installed_hub(app: Optional[str]) -> bool:
+    """装好的那份主控（/Applications 或 ~/Applications，ADR 0012）：开发、测试构建不动本机用户的 .app。"""
+    roots = {os.path.realpath(os.path.join(d, f"{n}.app")) for d in ("/Applications", os.path.expanduser("~/Applications")) for n in ("螺壳", "螺壳主控")}
+    return os.path.realpath(app or "") in roots
 
 
 def migrate_old_memory_app(dirs: Optional[list] = None, hub: Optional[str] = None, log=print) -> Optional[str]:
@@ -123,10 +192,8 @@ def migrate_old_memory_app(dirs: Optional[list] = None, hub: Optional[str] = Non
     mem = bundled_memory(hub)
     if not mem:
         return None
-    app_path = hub or hub_app()
-    hub_apps = {os.path.realpath(os.path.join(d, f"{n}.app")) for d in ("/Applications", os.path.expanduser("~/Applications")) for n in ("螺壳", "螺壳主控")}
-    if dirs is None and os.path.realpath(app_path or "") not in hub_apps:
-        return None     # 只有装好的那份主控（/Applications 或 ~/Applications，ADR 0012）才迁（开发、测试构建不动本机用户的螺壳记忆.app）
+    if dirs is None and not _is_installed_hub(hub or hub_app()):
+        return None
     for d in (dirs if dirs is not None else DEFAULT_DIRS):
         for app in glob.glob(os.path.join(d, "*.app")):
             m = load_manifest(app)
@@ -160,6 +227,14 @@ def _previous_dir() -> str:
     return os.path.join(env, "previous.noindex")
 
 
+def declares_host_permission(manifest: dict, permission: str) -> bool:
+    """清单里写了这一项螺壳名下的系统权限。没写的不能申请，主控也不记（顶层 ADR 0021）。"""
+    caps = manifest.get("capabilities")
+    listed = caps.get("permissions") if isinstance(caps, dict) else None
+    return any(isinstance(p, dict) and p.get("id") == permission and p.get("kind") == "system" and p.get("owner") == "luoke"
+               for p in listed or [])
+
+
 def by_accessory(manifests: dict, accessory: str) -> Optional[dict]:
     for m in manifests.values():
         if m["accessory"] == accessory:
@@ -177,7 +252,8 @@ def run_command(manifest: dict, name: str, fill: dict, timeout: float = 30) -> s
     env = {"PATH": "/usr/bin:/bin", "HOME": os.path.expanduser("~"), "PYTHONDONTWRITEBYTECODE": "1", "PYTHONNOUSERSITE": "1"}
     if os.environ.get("LUOKE_HOME"):
         env["LUOKE_HOME"] = os.environ["LUOKE_HOME"]
-    return subprocess.run(argv, env=env, cwd="/", capture_output=True, text=True, timeout=timeout)
+    env.update(manifest.get("_env") or {})
+    return subprocess.run(spawn.disclaimed(argv), env=env, cwd="/", capture_output=True, text=True, timeout=timeout)    # disclaim（spawn.py）
 
 
 def forget_tool(manifests: dict, accessory: str, dry_run: bool) -> dict:
@@ -313,16 +389,31 @@ def _alive(pid: int) -> bool:
         return True
 
 
-def _previous_copy(previous_dir: str, app: str, bundle_id: Optional[str]) -> Optional[str]:
-    """换装时挪进 previous.noindex 的旧版（同名、同 bundle id）；没有就 None。"""
-    keep = os.path.join(previous_dir, os.path.basename(app))
-    if not bundle_id or not os.path.isdir(keep) or os.path.islink(keep):
-        return None
+def _previous_copies(previous_dir: str, app: str, bundle_id: Optional[str]) -> list:
+    """previous.noindex 里这个 bundle id 的所有旧版，按 bundle id 认、不按名字认：配件改过 .app 名字时，换装把旧版按旧名字挪进来，
+    按现在的名字找会找不到（回不去上一版，卸载也留下它）。排序：和现在同名的在前（最近一次换装留下的），其余按版本从新到旧。"""
+    if not bundle_id:
+        return []
     try:
-        with open(os.path.join(keep, "Contents", "Info.plist"), "rb") as f:
-            return keep if plistlib.load(f).get("CFBundleIdentifier") == bundle_id else None
-    except (OSError, ValueError):
-        return None
+        names = os.listdir(previous_dir)
+    except OSError:
+        return []
+    same = os.path.basename(app.rstrip("/"))
+    out = []
+    for n in names:
+        p = os.path.join(previous_dir, n)
+        if not n.endswith(".app") or n.startswith(".") or os.path.islink(p) or not os.path.isdir(p):
+            continue
+        if (apps.read_plist(os.path.join(p, "Contents", "Info.plist")) or {}).get("CFBundleIdentifier") != bundle_id:
+            continue
+        out.append(p)
+    return sorted(out, key=lambda p: (os.path.basename(p) != same, tuple(-x for x in _version_tuple(app_version(p) or "")), p))
+
+
+def _previous_copy(previous_dir: str, app: str, bundle_id: Optional[str]) -> Optional[str]:
+    """换装时挪进 previous.noindex 的旧版（同 bundle id，名字可以不同）；有几份时取 _previous_copies 排第一的；没有就 None。"""
+    copies = _previous_copies(previous_dir, app, bundle_id)
+    return copies[0] if copies else None
 
 
 def app_version(app: str) -> Optional[str]:
@@ -341,9 +432,11 @@ def rollback_candidates(manifests: dict, previous_dir: Optional[str] = None) -> 
     for m in manifests.values():
         if m.get("_bundled"):
             continue
-        keep = _previous_copy(previous_dir or _previous_dir(), m["_app"], m.get("bundle_id"))
+        # 跳过和现在同版本的（例如同版本重装过）：上一版是排在最前、版本不同的那份
+        keep = next((p for p in _previous_copies(previous_dir or _previous_dir(), m["_app"], m.get("bundle_id"))
+                     if app_version(p) and app_version(p) != m.get("version")), None)
         old = app_version(keep) if keep else None
-        if keep and old and old != m.get("version"):
+        if keep and old:
             out.append({"accessory": m["accessory"], "name": m.get("name", m["accessory"]), "type": m.get("type", "app"),
                         "bundle_id": m.get("bundle_id"), "app": m["_app"], "current": m.get("version"), "previous": old, "path": keep})
     return sorted(out, key=lambda c: c["accessory"])
@@ -427,14 +520,17 @@ def uninstall_plan(manifests: dict, accessory: str, preview_forget: bool = True,
     m = by_accessory(manifests, accessory)
     if not m:
         return {"code": "unsupported", "error": f"没装 {accessory}"}
-    if m.get("_bundled"):
+    if m.get("_bundled") and not m.get("_helper"):
         return {"code": "invalid_request", "error": "螺壳记忆是主控的一部分，不能单独卸载；「卸载全部」会连主控一起删（记忆文件保留）"}
     is_memory = m.get("bundle_id") == MEMORY_BUNDLE_ID
     others = [x["accessory"] for x in manifests.values() if x["accessory"] != accessory and x.get("memory")]
     can_forget = (not is_memory and bool(m.get("memory")) and MEMORY_BUNDLE_ID in manifests
                   and "forget-tool" in (manifests[MEMORY_BUNDLE_ID].get("commands") or {}))
     plan = {"accessory": accessory, "name": m.get("name", accessory), "type": m.get("type", "app"), "bundle_id": m.get("bundle_id"),
-            "app": m["_app"], "previous": _previous_copy(previous_dir or _previous_dir(), m["_app"], m.get("bundle_id")),
+            "app": None if m.get("_helper") else m["_app"],       # 本体里的应用：停用、删数据，没有 .app 可删
+            "previous": None if m.get("_helper") else _previous_copy(previous_dir or _previous_dir(), m["_app"], m.get("bundle_id")),
+            # 本体里的应用这里只是停用：previous.noindex 里收进来以前的旧 .app 不动，「卸载全部」连环境目录一起删
+            "previous_copies": [] if m.get("_helper") else _previous_copies(previous_dir or _previous_dir(), m["_app"], m.get("bundle_id")),
             "data": data_dirs(m), "forget": None, "can_forget": can_forget, "memory_needed_by": others if is_memory else []}
     if preview_forget and can_forget:
         r = forget_tool(manifests, accessory, dry_run=True)
@@ -454,7 +550,8 @@ def uninstall(manifests: dict, accessory: str, data: bool = False, forget: bool 
     result = dict(plan, dry_run=dry_run, removed=[], forgot=None, cleanup=None, killed=0, errors=[])
     if dry_run:
         return result
-    result["killed"] = terminate_app_processes(plan["app"])   # 本体已按 bundle id 结束过；这里兜住它找不到的（启动器 exec 出的 python3）
+    if plan["app"]:
+        result["killed"] = terminate_app_processes(plan["app"])   # 本体已按 bundle id 结束过；这里兜住它找不到的（启动器 exec 出的 python3）
     if forget and plan["can_forget"]:     # 真卸载时不预跑 dry-run，plan["forget"] 是 None；按"能不能忘"判断（2026-10-16 审查：之前勾了也从不执行）
         r = forget_tool(manifests, accessory, dry_run=False)
         result["forgot"] = r
@@ -480,7 +577,7 @@ def uninstall(manifests: dict, accessory: str, data: bool = False, forget: bool 
                 result["removed"].append(p)
             except OSError as e:
                 result["errors"].append(f"{p}：{e}")
-    for app in (plan["app"], plan["previous"]):     # 旧版不是用户数据，跟 .app 一起删
+    for app in [plan["app"]] + plan["previous_copies"]:     # 旧版不是用户数据，跟 .app 一起删；改过名的旧版也删（按 bundle id 认）
         if not app:
             continue
         try:
@@ -489,17 +586,19 @@ def uninstall(manifests: dict, accessory: str, data: bool = False, forget: bool 
         except OSError as e:
             result["errors"].append(f"{app}：{e}")
     if plan.get("bundle_id"):     # 别处还登记着的副本（废纸篓里的旧包等）也注销，免得重装时系统绑到它们上（luoke-ime#15）
-        apps.unregister_other_copies(plan["bundle_id"], plan["app"])
+        apps.unregister_other_copies(plan["bundle_id"], plan["app"] or "")
     return result
 
 
-PUBLIC_FIELDS = ("accessory", "bundle_id", "name", "version", "type", "resident", "memory", "tasks", "capabilities", "jobs")
+PUBLIC_FIELDS = ("accessory", "bundle_id", "name", "version", "type", "resident", "memory", "tasks", "capabilities", "jobs", "data")
 
 
-def public_list(manifests: dict) -> list:
-    """GET /accessories：装了哪些配件，只给清单里的公开字段（给 luoke-agent 看装了哪些工具、声明了什么能力；主控只告诉、不传话）。"""
+def public_list(manifests: dict, disabled: tuple = ()) -> list:
+    """GET /accessories：装了哪些配件，只给清单里的公开字段（给 luoke-agent 看装了哪些工具、声明了什么能力、数据目录在哪（它只认放在声明的数据目录里的 socket）；主控只告诉、不传话）。"""
     out = []
     for m in manifests.values():
+        if m["accessory"] in disabled:
+            continue
         d = {k: m[k] for k in PUBLIC_FIELDS if k in m}
         if "jobs" in d:
             d["jobs"] = [j.get("name") for j in d["jobs"] if isinstance(j, dict)]

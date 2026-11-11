@@ -67,19 +67,19 @@ enum Swap {
         // nohup + &：脚本在后台等我们退出，起它的 sh（或 osascript）立刻回来
         func sq(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }
         let shellCmd = "/usr/bin/nohup /bin/sh " + args.map(sq).joined(separator: " ") + " >> " + sq(logFile.path) + " 2>&1 &"
-        let p = Process()
-        let err = Pipe()
-        p.standardError = err
-        p.standardOutput = FileHandle.nullDevice
+        // 换包脚本要改螺壳.app：系统只让同一个开发者的应用改它，disclaim 了的 sh 改不了（Spawn.swift），所以照旧算螺壳
+        let p: Process
         if admin {
             // 标准账户：交给系统的管理员授权框（取消了返回 -128）
             func asStr(_ s: String) -> String { "\"" + s.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\"" }
-            p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-            p.arguments = ["-e", "do shell script \(asStr(shellCmd)) with prompt \(asStr("螺壳要把新版放进「应用程序」文件夹。")) with administrator privileges"]
+            p = Spawn.process("/usr/bin/osascript", ["-e", "do shell script \(asStr(shellCmd)) with prompt \(asStr("螺壳要把新版放进「应用程序」文件夹。")) with administrator privileges"],
+                              access: .luoke)
         } else {
-            p.executableURL = URL(fileURLWithPath: "/bin/sh")
-            p.arguments = ["-c", shellCmd]
+            p = Spawn.process("/bin/sh", ["-c", shellCmd], access: .luoke)
         }
+        let err = Pipe()
+        p.standardError = err
+        p.standardOutput = FileHandle.nullDevice
         do { try p.run() } catch { return "起不了换包脚本（\(error.localizedDescription)）" }
         p.waitUntilExit()
         if p.terminationStatus == 0 { return nil }

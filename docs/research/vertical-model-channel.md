@@ -173,6 +173,8 @@
 
 ### 3.6 发布流水线放行 digup（#5 审阅第 7 条）
 
+> **2026-11-02 照这一节做了**：digup 改名 luoke-search，任务改名 `luoke-search.embed`；评测表加了这一条，每档各评（`per_tier`），版本号读 luoke-search 的 `Resources/luoke-accessory.json`。文字模式的 `wired_gb` 也量了（见配方的 `_内存`）。
+
 照协调会话的建议：给嵌入配一条正式评测，不在流水线里开白名单。
 
 - `tools/release_evals.json` 加 `digup.embed`：

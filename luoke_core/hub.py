@@ -1,6 +1,7 @@
 """主控本体（开发版）：Unix socket 上的任务层（V1 §2），把派发（§3）、引擎（§5）、打分工作进程串起来。"""
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -21,16 +22,24 @@ from . import apps, download, procs
 from . import endpoint as endpoint_mod
 from .dispatch import Dispatcher
 from .engine import Engine, EngineError
-from .proxy import STATUS, BadRequest, build_engine_payload, error_body, estimate_secs
-from .recipe import Recipe
-from .scorer import EmbedWorker, ScoreWorker, ScorerError
+from .proxy import STATUS, BadRequest, build_engine_payload, error_body, estimate_secs, tokenizer_markers
+from .recipe import SPECIAL_KINDS, Recipe
+from .scorer import EmbedWorker, ScoreWorker, ScorerError, TranscribeWorker
 
 SAMPLE_SECS = 5
 # 专用模型工作进程（打分、联想、嵌入）的生命周期（issue #11，和 luoke-ime 10-20 商定）：空闲这么久就停，下次用到再起（重起时答
 # not_ready、retry_after 2 秒，约等于加载时间）；内核报内存压力 critical 时停掉、这段时间里不起；起之前看这台机器还剩的内存够不够，
 # 不够答 not_ready、retry_after 30 秒。配件收到 not_ready 照 retry_after 退避，这期间不重排（打字照常）。
 WORKER_IDLE_SECS = 600
+# 刚卸了模型，Metal 要 1–6 秒才把 wired 内存还回来（16 GB 测试机 10-29，core#43）：这段时间里量到不够就隔 0.5 秒再量，
+# 卸载后最多等这么久，降够了照常加载，还不够才拒
+UNLOAD_SETTLE_SECS = 8
 WORKER_HOLD_SECS = 30
+# 转写的会话（Hub.transcribe）：30 秒没有消息就丢掉音频；一个配件同时最多留几个会话；音频是 16 kHz PCM16
+ASR_SESSION_SECS = 30
+ASR_SESSIONS_PER_ACCESSORY = 4
+ASR_RATE = 16000
+OWN_WARN_SECS = 10      # 底座加上我们的工作进程顶出的 warn 连续超过这么久，全机后台才停（底座加载、刚开始生成那几秒的 warn 不停）
 # "较慢"标记（V1 §7、DESIGN §7）：不用线上流量算——配件一收到 slow 就少给候选，用时随之变短，会来回翻（luoke-ime 2026-10-14）。
 # 改成打分进程就绪后用固定形状的探针测一次（像打字：前文逐字变长、16 个候选），p90 对配方阈值；阈值是实验室定的分界，各档相同；
 # 带滞回：标了以后要低于阈值的 80% 才清。结果记在 state.json 的 probe 里，重启沿用，工作进程重启再测。
@@ -124,6 +133,7 @@ class Hub:
         self.download_thread: Optional[threading.Thread] = None
         self.env_dir = env_dir
         self.model_dir = model_dir
+        self.markers: dict = {}              # 底座名 -> 分词器里要中和的记号（special_tokens()）
         self.lab = lab
         self.accessory_dirs = accessory_dirs or []
         os.makedirs(os.path.join(env_dir, "run"), mode=0o700, exist_ok=True)
@@ -159,8 +169,10 @@ class Hub:
         self.dispatcher = Dispatcher(time.time, self.tier)
         self.base_name = recipe.base_for(self.tier_name)
         eng = recipe.engine
-        # 引擎：按清单装上的那份优先（<env>/engines/<版本>/oMLX.app）；没有就用配方写的那份（开发版：本机的 oMLX.app），但只认版本和配方一致的
-        self.engine_app = self.installed_engine_app() or self.recipe_engine_app() or eng["app"]
+        # 引擎：按清单装上的那份优先（<env>/engines/<版本>/oMLX.app）；没有就用配方写的那份（开发版：本机的 oMLX.app），但只认版本和配方一致的。
+        # 都没有就指着引擎包要装到的地方：engine_missing() 为真，等引擎包下完（_after_downloads 换上）。不退回配方写的
+        # /Applications/oMLX.app：那是用户自己装的，版本、参数都可能对不上，起了只会反复崩到熔断（luoke-core#143）
+        self.engine_app = self.installed_engine_app() or self.recipe_engine_app() or self.engine_install_app()
         self.engine = Engine(self.engine_app, os.path.join(env_dir, "engine", eng["version"]), model_dir,
                              self.tier["guard_gb"], eng.get("log_level", "warning"), self.log)
         self.engine_python = os.path.join(self.engine_app, eng["python"])
@@ -174,6 +186,7 @@ class Hub:
         self.base_id: Optional[str] = None
         self.scorers: dict = {}      # 模型名 -> ScoreWorker / EmbedWorker
         self.scorers_lock = threading.Lock()   # 只护 scorer_for 里的建、起
+        self.own_warn_since: Optional[float] = None   # 底座加上工作进程顶出的 warn 从什么时候起一直没断（_background_pressure）
         self.worker_hold_until = 0.0           # 内存压力 critical 之后这段时间不起专用模型工作进程（issue #11）
         self.last_base_use = time.time()
         self.smoke_running = False      # 冒烟检查进行中：闲置卸载不许动底座
@@ -197,10 +210,14 @@ class Hub:
         self.dispatcher.background_on_battery = bool(self.settings["background_on_battery"])
         self.score_ms: dict = {}      # 任务名 -> 最近的打分耗时（毫秒），只作诊断（state.json 的 tasks）
         self.score_full_ms: dict = {} # 同上，只记候选数 >= 8 的（接近全量，和探针可比）
+        self.asr_sessions: dict = {}  # (配件, 会话号) -> 这次听写攒下的音频（Hub.transcribe）；只在内存里，30 秒没消息就丢
+        self.asr_lock = threading.Lock()
         self._embed_refusals: dict = {}   # (任务, 原因码) -> (上次记日志的时刻, 其间省掉的条数)，见 _log_embed_refusal
         self.smoke_failed: Optional[str] = None
         self.engine_crashes: deque = deque(maxlen=20)   # 崩溃时刻；打断不算
         self.breaker: Optional[str] = None               # 熔断原因；熔断后不再重启引擎
+        self.engine_error: Optional[str] = None          # 最近一次引擎没起来的原因（起来了就清掉）；/status 带出去，菜单照实说
+        self.smoke_after_recovery = False               # 开机时引擎没起来：等 _check_engine 把它拉起来以后补做冒烟检查（只这一次）
         self.restarting = threading.Lock()
         self.download_lock = threading.Lock()
         self.download_queue: list = []
@@ -223,6 +240,44 @@ class Hub:
         self.state.setdefault("resident", {})[accessory] = flag
         self._save_state()
         self.log(f"resident {accessory}={flag}")
+
+    def set_enabled(self, accessory: str, flag: bool) -> None:
+        """本体里的应用要用户开启了才算数（顶层 ADR 0022）：开启时本体要到系统权限才调这里，没开的本体不起它，/accessories 不列它。
+        本体在主控起来之前也要知道，所以记在 state.json。"""
+        self.state.setdefault("enabled", {})[accessory] = flag     # 关的也要记：默认开着的应用，不记就又开回来了
+        self._save_state()
+        self.log(f"enabled {accessory}={flag}")
+
+    def disable_helper(self, accessory: str) -> None:
+        """用户停用本体里的应用：只是关掉，数据和记忆都不动。先记下来：空闲任务的调度看这份记录，记完就不会再起新的。"""
+        self.set_enabled(accessory, False)
+        self.jobs.stop_accessory(accessory, "disabled")
+        self.release_accessory(accessory)
+        self.log(f"disabled {accessory}")
+
+    def set_permission(self, accessory: str, permission: str, on: bool) -> None:
+        """用户同意了才放行（顶层 ADR 0021）：确认过的记在 state.json 的 permissions_ok，{"配件": {"权限 id": 确认的时间}}。
+        没记的就是没放行；关掉就删掉，再要时重新问。本体起工具时要知道，权限页要显示，所以记在这里。"""
+        ok = self.state.setdefault("permissions_ok", {})
+        mine = ok.setdefault(accessory, {})
+        if on:
+            mine.setdefault(permission, time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+        else:
+            mine.pop(permission, None)
+        if not mine:
+            ok.pop(accessory, None)
+        self._save_state()
+        self.log(f"permission {accessory} {permission}={on}")
+
+
+    def helpers_off(self) -> tuple:
+        on = self.state.get("enabled") or {}
+        return tuple(m["accessory"] for m in (self.manifests or {}).values() if m.get("_helper") and not on.get(m["accessory"], m.get("default_on", False)))
+
+    def enabled_manifests(self) -> dict:
+        """没开着的本体里的应用不算：它的空闲任务也不跑。"""
+        off = self.helpers_off()
+        return {k: m for k, m in self.manifests.items() if m["accessory"] not in off}
 
     def _jobs_busy(self) -> bool:
         """空闲任务的"忙"：没在跑空闲任务时，引擎有后台工作或正在加载就不起新的；正在跑的时候，只有别的配件占着引擎才算忙。
@@ -316,7 +371,7 @@ class Hub:
         """配件退出或被卸载：只有它在用的打分进程停掉，预算重算。"""
         for model, w in list(self.scorers.items()):
             users = {t["accessory"] for tn, t in self.recipe.tasks.items()
-                     if t["kind"] in ("score", "predict", "embed") and self.recipe.model_for_task(tn, self.tier_name) == model}
+                     if t["kind"] in SPECIAL_KINDS and self.recipe.model_for_task(tn, self.tier_name) == model}
             if users == {accessory}:
                 w.stop()
         self.apply_budget()
@@ -326,6 +381,12 @@ class Hub:
         self.state.setdefault("exited", {})[accessory] = time.time()
         self._save_state()
         self.log(f"exiting {accessory}")
+
+    def special_tokens(self, name: str) -> list:
+        """要中和的记号：配方里写的，加上底座分词器自己的（读一次记住；没读到就下次再读，模型可能还在下载）。"""
+        if not self.markers.get(name):
+            self.markers[name] = tokenizer_markers(os.path.join(self.model_dir, self.recipe.model(name)["dir"]))
+        return list(self.recipe.model(name).get("special_tokens", [])) + self.markers[name]
 
     @staticmethod
     def _base_present(recipe: Recipe, model_dir: str, tier: str) -> bool:
@@ -348,8 +409,7 @@ class Hub:
             self.pending_tier = name
             base = self.recipe.base_for(name)
             try:
-                self.start_downloads([base] + [m for m in (self.recipe.assignment.get(name, {}).get("special") or {}).values()
-                                               if not os.path.isdir(self.model_dir_of(m))])
+                self.start_downloads([m for m in self.tier_models(name) if m == base or not os.path.isdir(self.model_dir_of(m))])
             except BadRequest as e:
                 self.log(f"tier change: cannot download {base}: {e.message}")
             return
@@ -358,6 +418,7 @@ class Hub:
         self.tier = self.recipe.tier(name)
         self.dispatcher.tier = self.tier
         self.base_name = self.recipe.base_for(name)
+        self._drop_stale_embed_workers()
         if not self.engine_missing():
             threading.Thread(target=self.restart_engine, daemon=True).start()
 
@@ -376,9 +437,13 @@ class Hub:
             self.engine.start(wait_models=want)
             self.base_id = self.engine.resolve(want[0]) if want else None
             self.apply_budget()
+            # 换档、下完模型后主动重启成功：之前的熔断和崩溃计数不再作数，不然任务一直答"已熔断"、菜单一直"出错了"
+            self.breaker, self.engine_error = None, None
+            self.engine_crashes.clear()
             if self.smoke and self.base_id:
                 self.smoke_check(force=True)
         except Exception as e:  # noqa: BLE001
+            self.engine_error = str(e)
             self.log(f"engine restart failed: {e}")
 
     def update_settings(self, patch: dict) -> dict:
@@ -432,8 +497,12 @@ class Hub:
         return dict(self.settings)
 
     # ---- 下载（V1 §6 第 4 步）：按发布清单，后台线程一项一项下，完了重启引擎让它看见新模型 ----------------------
+    def engine_install_app(self) -> str:
+        """清单里的引擎包装到哪（<env>/engines/<版本>/oMLX.app）。"""
+        return os.path.join(self.env_dir, "engines", self.recipe.engine["version"], "oMLX.app")
+
     def installed_engine_app(self) -> Optional[str]:
-        p = os.path.join(self.env_dir, "engines", self.recipe.engine["version"], "oMLX.app")
+        p = self.engine_install_app()
         return p if os.path.isdir(os.path.join(p, "Contents")) else None
 
     def recipe_engine_app(self) -> Optional[str]:
@@ -443,14 +512,35 @@ class Hub:
             return None     # 发布版只用清单里装的引擎包（钉了哈希、我们签的），不用本机另装的 oMLX（审查 2026-10-17，ADR 0001）
         return engine_app_matching(self.recipe.engine.get("app") or "", self.recipe.engine["version"])
 
+    def task_open_here(self, task: str, tier: str) -> bool:
+        """这台 Mac 上这个任务在这一档开着：配方认的（Recipe.task_open）；或者配件不在本版配方的 verified 里，但装着的版本
+        以前的发布验证过这一项（验证记录里有这个任务，同 check_accessory）。实验室实例都开。"""
+        if self.lab or self.recipe.task_open(task, tier):
+            return True
+        t = self.recipe.task(task)
+        if not t or not self.recipe.task_on_tier(task, tier):
+            return False
+        inst = accessories.by_accessory(self.manifests or {}, t["accessory"])
+        past = self.history_entry(t["accessory"], inst["version"]) if inst and inst.get("version") else None
+        return past is not None and task in past.get("tasks", [])
+
+    def tier_models(self, tier: str) -> list:
+        """这一档要下的模型：底座，加上开着的任务（task_open_here）用的专用模型（2026-11-03 起；之前分到档就下，
+        配件还没进发布评测、不在 verified 里的任务也下）。"""
+        a = self.recipe.assignment.get(tier) or {}
+        names = [a["base"]] if a.get("base") else []
+        for task, m in (a.get("special") or {}).items():
+            if m not in names and self.task_open_here(task, tier):
+                names.append(m)
+        return names
+
     def needed_downloads(self) -> list:
-        """本档（和换档等着的那一档）配方用到、模型目录里还没有的模型名；引擎包没装、配方写的引擎也不在时还要引擎（清单项 kind=engine，名字 engine）。
-        配件（kind=accessory）不在这里：首次运行按用户勾选的传给 start_downloads。"""
+        """本档（和换档等着的那一档）要的模型（tier_models）里、模型目录里还没有的模型名；引擎包没装、配方写的引擎也不在时还要引擎（清单项 kind=engine，名字 engine）。
+        配件（kind=accessory）不在这里：首次运行按用户勾选的传给 start_downloads。任务后来开了（新配方认了配件），这里就列出来，菜单栏照常补下。"""
         names = []
         # 换档等着的那一档也算（luoke-core#25：换档下到一半重启，这里只看当前档、返回空，菜单栏就不再补下，一直停在原来的档）
         for t in (self.tier_name, self.pending_tier):
-            a = (self.recipe.assignment.get(t) or {}) if t else {}
-            names += ([a["base"]] if a.get("base") else []) + list((a.get("special") or {}).values())
+            names += self.tier_models(t) if t else []
         items = self._manifest_items()
         def missing(n):
             item = items.get(n)
@@ -545,7 +635,7 @@ class Hub:
                     else:
                         old = accessories.by_accessory(self.manifests, item.get("accessory") or n)
                         if old and old.get("_bundled"):
-                            raise download.DownloadError(f"{n} 在主控里（螺壳记忆并进主控后不再单独装），清单不该有这一项")
+                            raise download.DownloadError(f"{n} 在主控里，不再单独装，清单不该有这一项")
                         im = item.get("type") == "input-method"
                         if old:   # 升级：旧 .app 里还在跑的进程先结束（本体已按 bundle id 结束过，这里兜住启动器 exec 出的 python3），再整个替换
                             # 输入法不在这时结束：系统会马上从旧包再拉起一个，换好以后再结束（accessories.after_swap）
@@ -577,6 +667,7 @@ class Hub:
             self.tier_name, self.tier = name, self.recipe.tier(name)
             self.dispatcher.tier = self.tier
             self.base_name = self.recipe.base_for(name)
+            self._drop_stale_embed_workers()
         if "engine" in names and self.downloads.get("engine", {}).get("state") == "done" and self.installed_engine_app():
             # 换用刚装上的引擎包：新的 Engine 对象，下面的重启用它。只看这一批：之前那批引擎的 done 一直留在 downloads 里，
             # 不看 names 的话之后每装一个应用都会停掉引擎、又不重启，守护线程按崩溃记，三次熔断（luoke-core#34）
@@ -597,11 +688,19 @@ class Hub:
             self.restart_engine()
 
     # ---- 预算：专用模型先扣，剩下的给 oMLX ------------------------------------------------------------------
+    def worker_wired_gb(self, model: str) -> float:
+        """专用模型工作进程常驻占多少：嵌入进程连视觉、声音一起加载时（任务参数有 image_batch / audio_batch）按模型的
+        media_wired_gb，没写就和只有文字时一样按 wired_gb。"""
+        m = self.recipe.model(model)
+        if getattr(self.scorers.get(model), "media", False) and m.get("media_wired_gb"):
+            return float(m["media_wired_gb"])
+        return float(m.get("wired_gb") or 0)
+
     def specials_running_gb(self) -> float:
         total = 0.0
         for model, w in self.scorers.items():   # 工作进程按模型共用，键是模型名
             if w.state in ("loading", "ready"):
-                total += float(self.recipe.model(model)["wired_gb"])
+                total += self.worker_wired_gb(model)
         return total
 
     def apply_budget(self) -> None:
@@ -649,7 +748,7 @@ class Hub:
         self.smoke_running = True
         holding = self.acquire_model(self.base_id, timeout=600)     # 本机端点正在用别的模型时，等它做完再量
         self.last_base_use = time.time()
-        self.state["smoke"] = dict(rec, running=True)   # 界面据此显示"正在检查"，而不是上一次失败的旧结果（16 GB 测试机 2026-10-16：旧的 FAILED 还挂着就被点了继续）
+        self.state["smoke"] = dict(rec, ok=None, running=True)   # ok 空着：还没有结论（11-02 16 GB 测试机：ok=False 让向导在试跑途中显示「没通过」）。界面据此显示"正在检查"，而不是上一次失败的旧结果（16 GB 测试机 2026-10-16：旧的 FAILED 还挂着就被点了继续）
         self._save_state()
         try:
             rec["load_secs"] = self.load_base()
@@ -787,7 +886,7 @@ class Hub:
         if d.job or self.engine.loading or d.now() - d.last_score < PROBE_QUIET_SECS:
             return      # 别和打字抢：最近几秒有打分就等下一轮
         for model, w in list(self.scorers.items()):
-            if w.kind == "embed" or w.state != "ready" or w.probed or w.probe_attempts >= 3:
+            if w.kind in ("embed", "transcribe") or w.state != "ready" or w.probed or w.probe_attempts >= 3:
                 continue      # 嵌入进程不探（没有延迟阈值，也不标慢）
             sp, pp = self.probe_shape("score", model), self.probe_shape("predict", model)
             if not sp and not pp:
@@ -848,13 +947,23 @@ class Hub:
             # 干净的 Mac：引擎包还没下载。主控照常起来接下载和状态，任务答"需下载"，装上后再起引擎（_download_worker）
             self.log(f"engine not installed yet ({self.engine_app}); waiting for the engine package")
         else:
-            ids = self.engine.start(wait_models=want)
-            if self.base_name:
-                self.base_id = self.engine.resolve(self.recipe.model(self.base_name)["dir"])
-                if not self.base_id:
-                    self.log(f"base model dir missing: {want} (have {ids})")
-            if self.smoke and self.base_id:
-                self.smoke_check()
+            try:
+                ids = self.engine.start(wait_models=want)
+            except Exception as e:  # noqa: BLE001
+                # 引擎没起来不让整个主控退出（之前菜单只剩"进程退出了（1）"，点重启多半还是一样）：主控照常接状态和下载，
+                # 记一次崩溃，交给 _check_engine 重启；短时间内一直起不来就熔断，任务答"暂停"并说明原因（DESIGN §10）。
+                # 不只 EngineError：引擎程序在、却起不了进程（没有执行权限、被隔离、架构不对）时 Popen 抛的是 OSError
+                self.engine_error = str(e) if isinstance(e, EngineError) else f"{type(e).__name__}: {e}"
+                self.engine_crashes.append(time.time())
+                self.smoke_after_recovery = True
+                self.log(f"engine did not start: {self.engine_error}; will retry")
+            else:
+                if self.base_name:
+                    self.base_id = self.engine.resolve(self.recipe.model(self.base_name)["dir"])
+                    if not self.base_id:
+                        self.log(f"base model dir missing: {want} (have {ids})")
+                if self.smoke and self.base_id:
+                    self.smoke_check()
         threading.Thread(target=self._sampler, daemon=True).start()
         self.phase = "running"
         if self.settings.get("endpoint_enabled") and not self.lab:
@@ -1058,12 +1167,10 @@ class Hub:
                 d.on_ac = machine.on_ac()
                 d.low_power = machine.low_power_mode()
                 d.thermal = machine.thermal_level()
-                # 内存压力看内核的等级，不猜。16 GB 档上我们自己加载底座就会把它顶到 warn（这是定下时接受的代价），
-                # 所以底座在内存里时 warn 不算数，只有 critical 才动；底座不在时的 warn 是别人在挤，照规则办。
+                # 内存压力看内核的等级，不猜。工作进程按原始等级停（critical）；后台按 _background_pressure 降过的等级停
                 level = machine.pressure_level()
                 self._idle_workers(level)
-                if level == "warn" and (self.engine.loaded or self.engine.loading):
-                    level = "normal"      # 正在加载时的 warn 也是我们自己造成的
+                level = self._background_pressure(level)
                 before = d.background_state()[0]
                 d.set_memory_pressure(level)
                 after, reasons = d.background_state()
@@ -1072,12 +1179,13 @@ class Hub:
                     if job:
                         self.log(f"background interrupted: {','.join(reasons)}")
                 self._idle_unload()
+                self._expire_asr_sessions()
                 self._retry_smoke()
                 self._probe_scorers()
                 if time.time() - self._manifest_rescan_at > 60:        # 新装、换装的配件：一分钟内看到它的 jobs
                     self.manifests = self.scan_accessories()
                     self._manifest_rescan_at = time.time()
-                self.jobs.tick(self.manifests)
+                self.jobs.tick(self.enabled_manifests())
                 self._snapshot_tasks()
             except Exception as e:  # noqa: BLE001
                 self.log(f"sampler error: {e}")
@@ -1119,8 +1227,17 @@ class Hub:
                 self.engine.start(wait_models=want)
                 self.base_id = self.engine.resolve(want[0]) if want else None
                 self.apply_budget()
-            except EngineError as e:
-                self.log(f"engine restart failed: {e}")
+                self.engine_error = None
+            except Exception as e:  # noqa: BLE001     同开机：OSError 也不能让采样线程停下
+                self.engine_error = str(e) if isinstance(e, EngineError) else f"{type(e).__name__}: {e}"
+                self.log(f"engine restart failed: {self.engine_error}")
+                return
+            if self.smoke_after_recovery and self.smoke and self.base_id and not self.smoke_running:
+                # 开机时引擎没起来、这次才起来：冒烟检查还没做过（做过的同一组合走缓存，不重算）。放到别的线程，采样不停。
+                # 只补这一次：平常的崩溃重启不再跑（上次没通过时会整个重算，还会和换档的重启抢着写结果）；
+                # 看内存里的 smoke_running，不看存盘的 state（上次检查中途被杀，存盘的 running 会一直是 True）
+                self.smoke_after_recovery = False
+                threading.Thread(target=self.smoke_check, daemon=True).start()
         finally:
             self.restarting.release()
 
@@ -1237,8 +1354,11 @@ class Hub:
 
     def task_status(self, task: str) -> dict:
         t = self.recipe.task(task)
-        if t.get("tiers") and self.tier_name not in t["tiers"]:       # 发布脚本按证据填：硬性条目没过的档不支持
+        if not self.recipe.task_on_tier(task, self.tier_name):       # 发布脚本按证据填：硬性条目没过的档不支持；tiers 空的就是哪一档都没开
             return {"status": "unsupported", "reason": "这一档没通过验证", "combo": None}
+        if t["kind"] != "generate" and not self.task_open_here(task, self.tier_name):
+            # 专用模型只给开着的任务下（tier_models）：配件还没在这一版螺壳里验证过，就不答"模型还没下载"、让人以为会下
+            return {"status": "unsupported", "reason": "配件还没在这一版螺壳里验证过", "combo": None}
         if self.engine_missing():
             d = self.downloads.get("engine")
             return {"status": "downloading" if d and d.get("state") in ("queued", "downloading") else "needs_download",
@@ -1310,17 +1430,20 @@ class Hub:
             return False
         if self.engine.loaded and self.engine.loaded in (model_name, self.base_id):
             return True                            # 已经在内存里了，不用再算
-        sample = machine.memory_sample()
-        wired = sample.get("wired_gb")
-        if wired is None:
-            return True
         cap = machine.metal_cap_gb(self.mem_gb)
-        free_for_us = cap - wired                  # Metal 上限减去现在所有人（别的引擎、系统、我们的打分进程）占着的
         margin = 0.0 if not self.tier.get("base_resident", True) else 1.0   # 16 GB 档本来就是挤着用（安静时刻、用完就卸）
-        if size + margin > free_for_us:
-            self.log(f"memory: need {size} GB (+{margin:.0f}), metal cap {cap} - wired {wired} leaves {free_for_us:.1f} GB; refusing to load")
-            return False
-        return True
+        settle_until = getattr(self.engine, "unloaded_at", 0.0) + UNLOAD_SETTLE_SECS
+        while True:
+            wired = machine.memory_sample().get("wired_gb")
+            if wired is None:
+                return True
+            free_for_us = cap - wired              # Metal 上限减去现在所有人（别的引擎、系统、我们的打分进程）占着的
+            if size + margin <= free_for_us:
+                return True
+            if time.time() >= settle_until:
+                self.log(f"memory: need {size} GB (+{margin:.0f}), metal cap {cap} - wired {wired} leaves {free_for_us:.1f} GB; refusing to load")
+                return False
+            time.sleep(0.5)                        # 刚卸过模型：wired 还在往下降，等一等再量
 
     def occupants(self) -> list:
         mine = {self.engine.proc.pid} if self.engine.proc else set()
@@ -1331,22 +1454,44 @@ class Hub:
 
     # ---- 打分 -----------------------------------------------------------------------------------------
     def worker_hold_reason(self, model: str) -> Optional[str]:
-        """要起专用模型工作进程之前：内存压力刚到 critical 不起；这台机器还剩的（Metal 上限减去现在 wired 的，引擎里我们自己的模型
-        算作能让出来的：预算重算时引擎会给它让位，16 GB 档打分时底座会卸）装不下它常驻的占用也不起。答原因，能起答 None。"""
+        """要起专用模型工作进程之前：内存压力刚到 critical 不起；这台机器还剩的（Metal 上限减去现在 wired 的，引擎里我们自己的底座
+        真会让出来时才加回去：底座常驻的档预算重算时引擎会给它让位；16 GB 档只有打分、联想的进程会让底座卸掉，嵌入不卸）装不下
+        它常驻的占用也不起。答原因，能起答 None。"""
         if time.time() < self.worker_hold_until:
             return "内存紧张，专用模型先不起"
-        need = float(self.recipe.model(model).get("wired_gb") or 0)
+        need = self.worker_wired_gb(model)
         sample = machine.memory_sample()
         wired = sample.get("wired_gb")
         if not need or wired is None:
             return None
+        # 16 GB 档上嵌入请求不卸底座，预算重算也因为会挤掉底座不降天花板（apply_budget），底座算进去就把 9B 在内存里时的嵌入放进来了
+        # （2026-11-04 16 GB 测试机：算出 9.3 GB，实际剩 3.5 GB，几十秒后内存压力到 critical）
+        yields = self.tier.get("base_resident", True) or isinstance(self.scorers.get(model), ScoreWorker)
         ours = (float(self.recipe.model(self.base_name).get("size_gb") or 0)
-                if self.base_name and self.base_id and self.engine.loaded == self.base_id else 0.0)
+                if yields and self.base_name and self.base_id and self.engine.loaded == self.base_id else 0.0)
         free = machine.metal_cap_gb(self.mem_gb) - wired + ours
         if need > free:
             self.log(f"memory: worker {model} needs {need} GB, metal cap leaves {free:.1f} GB; not starting it")
             return "内存不够，专用模型先不起"
         return None
+
+    def _background_pressure(self, level: str, now: Optional[float] = None) -> str:
+        """全机后台按哪个内存压力等级停。16 GB 档上我们自己加载底座就会把压力顶到 warn（这是定下时接受的代价），所以只有底座
+        （正在加载也算）单独在内存里时 warn 当 normal；底座不在时的 warn 是别人在挤，照规则办。底座之外还有我们的专用模型工作进程
+        在跑时，warn 连续超过 OWN_WARN_SECS 才照算：底座加载、刚开始生成那几秒的 warn 不停后台，一直下不来才停（2026-11-04 16 GB
+        测试机：9B 和嵌入一起把压力顶到 warn，后台照收，十几秒后到 critical）。采样线程约 5 s 一次，所以实际是连着三次 warn 才停。"""
+        now = time.time() if now is None else now
+        if level != "warn" or not (self.engine.loaded or self.engine.loading):
+            self.own_warn_since = None
+            return level
+        with self.scorers_lock:
+            workers = any(w.state in ("loading", "ready") for w in self.scorers.values())
+        if not workers:
+            self.own_warn_since = None
+            return "normal"
+        if self.own_warn_since is None:
+            self.own_warn_since = now
+        return "warn" if now - self.own_warn_since > OWN_WARN_SECS else "normal"
 
     def _idle_workers(self, pressure: str) -> None:
         """空闲 WORKER_IDLE_SECS 的工作进程停掉；内存压力 critical 时全部停掉，WORKER_HOLD_SECS 内不起（issue #11）。"""
@@ -1372,12 +1517,18 @@ class Hub:
         model = self.recipe.model_for_task(task, self.tier_name)
         # 建进程、起进程在锁里：两个请求同时第一次进来时只建一个（不然多出的那个不计预算，stop() 也停不到它；#5 审阅）。
         # 重算预算在锁外：它可能要等引擎调天花板，别让打分这类要快的请求在锁上排队
+        stale = None
         with self.scorers_lock:
             w = self.scorers.get(model)
+            if isinstance(w, EmbedWorker) and w.media != (media_kinds(self.recipe.params(task, self.tier_name)) != set()):
+                stale, w = self.scorers.pop(model), None     # 换过档：进程的模式按这一档的任务参数换，不能只是停了再起同一个对象
             if w is None:
                 params = self.recipe.params(task, self.tier_name)
                 cache_mb = self.recipe.model(model).get("cache_mb")   # MLX 缓冲上限，见 score_worker.py
-                if self.recipe.task(task)["kind"] == "embed":
+                if self.recipe.task(task)["kind"] == "transcribe":
+                    w = TranscribeWorker(self.engine_python, self.engine_site, self.model_dir_of(model), self.log,
+                                         cache_mb=int(cache_mb if cache_mb is not None else 512))
+                elif self.recipe.task(task)["kind"] == "embed":
                     w = EmbedWorker(self.engine_python, self.engine_site, self.model_dir_of(model), self.log,
                                     cache_mb=int(cache_mb if cache_mb is not None else 512),
                                     media=media_kinds(params) != set())     # 任务参数说收图片 / 声音才连视觉、声音一起加载
@@ -1392,9 +1543,30 @@ class Hub:
                 if held:
                     raise BadRequest("not_ready", held, WORKER_HOLD_SECS)
                 w.start()
+        if stale is not None:
+            self.log(f"embedder mode changed with the tier: replacing the {'media' if stale.media else 'text-only'} worker")
+            threading.Thread(target=stale.stop, daemon=True).start()
         if started:
             self.apply_budget()
         return w
+
+    def _drop_stale_embed_workers(self) -> None:
+        """换档以后：模式（只收文字 / 连视觉、声音）和这一档任务参数不一样的嵌入进程停掉、从 self.scorers 拿掉，下次请求按新档建新的。
+        32 → 16 时不留着多占约 1.5 GB 的视觉、声音部分；16 → 32 时下一张图不会再交给只收文字的进程（11-04 实测：要重启螺壳才好）。"""
+        stale = []
+        with self.scorers_lock:
+            for task, t in self.recipe.tasks.items():
+                if t["kind"] != "embed":
+                    continue
+                model = self.recipe.model_for_task(task, self.tier_name)
+                w = self.scorers.get(model) if model else None
+                if isinstance(w, EmbedWorker) and w.media != (media_kinds(self.recipe.params(task, self.tier_name)) != set()):
+                    stale.append(self.scorers.pop(model))
+        for w in stale:
+            w.stop()
+        if stale:
+            self.log(f"tier change: stopped {len(stale)} embed worker(s) whose media mode no longer matches")
+            self.apply_budget()
 
     def predict(self, task: str, body: dict) -> dict:
         params = self.recipe.params(task, self.tier_name)
@@ -1408,6 +1580,8 @@ class Hub:
             n = int(body.get("n", params.get("n", 6)) or 1)
         except (TypeError, ValueError):
             raise BadRequest("invalid_request", "k、n 要是整数")   # 别让请求值经 handler error 进日志（2026-10-16 自查）
+        if k < 1 or n < 1:
+            raise BadRequest("invalid_request", "k、n 要至少是 1")
         if k > int(params.get("k", 8)) or n > int(params.get("n", 6)):
             raise BadRequest("invalid_request", f"k、n 不能超过任务参数（k {params.get('k')}，n {params.get('n')}）")
         st = self.task_status(task)
@@ -1506,10 +1680,10 @@ class Hub:
 
     def embed(self, task: str, body: dict, priority: Optional[str] = None, allow_battery: bool = False,
               accessory: Optional[str] = None) -> dict:
-        """算向量（V1 §2 /v1/embed，2026-10-16 提议、10-19 认可，顶层 ADR 0018：全生态推理统一归主控，首个消费方是 digup 搜索）。
-        请求 {"texts": [...]}：每条是调用方加好检索提示前缀的整段文字；每条按 token 截到任务参数 max_tokens（和 digup 一样 2048），
+        """算向量（V1 §2 /v1/embed，2026-10-16 提议、10-19 认可，顶层 ADR 0018：全生态推理统一归主控，首个消费方是深度搜索 luoke-search，原来的 digup）。
+        请求 {"texts": [...]}：每条是调用方加好检索提示前缀的整段文字；每条按 token 截到任务参数 max_tokens（和 luoke-search 一样 2048），
         答复每条一个满维（768）、L2 归一化、float16 精度的向量。专用模型直连、不走引擎（ADR 0006），无前缀缓存。
-        请求等级看 X-Luoke-Priority（gateway 同一个头）：不带按后台——digup 大批建索引时不该挡住邮件、记忆的后台；
+        请求等级看 X-Luoke-Priority（gateway 同一个头）：不带按后台——luoke-search 大批建索引时不该挡住邮件、记忆的后台；
         后台按后台的规矩接纳（交互中、刚打过字、用电池、过热、功耗档间歇都会 busy / paused），算完按用时歇；
         user-waiting（搜索时的查询）算交互、打断后台，不进打分的 K 分钟窗口。"""
         priority = priority or "background"
@@ -1544,7 +1718,7 @@ class Hub:
         d = self.dispatcher
         if priority == "background":
             # 单独记账（#5 审阅 2026-10-19）：嵌入走自己的进程、不用引擎，不占引擎的后台名额、不受功耗档间歇管，
-            # 所以 digup 大批建索引不会把邮件、记忆的后台挤到抢不到名额；只照全机的后台状态和交互让路
+            # 所以 luoke-search 大批建索引不会把邮件、记忆的后台挤到抢不到名额；只照全机的后台状态和交互让路
             ok, code, retry, reason = d.admit_side_background(allow_battery, lane=task)
             if not ok:
                 self.log(f"refused embed task={task} prio=background accessory={accessory} code={code} reason={reason} retry_after={retry}")
@@ -1554,8 +1728,6 @@ class Hub:
         w = None
         t0 = time.time()
         try:
-            # 建进程也在 try 里：Popen 的 OSError、apply_budget 出错时，finally 照样还后台名额，
-            # 不然全机后台一直答 engine_busy 到主控重启（#5 审阅，2026-10-19）
             w = self.scorer_for(task)
             max_tokens = int(params.get("max_tokens", 2048))
             if inputs is not None:
@@ -1569,8 +1741,6 @@ class Hub:
             code = str(e)
             self._log_embed_refusal(task, code, priority, accessory, w.state if w else None)
             raise BadRequest(code, "嵌入模型正在加载" if code == "not_ready" else "嵌入进程失败", 2 if code == "not_ready" else 30)
-        finally:
-            pass
         self.score_ms.setdefault(task, deque(maxlen=200)).append(float(rep.get("ms") or 0))
         out = {"vectors": rep["vectors"], "dims": rep.get("dims"), "model": st["combo"],
                "vector_space": self.recipe.vector_space(task, self.tier_name), "ms": rep.get("ms")}
@@ -1578,24 +1748,125 @@ class Hub:
             out["errors"] = rep.get("errors") or [None] * len(inputs)      # 逐条出错：坏的那条 vector 是 null
         return out
 
-    EMBED_CHUNK = 8      # 后台批切成几条一份：查询最多等一份算完（#5 审阅：之前要等一整批 32 × 2048 token）
+    def transcribe(self, task: str, body: dict, accessory: str) -> dict:
+        """转写（V1 §2 /v1/transcribe，2026-11-05，core-private#22）：一次听写是一个会话，音频按块追加，主控攒着这次的音频，
+        要草稿或终稿时把到目前为止的整段交给工作进程。都是"用户在等"。音频只在内存里：不落盘、不进日志，终稿、取消、
+        30 秒没消息（ASR_SESSION_SECS）就丢掉。
+        请求 {"session", "seq", "audio": base64 PCM16LE 16 kHz 单声道（上次以后新录的）, "want": none|draft|final|cancel, "context"}：
+        seq 从 0 起、每次加一，0 是新开（或从头重送）；主控不认得这个会话或 seq 接不上答 session_lost，调用方从 seq 0 重送整段。
+        draft 排队等工作进程时同一会话来了更新的请求，就不算了，答 superseded。context 原样给模型（光标前的字、常用说法怎么拼由调用方定）。
+        language（可选，例如 "Chinese"）不给就用任务参数的 language；两边都没有才让模型自己判断。"""
+        params = self.recipe.params(task, self.tier_name)
+        sid, seq, want = body.get("session"), body.get("seq"), body.get("want", "final")
+        audio, context = body.get("audio", ""), body.get("context", "")
+        language = body.get("language", params.get("language", ""))
+        if not isinstance(sid, str) or not 0 < len(sid) <= 64:
+            raise BadRequest("invalid_request", "要 session（1–64 个字符）")
+        if want not in ("none", "draft", "final", "cancel"):
+            raise BadRequest("invalid_request", "want 只能是 none、draft、final 或 cancel")
+        key = (accessory, sid)
+        if want == "cancel":
+            with self.asr_lock:
+                self.asr_sessions.pop(key, None)
+            return {"ok": True}
+        if not isinstance(seq, int) or isinstance(seq, bool) or seq < 0:
+            raise BadRequest("invalid_request", "要 seq（从 0 起的整数）")
+        if not isinstance(audio, str) or not isinstance(context, str):
+            raise BadRequest("invalid_request", "audio、context 要是字符串")
+        if not isinstance(language, str) or len(language) > 32 or not all(c.isascii() and (c.isalpha() or c == " ") for c in language):
+            raise BadRequest("invalid_request", "language 要是语言的英文名（例如 Chinese），最多 32 个字母")
+        if len(context) > int(params.get("max_context_chars", 2000)):
+            raise BadRequest("input_too_long", f"context {len(context)} 字符，超过上限 {params.get('max_context_chars', 2000)}")
+        try:
+            chunk = base64.b64decode(audio, validate=True)
+        except ValueError:
+            raise BadRequest("invalid_request", "audio 不是 base64")
+        if len(chunk) % 2:
+            raise BadRequest("invalid_request", "audio 要是 PCM16（字节数是偶数）")
+        st = self.task_status(task)
+        if st["status"] != "available":
+            raise BadRequest("task_unavailable" if st["status"] != "unsupported" else "unsupported", st["reason"] or st["status"])
+        max_bytes = int(float(params.get("max_audio_secs", 120)) * ASR_RATE * 2)
+        with self.asr_lock:
+            s = self.asr_sessions.get(key)
+            if seq == 0:
+                mine = [k for k in self.asr_sessions if k[0] == accessory and k != key]
+                for k in sorted(mine, key=lambda k: self.asr_sessions[k]["t"])[:max(0, len(mine) - ASR_SESSIONS_PER_ACCESSORY + 1)]:
+                    del self.asr_sessions[k]       # 一个配件同时最多留这么几个：丢最久没动的
+                s = self.asr_sessions[key] = {"audio": bytearray(), "seq": -1, "gen": 0, "t": 0.0}
+            elif s is None or seq != s["seq"] + 1:
+                raise BadRequest("session_lost", "主控这边没有这次听写到这一块为止的音频（过期了、主控重启过或者漏了一块），请从 seq 0 重送整段")
+            if len(s["audio"]) + len(chunk) > max_bytes:
+                self.asr_sessions.pop(key, None)
+                raise BadRequest("input_too_long", f"这次听写超过 {params.get('max_audio_secs', 120)} 秒")
+            before = (len(s["audio"]), s["seq"])
+            s["audio"] += chunk
+            s["seq"], s["t"] = seq, time.time()
+            s["gen"] += 1
+            gen = s["gen"]
+            if want == "none":
+                return {"ok": True}
+            pcm = bytes(s["audio"])
+        job = self.dispatcher.user_waiting_arrived()
+        if job:
+            self.log(f"background interrupted by transcribe ({task})")
+        if not self.tier.get("base_resident", True) and self.engine.loaded and not self.unload_on_next_score:
+            self.unload_on_next_score = True   # 16 GB：底座和转写放不下一起（core-private#22），同打字时一样立刻卸掉底座
+            threading.Thread(target=self._idle_unload, daemon=True).start()
+        secs = len(pcm) / 2 / ASR_RATE
+        try:
+            w = self.scorer_for(task)
+            rep = w.transcribe(base64.b64encode(pcm).decode("ascii"), context, int(params.get("max_tokens", 512)),
+                               timeout=10.0 + secs, still_wanted=None if want == "final" else (lambda: s["gen"] == gen), language=language)
+        except (ScorerError, BadRequest) as e:
+            code = e.code if isinstance(e, BadRequest) else str(e)
+            if code == "superseded":
+                raise BadRequest("superseded", "这次听写已经有了更新的请求")
+            with self.asr_lock:      # 没算成：这一块当没收到，调用方照 retry_after 原样重发这一次（模型冷起时答 not_ready）
+                if self.asr_sessions.get(key) is s and s["gen"] == gen:
+                    del s["audio"][before[0]:]
+                    s["seq"] = before[1]
+            if isinstance(e, BadRequest):
+                raise
+            raise BadRequest(code, "语音识别模型正在加载" if code == "not_ready" else "语音识别进程失败", 2 if code == "not_ready" else 30)
+        if want == "final":
+            with self.asr_lock:
+                if self.asr_sessions.get(key) is s:
+                    del self.asr_sessions[key]
+        if want == "final":      # 只记元数据（V1 §9）
+            self.log(f"transcribe task={task} accessory={accessory} audio_secs={secs:.1f} ms={rep.get('ms')}")
+        return {"text": rep.get("text", ""), "final": want == "final", "audio_secs": round(secs, 2), "ms": rep.get("ms"),
+                "model": st["combo"]}
+
+    def _expire_asr_sessions(self) -> None:
+        now = time.time()
+        with self.asr_lock:
+            for k in [k for k, s in self.asr_sessions.items() if now - s["t"] > ASR_SESSION_SECS]:
+                del self.asr_sessions[k]
+
+    EMBED_CHUNK = 8      # 一次交给嵌入进程几条：查询最多等一份算完（#5 审阅：之前要等一整批 32 × 2048 token）；配方 wired_gb 也按这个量
 
     def _embed_lane(self, w, texts: list, max_tokens: int, priority: str) -> dict:
         """嵌入的优先通道：user-waiting 的查询插到后台批的前面。后台批切成 EMBED_CHUNK 条一份，每份之前看有没有查询在等，
-        有就先让它。答复和整批一次算的一样（向量按原顺序拼回去，ms 加起来）。"""
+        有就先让它。user-waiting 也按 EMBED_CHUNK 切（不等）：嵌入进程一次最多算 EMBED_CHUNK 条，配方的 wired_gb 按这个
+        量（2026-11-04：8 条 × 2048 token 中文最高 2.66 GB；一次 16 条以上 3.68 GB）。答复和整批一次算的一样（向量按原顺序拼回去，ms 加起来）。"""
         if priority == "user-waiting":
             with self.embed_lane:
                 self.embed_priority_waiting += 1
             try:
-                return w.embed(texts, max_tokens, timeout=30.0 + 2.0 * len(texts))
+                return self._embed_chunks(w, texts, max_tokens, yield_to_queries=False)
             finally:
                 with self.embed_lane:
                     self.embed_priority_waiting -= 1
                     self.embed_lane.notify_all()
+        return self._embed_chunks(w, texts, max_tokens, yield_to_queries=True)
+
+    def _embed_chunks(self, w, texts: list, max_tokens: int, yield_to_queries: bool) -> dict:
         vectors, ms, dims = [], 0.0, None
         for i in range(0, len(texts), self.EMBED_CHUNK):
-            with self.embed_lane:
-                self.embed_lane.wait_for(lambda: self.embed_priority_waiting == 0, 30)
+            if yield_to_queries:
+                with self.embed_lane:
+                    self.embed_lane.wait_for(lambda: self.embed_priority_waiting == 0, 30)
             chunk = texts[i:i + self.EMBED_CHUNK]
             rep = w.embed(chunk, max_tokens, timeout=30.0 + 2.0 * len(chunk))
             vectors += rep["vectors"]
@@ -1614,6 +1885,7 @@ class Hub:
             raise BadRequest("invalid_request", "要 inputs（非空列表）")
         budgets = params.get("image_budgets") or list(IMAGE_BUDGETS)
         counts = {"text": 0, "image": 0, "audio": 0}
+        image_budgets = []
         for it in inputs:
             k = mediaops.kind_of(it)
             if k is None:
@@ -1635,12 +1907,21 @@ class Hub:
                     raise BadRequest("invalid_request", "图片要带整数的 budget")
                 if budget not in budgets:
                     raise BadRequest("invalid_request", f"budget 只能是 {list(budgets)} 之一（任务参数 image_budgets）")
+                image_budgets.append(budget)
             limit = params.get(f"max_{k}_bytes")
             if not b64_fits(it[k], limit):
                 raise BadRequest("input_too_long", f"有一条{name}超过 {limit} 字节（任务参数 max_{k}_bytes）")
         for k, cap in (("text", params.get("batch", 32)), ("image", params.get("image_batch")), ("audio", params.get("audio_batch"))):
             if counts[k] and counts[k] > int(cap or 0):
                 raise BadRequest("invalid_request", f"{k} 有 {counts[k]} 条，超过本档上限 {cap}")
+        # 嵌入进程的内存看一次请求里图片的 token 总数（同一 budget 的图一起算）：16 GB 测试机 11-04 实测，8 张 280 峰值 4.3 GB、
+        # 1 张 1120 约 4.0 GB，8 张 1120 涨到 13.3 GB。所以限总数（max_image_tokens），大 budget 的图一次只许一张（single_image_budgets）
+        cap = params.get("max_image_tokens")
+        if cap and sum(image_budgets) > int(cap):
+            raise BadRequest("invalid_request", f"图片的 budget 加起来 {sum(image_budgets)}，超过本档上限 {cap}（任务参数 max_image_tokens）")
+        single = set(params.get("single_image_budgets") or [])
+        if len(image_budgets) > 1 and single & set(image_budgets):
+            raise BadRequest("invalid_request", f"budget {sorted(single & set(image_budgets))} 的图一次请求只能有一张（任务参数 single_image_budgets）")
 
     EMBED_REFUSAL_LOG_SECS = 10.0
 
@@ -1799,6 +2080,12 @@ class Handler(BaseHTTPRequestHandler):
                     raise BadRequest("invalid_request", f"任务 {task} 不是嵌入任务")
                 return self._json(200, hub.embed(task, self._body(), priority=(self.headers.get("X-Luoke-Priority") or "").strip() or None,
                                                  allow_battery=self.headers.get("X-Luoke-Allow-Battery") == "1", accessory=name))
+            if path.startswith("/tasks/") and path.endswith("/v1/transcribe") and method == "POST":
+                task = path[len("/tasks/"):-len("/v1/transcribe")]
+                name, _ = hub.check_accessory(acc, task)
+                if hub.recipe.task(task)["kind"] != "transcribe":
+                    raise BadRequest("invalid_request", f"任务 {task} 不是转写任务")
+                return self._json(200, hub.transcribe(task, self._body(), name))
             if path.startswith("/tasks/") and path.endswith("/v1/continue") and method == "POST":
                 task = path[len("/tasks/"):-len("/v1/continue")]
                 hub.check_accessory(acc, task)
@@ -1817,15 +2104,18 @@ class Handler(BaseHTTPRequestHandler):
                 task = b.get("task")
                 if not task or not hub.recipe.task(task):
                     raise BadRequest("task_unavailable", "没有这个任务")
+                hub.check_accessory(acc, task)   # 只能预热自己的任务：别的配件的任务会起它的底座、工作进程（core#129）
                 st = hub.task_status(task)
                 if st["status"] != "available":
                     return self._json(200, {"accepted": False, "code": "task_unavailable" if st["status"] != "unsupported" else "unsupported"})
                 r = hub.dispatcher.warmup(task, b.get("lease_id"))
                 if r["accepted"] and hub.recipe.task(task)["kind"] == "generate" and hub.base_id and not hub.engine.loaded:
                     threading.Thread(target=self._load_base_quietly, daemon=True).start()
-                if r["accepted"] and hub.recipe.task(task)["kind"] in ("score", "predict", "embed"):
+                if r["accepted"] and hub.recipe.task(task)["kind"] in SPECIAL_KINDS:
                     try:
-                        hub.scorer_for(task)
+                        w = hub.scorer_for(task)
+                        if isinstance(w, TranscribeWorker):
+                            w.rewarm()    # 已经起来的也热一遍：闲久了权重被换出内存，按下说话键时先读回来
                     except BadRequest:
                         pass          # 内存紧张先不起：预热照样答应，真用到时答 not_ready 让配件退避
                 return self._json(200, r)
@@ -1863,13 +2153,66 @@ class Handler(BaseHTTPRequestHandler):
             if method == "GET" and path == "/accessories":
                 hub.check_accessory(acc)
                 hub.manifests = hub.scan_accessories()
-                return self._json(200, {"contract": 1, "accessories": accessories.public_list(hub.manifests)})
+                return self._json(200, {"contract": 1, "accessories": accessories.public_list(hub.manifests, hub.helpers_off())})
             if method == "POST" and path == "/smoke":          # 首次运行 / 设置页的「重新检查」：只有主控自己的界面能调；在后台做，界面轮询 /status 的 smoke
                 self.require_hub(acc, "只有主控能发起冒烟检查")
                 if getattr(hub, "smoke_running", False):
                     return self._json(200, {"started": False, "running": True})
                 threading.Thread(target=lambda: hub.smoke_check(force=True), daemon=True).start()
                 return self._json(200, {"started": True})
+            if method == "POST" and path == "/accessories/enable":      # 开启本体里的应用（ADR 0022）：只有主控自己的界面能调
+                self.require_hub(acc, "只有主控能启用配件")
+                name = str(self._body().get("accessory") or "")
+                m = accessories.by_accessory(hub.manifests or {}, name)
+                if not m or not m.get("_helper"):
+                    raise BadRequest("unsupported", f"{name} 不是螺壳里带的应用")
+                hub.set_enabled(name, True)
+                return self._json(200, {})
+            if method == "POST" and path == "/accessories/permission":  # 权限页上的开关：只有主控自己的界面能调
+                self.require_hub(acc, "只有主控能改配件的权限")
+                b = self._body()
+                name, permission = str(b.get("accessory") or ""), str(b.get("permission") or "")
+                m = accessories.by_accessory(hub.manifests or {}, name)
+                if not permission or not isinstance(b.get("on"), bool):
+                    raise BadRequest("invalid_request", "要 accessory、permission 和 on（true 或 false）")
+                if not m or not m.get("_helper"):
+                    raise BadRequest("unsupported", f"{name} 不是螺壳里带的应用")
+                if not accessories.declares_host_permission(m, permission):
+                    raise BadRequest("undeclared", f"{name} 的清单里没有声明 {permission}")
+                hub.set_permission(name, permission, b["on"])
+                return self._json(200, {})
+            if method == "POST" and path == "/accessories/first-use":   # 用户刚开启或刚确认：写了 first_use 的任务马上跑
+                self.require_hub(acc, "只有主控能起配件的第一次任务")
+                name = str(self._body().get("accessory") or "")
+                m = accessories.by_accessory(hub.manifests or {}, name)
+                if not m or not m.get("_helper"):
+                    raise BadRequest("unsupported", f"{name} 不是螺壳里带的应用")
+                return self._json(200, {"jobs": hub.jobs.first_use(m)})
+            if method == "POST" and path == "/accessories/disable":     # 停用本体里的应用：子进程本体已经停了，这里记下来；和卸载无关，不动数据
+                self.require_hub(acc, "只有主控能停用配件")
+                name = str(self._body().get("accessory") or "")
+                m = accessories.by_accessory(hub.manifests or {}, name)
+                if not m or not m.get("_helper"):
+                    raise BadRequest("unsupported", f"{name} 不是螺壳里带的应用")
+                hub.disable_helper(name)
+                return self._json(200, {})
+            if method == "POST" and path == "/accessories/delete-data":     # 删本体里的应用的数据：dry_run 给确认窗口看；真删时本体已经停了它，这里先记停用再删
+                self.require_hub(acc, "只有主控能删配件的数据")
+                b = self._body()
+                name, dry_run = str(b.get("accessory") or ""), bool(b.get("dry_run", False))
+                m = accessories.by_accessory(hub.manifests or {}, name)
+                if not m or not m.get("_helper"):
+                    raise BadRequest("unsupported", f"{name} 不是螺壳里带的应用")
+                hub.check_uninstall_data(True, dry_run)          # 实验室实例 HOME 没隔离时不删（先于停用）
+                if not dry_run:
+                    hub.disable_helper(name)
+                r = accessories.uninstall(hub.manifests, name, data=True, forget=bool(b.get("forget", False)), dry_run=dry_run,
+                                          previous_dir=os.path.join(hub.env_dir, "previous.noindex"))
+                if r.get("code"):
+                    raise BadRequest(r["code"], r.get("error") or r["code"])
+                if not dry_run:
+                    hub.log(f"deleted data of {name}: removed {len(r['removed'])} path(s)" + (f", errors {r['errors']}" if r['errors'] else ""))
+                return self._json(200, r)
             if method == "POST" and path == "/accessories/reregister":   # 输入法切不过去时的「重新登记」（luoke-ime#15）：只有主控自己的界面能调
                 self.require_hub(acc, "只有主控能重新登记配件")
                 hub.manifests = hub.scan_accessories()
@@ -1898,7 +2241,7 @@ class Handler(BaseHTTPRequestHandler):
                         out.append({k: c[k] for k in ("accessory", "name", "type", "bundle_id", "current", "previous")} |
                                    {"verified": bool(ok or past), "release": (past or {}).get("release")})
                     return self._json(200, {"accessories": out})
-                if method == "POST":
+                if method == "POST" and path == "/accessories/rollback":   # POST /accessories/previous 不回滚（core#129）
                     target = str(self._body().get("accessory") or "")
                     c = next((x for x in accessories.rollback_candidates(hub.manifests, previous) if x["accessory"] == target), None)
                     if not c:
@@ -1934,6 +2277,8 @@ class Handler(BaseHTTPRequestHandler):
                 if r.get("code"):
                     raise BadRequest(r["code"], r.get("error") or r["code"])
                 if not dry_run:
+                    if plan["app"] is None:           # 本体里的应用：没有 .app 可删，这里只记停用
+                        hub.set_enabled(target, False)
                     hub.manifests = hub.scan_accessories()
                     hub.log(f"uninstalled {target}: removed {len(r['removed'])} path(s)" + (f", errors {r['errors']}" if r['errors'] else ""))
                 return self._json(200, r)
@@ -1992,6 +2337,7 @@ class Handler(BaseHTTPRequestHandler):
                 "ceiling_gb": hub.engine.guard_gb, "smoke": hub.state.get("smoke"), "settings": dict(hub.settings),
                 "power": {"on_ac": d.on_ac, "low_power": d.low_power, "thermal": d.thermal},
                 "breaker": hub.breaker, "engine_crashes": len(hub.engine_crashes),
+                "engine_missing": hub.engine_missing(), "engine_error": hub.engine_error,
                 "resident": hub.state.get("resident", {}), "exited": hub.state.get("exited", {}),
                 "downloads": hub.downloads, "needed_downloads": hub.needed_downloads(), "jobs": hub.jobs.status(),
                 "release": hub.release_tag(), "local_allowed": hub.local_allow_list(), "endpoint": hub.endpoint_status(),
@@ -2024,7 +2370,7 @@ class Handler(BaseHTTPRequestHandler):
         base_params = hub.recipe.base_params(task)
         model_name = hub.base_name
         model_meta = hub.recipe.model(model_name)
-        payload = build_engine_payload(body, params, base_params, hub.base_id, model_meta.get("special_tokens", []))
+        payload = build_engine_payload(body, params, base_params, hub.base_id, hub.special_tokens(model_name))
         prefill = hub.measured_speed("prefill_tok_s", hub.recipe.speed(model_name, hub.tier_name, "prefill_tok_s", 100))
         decode = hub.measured_speed("decode_tok_s", hub.recipe.speed(model_name, hub.tier_name, "decode_tok_s", 10))
         est = estimate_secs(payload, prefill, decode)
@@ -2124,6 +2470,20 @@ class Handler(BaseHTTPRequestHandler):
                     cancel = threading.Event()
                     info = hub.engine.stream_chat(payload, on_line, cancel,
                                                   first_token_timeout=max(60, est * 3), total_timeout=max(120, est * 4))
+            if info.get("status") == 409 and not sent["any"] and not cancel.is_set():
+                # oMLX 答 409：模型正在卸或正在加载（16 GB 档用户一打字主控就卸底座，卸的那一刻进来的 chat 碰上，11-05）。
+                # 等引擎手上的卸载做完，再把底座装回来，重试一次；还不行就答 not_ready，配件照 retry_after 再来，不当引擎故障
+                hub.log(f"engine answered 409 for {task} before any output (model unloading or loading); reloading the base, retrying once")
+                if self._event("luoke.progress", {"stage": "loading", "message": "正在加载底座", "eta": model_meta.get("load_secs")}):
+                    try:
+                        with hub.engine.lock:      # 卸载在这把锁里做：拿到它就是卸完了
+                            pass
+                        if hub.engine.loaded != hub.base_id:
+                            hub.load_base()
+                        info = hub.engine.stream_chat(payload, on_line, cancel,
+                                                      first_token_timeout=max(60, est * 3), total_timeout=max(120, est * 4))
+                    except EngineError as e:
+                        hub.log(f"base reload after 409 failed: {e}")
             mem_refused = memory_refused(info)
             if mem_refused and (sent["any"] or cancel.is_set() or hub.engine.loaded != hub.base_id):
                 # internal-1020 在 16 GB 测试机上这一步没触发、原因不明：记下是哪个条件没满足（只有元数据）
@@ -2153,6 +2513,8 @@ class Handler(BaseHTTPRequestHandler):
                     code = "paused" if priority == "background" else "needs_user"
                     self._event("luoke.error", {"code": code, "message": "内存不够：" + (info.get("detail") or "")[:200], "retry_after": 60,
                                                 **({"occupants": hub.occupants()} if code == "needs_user" else {})})
+                elif info.get("status") == 409 and not sent["any"]:
+                    self._event("luoke.error", {"code": "not_ready", "message": "底座正在卸载或加载", "retry_after": 5})
                 elif info["error"] not in ("client_gone",):
                     self._event("luoke.error", {"code": "engine_failed", "message": f"引擎出错：{info['error']}", "retry_after": 30})
             hub.last_base_use = time.time()
@@ -2181,6 +2543,9 @@ def memory_refused(info: dict) -> bool:
 class UnixServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
     daemon_threads = True
     allow_reuse_address = True
+    # 默认 listen 队列只有 5：macOS 上 Unix socket 的队列满了不是等着、而是直接拒绝连接。
+    # 11-03 16 GB 测试机上 8 条请求同时到，有 2 条连都没连上（ConnectionRefusedError），配件当成主控不在
+    request_queue_size = 128
 
 
 def serve(hub: Hub, socket_path: str) -> UnixServer:

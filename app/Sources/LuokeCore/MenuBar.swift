@@ -31,13 +31,35 @@ final class MenuBar: NSObject, NSMenuDelegate {
         if menuOpen { rebuild() }
     }
 
+    /// 主窗口那边的急事变了（AgentCore）：图标的小点跟着变
+    func refreshIcon() { statusChanged() }
+
     // MARK: 图标
 
 
     private func setIcon(_ state: String) {
-        guard state != shownIcon else { return }
-        shownIcon = state
-        item?.button?.image = Self.icon(state)
+        // 有急事没处理（主窗口的「今天」最上面那几件）：图标多一个小点。出错的图标本来就带点，不再加
+        let dot = state != "error" && MainWindow.wantsDot
+        let key = dot ? state + "+dot" : state
+        guard key != shownIcon else { return }
+        shownIcon = key
+        item?.button?.image = dot ? Self.dotted(state) : Self.icon(state)
+    }
+
+    /// 带小点的图标：原图右上角加一个实心圆，照旧是单色模板图
+    static func dotted(_ name: String) -> NSImage? {
+        if let i = iconCache[name + "+dot"] { return i }
+        guard let base = icon(name) else { return nil }
+        let img = NSImage(size: base.size, flipped: false) { rect in
+            base.draw(in: rect)
+            NSColor.black.setFill()
+            NSBezierPath(ovalIn: NSRect(x: rect.maxX - 6.5, y: rect.maxY - 6.5, width: 6, height: 6)).fill()
+            return true
+        }
+        img.isTemplate = true
+        img.accessibilityDescription = "螺壳：有急事"
+        iconCache[name + "+dot"] = img
+        return img
     }
 
     private static var iconCache: [String: NSImage] = [:]
@@ -76,7 +98,8 @@ final class MenuBar: NSObject, NSMenuDelegate {
         } else if let st = m.status {
             if st.state == .error {
                 add(text("出错了"))
-                add(text(st.breaker ?? "引擎没在运行"))
+                let why = st.engineProblems     // 熔断那句和真正的原因都写：只写熔断，退出码和日志路径就看不到了
+                if why.isEmpty { add(text("引擎没在运行")) } else { why.forEach { add(text($0)) } }
                 errorActions()
             } else {
                 add(text(st.state == .starting ? st.stateValue : "\(st.stateValue) · \(ModelName.display(st.loaded ?? st.base ?? "—"))"))
@@ -86,15 +109,24 @@ final class MenuBar: NSObject, NSMenuDelegate {
             add(text("启动中"))
         }
         menu.addItem(.separator())
+        // 主窗口那边的几项（luoke-core#68）：急事（有才列）、打开螺壳、暂停提醒一小时
+        let agentItems = MainWindow.menuItems()
+        if !agentItems.isEmpty {
+            agentItems.forEach(add)
+            menu.addItem(.separator())
+        }
         if Memory.bundled { add(action("记忆") { Memory.open() }) }
+        for b in BundledApps.all where b.opens {       // 收进来的应用没有自己的图标，从这里打开
+            if let m = b.manifest, b.enabled { add(action(m.name) { b.open() }) }
+        }
         if AppsWindow.updatable().isEmpty {
             add(action("应用") { AppsWindow.show() })
         } else {
             add(row("应用", "有新版本", bold: true) { AppsWindow.show() })
         }
         add(action("设置") { SettingsWindow.show() })
-        if let f = m.updateFound {
-            add(row("检查更新", "有新版本", bold: true) { Updater.show(found: f) })
+        if m.updateFound != nil {      // 点开照样现查：自动检查找到的那一版之后可能又发了新的
+            add(row("检查更新", "有新版本", bold: true) { Updater.show() })
         } else {
             add(action("检查更新") { Updater.show() })
         }
@@ -149,11 +181,14 @@ final class MenuBar: NSObject, NSMenuDelegate {
     }
 }
 
-/// 设置窗口：菜单栏不再是 SwiftUI 场景，SettingsLink 用不了，自己开一个窗口放 SettingsView
+/// 设置：带主窗口的这一份翻到主窗口的「设置」；没带的开一个窗口放 SettingsView（菜单栏不再是 SwiftUI 场景，SettingsLink 用不了）
 enum SettingsWindow {
     static var window: NSWindow?
 
     static func show() {
+        // 设置画在主窗口里，不另开「螺壳设置」窗口。
+        // 菜单栏的「设置」、⌘,、找不到菜单栏图标时那一页的「设置」都经这里
+        if MainWindow.showSettings() { return }
         if let w = window, w.isVisible { Uninstall.bringFront(w); return }
         let host = NSHostingController(rootView: SettingsView().environmentObject(HubModel.shared))
         let w = NSWindow(contentViewController: host)

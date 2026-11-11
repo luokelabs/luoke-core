@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- 螺壳本体和 .app 用这一份（release_sign.sh），包里的 Python 照旧用 entitlements-python.plist。
+       macOS 按外层算：Contents/Helpers 里的程序要照片，看的是这里，它自己签了不算，没有就静默拒绝，不弹询问 -->
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
+  <!-- 读照片图库，只在用户打开时（螺壳搜索的设置） -->
+  <key>com.apple.security.personal-information.photos-library</key>
+  <true/>
+  <!-- 请 QuickTime Player 从搜到的那一刻开始播放 -->
+  <key>com.apple.security.automation.apple-events</key>
+  <true/>
+</dict>
+</plist>

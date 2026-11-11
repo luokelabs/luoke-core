@@ -1,4 +1,4 @@
-"""嵌入工作进程（V1 §2 /v1/embed，2026-10-16 提议、10-19 认可：全生态推理和权重统一归主控，digup 搜索改调主控；顶层 ADR 0018）。
+"""嵌入工作进程（V1 §2 /v1/embed，2026-10-16 提议、10-19 认可：全生态推理和权重统一归主控，digup 搜索（现在的深度搜索 luoke-search）改调主控；顶层 ADR 0018）。
 
 在引擎包的 Python 里跑，用 mlx-vlm 以库方式加载嵌入模型（EmbeddingGemma 2 的文字部分），按行协议算向量。和打分工作进程同构
 （父子之间只有继承的管道；不监听端口，父进程消失即退出），但无状态：没有前缀快照，一进一出。
@@ -45,15 +45,19 @@ from pathlib import Path
 import mlx.core as mx
 
 try:
-    from luoke_core.worker import mediaops
-except ImportError:      # 工作进程跑在引擎包的 Python 里，luoke_core 不在它的路径上：按文件名读旁边的 mediaops.py（同 score_worker 读 textops）
+    from luoke_core.worker import mediaops, textops
+except ImportError:      # 工作进程跑在引擎包的 Python 里，luoke_core 不在它的路径上：按文件名读旁边的 mediaops.py、textops.py（同 score_worker 读 textops）
     _spec = importlib.util.spec_from_file_location("luoke_mediaops", os.path.join(os.path.dirname(os.path.abspath(__file__)), "mediaops.py"))
     mediaops = importlib.util.module_from_spec(_spec)
     _spec.loader.exec_module(mediaops)
+    _spec = importlib.util.spec_from_file_location("luoke_textops", os.path.join(os.path.dirname(os.path.abspath(__file__)), "textops.py"))
+    textops = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(textops)
 
 DEFAULT_MAX_TOKENS = 2048
 BATCH = 16          # 同 digup 的 BATCH["text"]
 MODEL_MODULE = "mlx_vlm.models.embedding_gemma2"
+MARKERS: list = []     # 模型分词器里的记号（main 里读）：配件的文字先中和再分词（同 score_worker）
 VENDOR_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vendor", "embedding_gemma2")
 
 
@@ -181,7 +185,7 @@ def embed_inputs(model, tok, processor, inputs, max_tokens, image_batch, audio_b
 def embed_texts(model, tok, texts, max_tokens=DEFAULT_MAX_TOKENS):
     rows = []
     for i in range(0, len(texts), BATCH):
-        enc = tok(texts[i:i + BATCH], padding=True, truncation=True, max_length=max_tokens, return_tensors="np")
+        enc = tok([textops.neutralize(t, MARKERS) for t in texts[i:i + BATCH]], padding=True, truncation=True, max_length=max_tokens, return_tensors="np")
         out = model(**{k: mx.array(v) for k, v in enc.items()})
         emb = getattr(out, "text_embeds", None)
         if emb is None:
@@ -217,6 +221,7 @@ def main():
     ap.add_argument("--media", action="store_true", help="连视觉、声音一起加载，收图片和声音（任务参数里有 image_batch / audio_batch 时）")
     a = ap.parse_args()
     mx.set_cache_limit(max(64, a.cache_mb) * 2**20)
+    MARKERS[:] = textops.tokenizer_markers(a.model_dir)
     processor = None
     try:
         if a.media:

@@ -5,11 +5,12 @@
     c.tasks()
     for kind, data in c.chat("luoke-mail.triage", {...}, priority="background"): ...
     c.score("luoke-ime.rerank", "前文", ["候选一", "候选二"])
-    c.embed("digup.embed", ["title: none | text: 一段话"])                      # 建索引（后台）
-    c.embed("digup.embed", ["task: search result | query: 搜索词"], priority="user-waiting")
+    c.embed("luoke-search.embed", ["title: none | text: 一段话"])               # 建索引（后台）
+    c.embed("luoke-search.embed", ["task: search result | query: 搜索词"], priority="user-waiting")
 """
 from __future__ import annotations
 
+import base64
 import http.client
 import json
 import os
@@ -151,6 +152,12 @@ class HubClient:
         if allow_battery:
             h["X-Luoke-Allow-Battery"] = "1"
         return self._call("POST", f"/tasks/{task}/v1/embed", {"inputs": inputs}, headers=h)
+
+    def transcribe(self, task: str, session: str, seq: int, audio: bytes, want: str = "final", context: str = "") -> dict:
+        """转写（V1 §2 /v1/transcribe）：audio 是这次以后新录的 PCM16LE 16 kHz 单声道字节，seq 0 新开会话、之后每次加一。
+        want：none 只追加、draft 草稿、final 终稿（结束会话）、cancel 丢掉。答 session_lost 就从 seq 0 重送整段。"""
+        return self._call("POST", f"/tasks/{task}/v1/transcribe", {"session": session, "seq": seq, "want": want, "context": context,
+                                                                   "audio": base64.b64encode(audio).decode("ascii")})
 
     def chat(self, task: str, body: dict, priority: str = "user-waiting", allow_battery: bool = False) -> Iterator[tuple]:
         """流式生成。逐个产出 ("progress", dict) / ("chunk", dict) / ("error", dict) / ("done", None)。

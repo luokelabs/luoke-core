@@ -4,7 +4,6 @@
 //   2. ~/Applications/螺壳.app（改名前是 螺壳主控.app）已装着：把预选交给它（run/preselect.json）、打开它、自己退出，不覆盖；
 //   3. 否则（在 DMG 里、被 App Translocation、或文件名不是 螺壳.app）：把自己拷到那个固定位置、去掉 quarantine 标记、登记、从那里重启。
 import AppKit
-import ServiceManagement
 import CryptoKit
 import Foundation
 
@@ -93,13 +92,25 @@ enum Manifests {
         return total
     }
 
-    /// 本档要的模型名（配方 assignment：底座 + 专用模型）
+    /// 本档要的模型名（配方 assignment：底座 + 开着的任务用的专用模型；同主控 Hub.tier_models，2026-11-03 起）。
+    /// 本版配方不认、但装着的版本以前的发布验证过的配件这里不算：主控的 needed_downloads 会列出来，首次运行和升级之后菜单栏照常补下
     static func modelsFor(tier: String) -> [String] {
         guard let r = recipe(), let asg = (r["assignment"] as? [String: Any])?[tier] as? [String: Any] else { return [] }
         var out: [String] = []
         if let b = asg["base"] as? String { out.append(b) }
-        for (_, v) in (asg["special"] as? [String: String]) ?? [:] where !out.contains(v) { out.append(v) }
+        for (task, v) in (asg["special"] as? [String: String]) ?? [:] where !out.contains(v) && taskOpen(task, tier: tier, recipe: r) {
+            out.append(v)
+        }
         return out
+    }
+    /// 任务在这一档开着（同主控 Recipe.task_open）：配件在 verified 里有认的版本，任务的 tiers 没把这一档排除。
+    /// 没写 tiers 就是每档都行；空的就是哪一档都没开（支持台账的写法，同 expectations 里 typing 的读法）
+    static func taskOpen(_ task: String, tier: String, recipe r: [String: Any]) -> Bool {
+        guard let t = (r["tasks"] as? [String: Any])?[task] as? [String: Any], let acc = t["accessory"] as? String,
+              let versions = ((r["verified"] as? [String: Any])?[acc] as? [String: Any])?["versions"] as? [Any], !versions.isEmpty
+        else { return false }
+        if let tiers = t["tiers"] as? [String] { return tiers.contains(tier) }
+        return true
     }
     static func modelDir(_ name: String) -> String? {
         ((recipe()?["models"] as? [String: Any])?[name] as? [String: Any])?["dir"] as? String
@@ -204,7 +215,7 @@ enum Installer {
     }
 
     /// 装好的那份启动时：认得的位置上我们的另几份（没在跑的）挪进 previous.noindex、注销，免得系统、配件、登录项认到旧的。
-    /// 挪走过就重新登记一次登录项（可能还指着旧的那份；用户关掉过的不动）
+    /// 挪走过就看一下登录项（可能还指着旧的那份）：找不到了、或位置变了才重新登记（LoginItem.repoint）
     static func retireStrayCopies() {
         guard let cur = installed else { return }
         let me = Bundle.main.bundleIdentifier ?? ""
@@ -215,7 +226,7 @@ enum Installer {
             if running { continue }
             if (try? AppPlacement.retire(c, into: previousDir, name: c.lastPathComponent)) != nil { moved = true }
         }
-        if moved, SMAppService.mainApp.status != .notRegistered { try? SMAppService.mainApp.register() }
+        if moved { LoginItem.repoint() }
     }
     /// 换到 target 要不要管理员授权
     static var needsAdmin: Bool { !writable(target.deletingLastPathComponent()) }
@@ -235,7 +246,7 @@ enum Installer {
     /// 这份主控是不是装好的那份（/Applications 或 ~/Applications，新旧名字）：不是（例如 previous.noindex 里的旧版被人打开）就不起
     /// 主控进程，免得抢 socket、再起一个引擎。两处各有一份时只认 installed 那份（优先 /Applications）
     static var isCanonicalCopy: Bool {
-        if AppInfo.isLab || ProcessInfo.processInfo.environment["LUOKE_ALLOW_ANY_COPY"] == "1" { return true }
+        if AppInfo.isLab || AppInfo.devEnvironment("LUOKE_ALLOW_ANY_COPY") == "1" { return true }
         guard let cur = installed else { return false }
         return Bundle.main.bundleURL.standardizedFileURL.resolvingSymlinksInPath().path == cur.standardizedFileURL.resolvingSymlinksInPath().path
     }
@@ -260,7 +271,7 @@ enum Installer {
 
     /// 这次是不是以安装器身份启动的
     static func isInstallerLaunch() -> Bool {
-        if ProcessInfo.processInfo.environment["LUOKE_NO_INSTALLER"] == "1" || AppInfo.isLab { return false }
+        if AppInfo.devEnvironment("LUOKE_NO_INSTALLER") == "1" || AppInfo.isLab { return false }
         let url = Bundle.main.bundleURL.standardizedFileURL
         if candidates.contains(where: { $0.standardizedFileURL.path == url.path }) { return false }     // 装好的位置上（拖进去的也算）
         return url.lastPathComponent != "\(AppInfo.appName).app" || url.path.hasPrefix("/Volumes/") || url.path.contains("/AppTranslocation/")
@@ -292,11 +303,10 @@ enum Installer {
         return o["accessory"] as? String
     }
 
+    /// 默认 disclaim（Spawn.swift）。改 .app 的（拷进「应用程序」、去下载标记）写 .luoke：系统只让同一个开发者的应用改它
     @discardableResult
-    static func shell(_ cmd: String, _ args: [String]) -> Int32 {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: cmd)
-        p.arguments = args
+    static func shell(_ cmd: String, _ args: [String], access: Spawn.Access = .disclaimed) -> Int32 {
+        let p = Spawn.process(cmd, args, access: access)
         p.standardOutput = FileHandle.nullDevice
         p.standardError = FileHandle.nullDevice
         do { try p.run() } catch { return -1 }
@@ -413,6 +423,7 @@ enum Installer {
         running.filter { !$0.isTerminated }.forEach { $0.forceTerminate() }
         deadline = Date().addingTimeInterval(5)
         while Date() < deadline, running.contains(where: { !$0.isTerminated }) { Thread.sleep(forTimeInterval: 0.3) }
+        BundledApps.all.forEach { $0.stopAll(hubApp: current) }      // 旧主控退出时会停它们；旧主控是被强杀的就在这里停
         Memory.stopAll(hubApp: current)      // 旧主控里跑着的记忆界面 / learn：只按命令行 -m luoke_mem 认，请它们退出再搬
         DispatchQueue.main.async { NSApp.terminate(nil) }
     }

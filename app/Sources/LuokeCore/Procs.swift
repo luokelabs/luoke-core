@@ -18,6 +18,14 @@ enum Procs {
         return n > 0 ? String(cString: buf) : nil
     }
 
+    /// 父进程和所属账户；读不到（进程没了、不是本账户的）就是 nil
+    static func info(_ pid: pid_t) -> (ppid: pid_t, uid: uid_t)? {
+        var info = proc_bsdinfo()
+        let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+        guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size else { return nil }
+        return (pid_t(info.pbi_ppid), info.pbi_uid)
+    }
+
     /// 进程启动时的 argv；读不到就是 []
     static func argv(_ pid: pid_t) -> [String] {
         var mib: [Int32] = [CTL_KERN, KERN_ARGMAX]

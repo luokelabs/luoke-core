@@ -19,7 +19,6 @@ import hashlib
 import json
 import os
 import re
-import plistlib
 import shutil
 import subprocess
 import tempfile
@@ -265,11 +264,7 @@ def verify_app(app: str, bundle_id: Optional[str] = None) -> None:
     if team != TEAM_ID:
         raise DownloadError(f"{os.path.basename(app)} 不是螺壳实验室签的（Team {team}）")
     if bundle_id:
-        try:
-            with open(os.path.join(app, "Contents", "Info.plist"), "rb") as f:
-                bid = plistlib.load(f).get("CFBundleIdentifier")
-        except (OSError, ValueError):
-            bid = None
+        bid = (apps.read_plist(os.path.join(app, "Contents", "Info.plist")) or {}).get("CFBundleIdentifier")
         if bid != bundle_id:
             raise DownloadError(f"{os.path.basename(app)} 的 bundle id 是 {bid}，不是 {bundle_id}")
     r = subprocess.run(["/usr/bin/xcrun", "stapler", "validate", app], capture_output=True, text=True)
@@ -281,11 +276,7 @@ _move = apps._move
 
 
 def app_bundle_id(app: str) -> Optional[str]:
-    try:
-        with open(os.path.join(app, "Contents", "Info.plist"), "rb") as f:
-            return plistlib.load(f).get("CFBundleIdentifier")
-    except (OSError, ValueError, plistlib.InvalidFileException):
-        return None
+    return (apps.read_plist(os.path.join(app, "Contents", "Info.plist")) or {}).get("CFBundleIdentifier")
 
 
 def install_app_zip(zip_path: str, dest_dir: str, expect_bundle_id: Optional[str] = None, expect_name: Optional[str] = None,
@@ -600,12 +591,12 @@ def make_item_from_dir(src_dir: str, name: str, kind: str, version: str, url_bas
             "urls": [url_base + "/{path}"]}
 
 
-def make_item_from_file(path: str, kind: str, version: str, url_base: str) -> dict:
-    """给发布脚本用：一个文件（主控 DMG、引擎包 zip）描述成清单项。"""
+def make_item_from_file(path: str, kind: str, version: str, url_base: str, *mirrors: str) -> dict:
+    """给发布脚本用：一个文件（主控 DMG、引擎包 zip）描述成清单项。mirrors：同一个文件的其他地址前缀（GitLab 镜像）。"""
     name = os.path.basename(path)
     return {"kind": kind, "version": version, "dir": os.path.splitext(name)[0],
             "files": [{"path": name, "size": os.path.getsize(path), "sha256": sha256_file(path)}],
-            "urls": [url_base + "/{path}"]}
+            "urls": [b + "/{path}" for b in (url_base, *mirrors)]}
 
 
 def _legacy_item_digest(item: dict) -> str:

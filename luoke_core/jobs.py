@@ -7,6 +7,10 @@
    "min_interval_minutes": 120, "uses_model": true, "memory_mb": 100, "allow_battery": false, "timeout_minutes": 30}
 命令的环境：PATH、HOME、LUOKE_HUB_SOCKET（经主控用模型就连它，请求用 background 优先级）、PYTHONDONTWRITEBYTECODE=1。
 约定：收到 busy / paused / interrupted 或 SIGTERM 就停在做完的那一步、退出码 0；没事可做也是 0；起不来是非 0，原因写标准错误（不含内容）。
+
+螺壳里带的程序（Contents/Helpers，例如螺壳扫描；清单 jobs 写 exec）：主控不直接起它，起螺壳自己的
+`--run-tool <配件> <参数>`（ToolLauncher.swift）：本体停着起、核过真正在跑的进程的签名再放行，退出码照传，被信号结束是 128+信号，
+本体自己的错是 120–123。找不到螺壳的可执行文件就不跑。--run-tool 和工具、工具起的东西都在一个新的进程组里，硬杀时一起杀。
 """
 from __future__ import annotations
 
@@ -16,13 +20,13 @@ import subprocess
 import time
 from typing import Callable, Optional
 
-from . import accessories
+from . import accessories, apps, spawn
 
 WRAP_UP_SECS = 15          # 用户回来后给任务收尾的时间，超过就 SIGKILL
 STDERR_KEEP = 4096         # state.json 里留的标准错误尾巴（配件保证里面没有内容）
 DEFAULTS = {"min_interval_minutes": 120, "uses_model": True, "memory_mb": 100, "allow_battery": False, "timeout_minutes": 30}
-RETRY_MINUTES = 10         # 上次是被用户打断或被暂停的（没做完），下一个安静时刻就可以接着跑，不用等满 min_interval
-INTERRUPTED = ("wrapped_up", "paused")
+RETRY_MINUTES = 10         # 上次是被用户打断、被暂停或螺壳退出了的（没做完），下一个安静时刻就可以接着跑，不用等满 min_interval
+INTERRUPTED = ("wrapped_up", "paused", "hub_stopping")
 
 
 def parse_jobs(manifest: dict) -> list:
@@ -34,9 +38,11 @@ def parse_jobs(manifest: dict) -> list:
         exe = j.get("exec")
         if exe is not None and (not isinstance(exe, str) or not exe or "/" in exe or exe.startswith(".")):
             continue          # exec 只能是 Contents/MacOS/ 下的一个文件名
+        tool = bool(manifest.get("_helper")) and exe is not None      # 螺壳里带的程序（收进来的 Python 应用不写 exec，照旧用自带 Python）
         spec = dict(DEFAULTS, **{k: j[k] for k in DEFAULTS if k in j})
         spec.update({"key": f"{manifest['accessory']}.{j['name']}", "accessory": manifest["accessory"], "name": j["name"],
-                     "command": list(j["command"]), "exec": exe, "bundle_id": manifest.get("bundle_id"), "_app": manifest.get("_app")})
+                     "command": list(j["command"]), "exec": exe, "bundle_id": manifest.get("bundle_id"), "_app": manifest.get("_app"),
+                     "_env": manifest.get("_env"), "tool": tool, "first_use": j.get("first_use") is True})
         out.append(spec)
     return out
 
@@ -59,6 +65,18 @@ def due(spec: dict, now: float, last_start: Optional[float], quiet: bool, backgr
     return None
 
 
+def tool_launcher(app: Optional[str] = None) -> Optional[str]:
+    """螺壳自己的可执行文件（主控和工具都在这个 .app 里，`--run-tool` 由它起工具）。读不到是 None"""
+    app = app or accessories.hub_app()
+    if not app:
+        return None
+    exe = (apps.read_plist(os.path.join(app, "Contents", "Info.plist")) or {}).get("CFBundleExecutable")
+    if not isinstance(exe, str) or not exe or "/" in exe:
+        return None
+    path = os.path.join(app, "Contents", "MacOS", exe)
+    return path if os.path.isfile(path) and os.access(path, os.X_OK) else None
+
+
 class Running:
     def __init__(self, spec: dict, proc: subprocess.Popen, started: float, stderr_path: str):
         self.spec, self.proc, self.started, self.stderr_path = spec, proc, started, stderr_path
@@ -75,6 +93,7 @@ class IdleJobs:
         self.state, self.save_state, self.log, self.socket_path, self.logs_dir = state, save_state, log, socket_path, logs_dir
         self.running: Optional[Running] = None
         self.last_skip: dict = {}
+        self.right_now: set = set()     # 用户刚点了要它跑（开启应用后的第一次）：下一个采样就起，安静、电源这些都不看
         self.soon: set = set()          # 要求"下一个安静时刻就跑"的任务：不等 min_interval，其余条件照旧（内部版 / 本机版的 /jobs/run）
 
     # ---- 每个采样周期调一次 ----------------------------------------------------------------------------
@@ -86,12 +105,18 @@ class IdleJobs:
         records = self.state.setdefault("jobs", {})
         for spec in specs:
             rec = records.get(spec["key"]) or {}
-            why = due(spec, self.now(), None if spec["key"] in self.soon else rec.get("last_start"), self.quiet(),
-                      self.background_state, self.busy(), rec.get("reason"))
+            if rec.pop("asked", None) and rec.get("reason") == "hub_stopping":
+                self.right_now.add(spec["key"])     # 用户点起来的这一次被退出打断（macOS 给完权限会退出重开）：接着跑
+            why = None if spec["key"] in self.right_now else due(
+                spec, self.now(), None if spec["key"] in self.soon else rec.get("last_start"), self.quiet(),
+                self.background_state, self.busy(), rec.get("reason"))
             if why:
                 self.last_skip[spec["key"]] = why
                 continue
             self.soon.discard(spec["key"])
+            if spec["key"] in self.right_now:
+                self.right_now.discard(spec["key"])
+                spec = dict(spec, asked=True)
             self._launch(spec)
             return
 
@@ -102,23 +127,43 @@ class IdleJobs:
         self.log(f"job {key}: run requested, next quiet moment ignores min_interval")
         return True
 
+    def first_use(self, manifest: dict) -> list:
+        """用户开启应用或刚确认了权限：清单里写了 `first_use` 的任务马上跑，权限第一次用到就紧跟着用户的操作。"""
+        keys = [s["key"] for s in parse_jobs(manifest) if s["first_use"]]
+        for key in keys:
+            self.right_now.add(key)
+            self.log(f"job {key}: first use, starts at the next sample")
+        return keys
+
     def _launch(self, spec: dict) -> None:
         fill = {"memory": accessories.default_memory_path(), "tool": spec["accessory"]}
         args = [a.format(**fill) if isinstance(a, str) else a for a in spec["command"]]
-        if spec.get("exec"):   # 不带 Python 的配件（Swift 写的，例如 luoke-search；2026-10-20 应 luoke-core#16 加，只加不改）
+        launcher = tool_launcher(spec["_app"]) if spec.get("tool") else None
+        if spec.get("tool") and not launcher:
+            self.state["jobs"][spec["key"]] = {"last_start": self.now(), "last_end": self.now(), "exit": None, "reason": "launch_failed: no_launcher"}
+            self.save_state()
+            self.log(f"job {spec['key']}: no 螺壳 executable to start it with")
+            return
+        if spec.get("tool"):   # 螺壳里带的程序：经螺壳起，本体核签名
+            argv = [launcher, "--run-tool", spec["accessory"]] + args
+        elif spec.get("exec"):   # 不带 Python 的配件（Swift 写的，例如 luoke-search；2026-10-20 应 luoke-core#16 加，只加不改）
             argv = [os.path.join(spec["_app"], "Contents", "MacOS", spec["exec"])] + args
         else:
             argv = [os.path.join(spec["_app"], accessories.PYTHON_REL), "-B"] + args
+        if not spec.get("tool"):    # 只有经螺壳起的工具（扫描）用螺壳的授权；别的 disclaim（spawn.py）
+            argv = spawn.disclaimed(argv)
         env = {"PATH": "/usr/bin:/bin", "HOME": os.path.expanduser("~"), "PYTHONDONTWRITEBYTECODE": "1", "PYTHONNOUSERSITE": "1"}
         if self.socket_path():
             env["LUOKE_HUB_SOCKET"] = self.socket_path()
         if os.environ.get("LUOKE_HOME"):
             env["LUOKE_HOME"] = os.environ["LUOKE_HOME"]
+        env.update(spec.get("_env") or {})
         os.makedirs(self.logs_dir, exist_ok=True)
         stderr_path = os.path.join(self.logs_dir, f"{spec['key']}.stderr")
         try:
             err = open(stderr_path, "wb")
-            proc = subprocess.Popen(argv, env=env, cwd="/", stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=err)
+            proc = subprocess.Popen(argv, env=env, cwd="/", stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=err,
+                                    start_new_session=bool(spec.get("tool")))
             err.close()
         except OSError as e:
             self.state["jobs"][spec["key"]] = {"last_start": self.now(), "last_end": self.now(), "exit": None, "reason": f"launch_failed: {type(e).__name__}"}
@@ -128,8 +173,10 @@ class IdleJobs:
         self.running = Running(spec, proc, self.now(), stderr_path)
         self.on_change(spec["accessory"])
         self.state["jobs"][spec["key"]] = {"last_start": self.now(), "last_end": None, "exit": None, "reason": "running", "pid": proc.pid}
+        if spec.get("asked"):
+            self.state["jobs"][spec["key"]]["asked"] = True
         self.save_state()
-        self.log(f"job {spec['key']}: started pid={proc.pid}")
+        self.log(f"job {spec['key']}: started pid={proc.pid}" + (" via --run-tool" if launcher else ""))
 
     def _watch(self) -> None:
         r = self.running
@@ -137,17 +184,15 @@ class IdleJobs:
         now = self.now()
         if code is None:
             if r.term_sent_at is None:
-                if not self.quiet() or self.busy():
+                asked = r.spec.get("asked")      # 用户亲自点起来的：用户就在跟前，不算回来了，只看超时
+                if not asked and (not self.quiet() or self.busy()):
                     self._terminate(r, "wrapped_up")          # 用户回来了：让它收尾
                 elif now - r.started > float(r.spec["timeout_minutes"]) * 60:
                     self._terminate(r, "timeout")
-                elif self.background_state(bool(r.spec.get("allow_battery")))[0] != "running":
+                elif not asked and self.background_state(bool(r.spec.get("allow_battery")))[0] != "running":
                     self._terminate(r, "paused")
             elif now - r.term_sent_at > WRAP_UP_SECS:
-                try:
-                    r.proc.kill()
-                except OSError:
-                    pass
+                self._kill(r)
                 self.log(f"job {r.spec['key']}: killed after {WRAP_UP_SECS}s ({r.reason})")
             return
         rec = self.state["jobs"].get(r.spec["key"]) or {}
@@ -166,10 +211,10 @@ class IdleJobs:
         self.running = None
         self.on_change(None)
 
-    def stop_accessory(self, accessory: str) -> None:
-        """要卸载某个配件：它的空闲任务正在跑就结束掉（正常收尾的机会照给）。"""
+    def stop_accessory(self, accessory: str, reason: str = "uninstall") -> None:
+        """要卸载或停用某个配件：它的空闲任务正在跑就结束掉（正常收尾的机会照给）。"""
         if self.running and self.running.spec["accessory"] == accessory and self.running.proc.poll() is None:
-            self._terminate(self.running, "uninstall")
+            self._terminate(self.running, reason)
             try:
                 self.running.proc.wait(timeout=5)   # 等它退出再删目录；不退就交给 tick 的硬杀
             except subprocess.TimeoutExpired:
@@ -184,6 +229,17 @@ class IdleJobs:
             pass
         self.log(f"job {r.spec['key']}: SIGTERM ({reason})")
 
+    @staticmethod
+    def _kill(r: Running) -> None:
+        """硬杀。--run-tool 连同它起的工具、工具起的程序（clamscan 之类）一起：它们在一个新的进程组里"""
+        try:
+            if r.spec.get("tool"):
+                os.killpg(r.proc.pid, signal.SIGKILL)
+            else:
+                r.proc.kill()
+        except OSError:
+            pass
+
     def stop(self) -> None:
         """主控退出：正在跑的任务也让它收尾。"""
         if self.running and self.running.proc.poll() is None:
@@ -191,7 +247,8 @@ class IdleJobs:
             try:
                 self.running.proc.wait(WRAP_UP_SECS)
             except subprocess.TimeoutExpired:
-                self.running.proc.kill()
+                self._kill(self.running)
+                self.running.proc.wait()
             self._watch()
 
     def status(self) -> dict:
