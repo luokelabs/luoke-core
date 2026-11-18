@@ -4593,8 +4593,19 @@ class ReleaseToolsTest(unittest.TestCase):
                 ib.build_scan(src, out)
             sh("git", "checkout", "-q", "main", cwd=src)
             sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "after", cwd=src)
+            # a PR that merges the tag into a release branch always adds a commit: new id, same tree as the tag, so it is that tag
             sh("git", "checkout", "-q", "--detach", export_commit(same, origin=sh("git", "rev-parse", "HEAD", cwd=src)), cwd=src)
-            with self.assertRaises(SystemExit):              # exported from a commit that is not a release's tag
+            self.assertEqual(ib.exported_tag(src), "v0.3.0")
+            self.assertEqual(ib.app_version(ib.build_scan(src, out)), "0.3.0")
+            sh("git", "checkout", "-q", "main", cwd=src)
+            with open(os.path.join(src, "later.txt"), "w") as f:
+                f.write("not in v0.3.0\n")
+            sh("git", "add", "later.txt", cwd=src)
+            sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "later", cwd=src)
+            changed = sh("git", "rev-parse", "HEAD^{tree}", cwd=src)
+            sh("git", "checkout", "-q", "--detach", export_commit(changed, origin=sh("git", "rev-parse", "HEAD", cwd=src)), cwd=src)
+            self.assertEqual(ib.exported_tag(src), "")
+            with self.assertRaises(SystemExit):              # exported from a commit after the tag that changes something
                 ib.build_scan(src, out)
             sh("git", "checkout", "-q", "main", cwd=src)
             with self.assertRaises(SystemExit):              # not a release's tag

@@ -487,8 +487,10 @@ def pick_scan(tag: str, pins: dict, pinned_by_hand: bool) -> None:
 
 def exported_tag(src: str) -> str:
     """beta、RC 钉的是公开 main 上的导出提交（public_sync，顶层 ADR 0017）：提交号和私有的不同，release 的 tag 打在它导出自的
-    私有提交上。HEAD 是 Luoke Labs 的导出提交、导出自的私有提交正好是一个 v<版本> tag、按那个提交重新导出的树和 HEAD 的一样，
+    私有提交上。HEAD 是 Luoke Labs 的导出提交、导出自的私有提交是一个 v<版本> tag、按那个提交重新导出的树和 HEAD 的一样，
     就算那个 tag；不然是空串。
+    「是一个 tag」：正好打在那个提交上，或者那个提交在它最近的 v<版本> tag 后面、整个仓库的树和 tag 的一模一样。用 PR 把 tag 合进
+    发布分支，GitHub 总会多出一个提交（合并、squash、rebase 都是），内容和 tag 一样、提交号不一样；树一样，编出来的就是 tag 那份源码。
     导出自的私有提交和 tag 从哪来：冻结的克隆从 TOP/luoke-scan（私有仓库的克隆，不是公开仓库）取，钉的提交不在时
     freeze_one 让它整个 fetch origin（带上 public 分支，main 上的 tag 跟着取），build_scan 再 fetch --tags。"""
     head = git(src, "rev-parse", "HEAD")
@@ -499,13 +501,19 @@ def exported_tag(src: str) -> str:
         if git(src, "cat-file", "-t", origin, check=False) != "commit":
             return ""
         tag = git(src, "describe", "--tags", "--exact-match", origin, check=False)
+        same = ""
         if not re.fullmatch(r"v\d+\.\d+\.\d+", tag or ""):
-            return ""
+            tag = git(src, "describe", "--tags", "--abbrev=0", "--match", "v[0-9]*", origin, check=False)
+            if not re.fullmatch(r"v\d+\.\d+\.\d+", tag or ""):
+                return ""
+            if git(src, "rev-parse", f"{origin}^{{tree}}") != git(src, "rev-parse", f"{tag}^{{tree}}"):
+                return ""
+            same = f"，和 {tag} 内容一样"
         if public_sync.write_tree(src, public_sync.export(src, origin)) != git(src, "rev-parse", "HEAD^{tree}"):
             return ""
     except public_sync.Stop:
         return ""
-    log(f"螺壳扫描：{head[:7]} 是从 {tag}（{origin[:7]}）导出的公开提交")
+    log(f"螺壳扫描：{head[:7]} 是从 {tag}（{origin[:7]}{same}）导出的公开提交")
     return tag
 
 
