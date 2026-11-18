@@ -334,6 +334,7 @@ enum Updater {
 
     static func autoCheckIfDue(found: @escaping (Found) -> Void) {
         guard autoEnabled, channel == .internalBuild || channel == .beta else { return }
+        guard AppInfo.instance == nil || testAPI != nil else { return }     // 开发实例不自己升级：要新的就重打一份（docs/dev-instance.md）
         let last = UserDefaults.standard.double(forKey: lastKey)
         // 内部版一天两版（10:00、21:00，10-24）：每 3 小时查一次；beta 照旧每天一次（luoke-top 10-25 建议）
         let every: Double = channel == .internalBuild ? 3 * 3600 : 24 * 3600

@@ -25,15 +25,21 @@ class BackgroundJob:
         self.est_total_secs = est_total_secs
         self.cancel = cancel
         self.progress_secs = 0.0  # 由执行方更新：已经做了多少秒的"有效工作"（prefill 已算的 token 折算）
+        self.accessory: Optional[str] = None   # 哪个配件的请求（右边栏的任务队列用，/status 的 queue）
+
+
+BATTERY_MODES = ("normal", "light", "no_large_model")
 
 
 class Dispatcher:
     def __init__(self, now: Callable[[], float], tier: dict, power_mode: str = "balanced",
-                 background_on_battery: bool = False):
+                 background_on_battery: bool = False, battery_mode: Optional[str] = None):
         self.now = now
         self.tier = tier
         self.power_mode = power_mode
-        self.background_on_battery = background_on_battery
+        # 用电池时（BATTERY_MODES）：normal 照常运行、light 少干活（后台停）、no_large_model 不运行大模型（后台停，
+        # 要用底座的前台请求也先不做；11-12 定）。旧的 background_on_battery 照认：true = normal，false = light
+        self.battery_mode = battery_mode or ("normal" if background_on_battery else "light")
         self.lock = threading.Lock()
         self.started_at = now()
         self.last_user_waiting = -1e9
@@ -52,6 +58,18 @@ class Dispatcher:
         self.on_ac = True
         self.low_power = False
         self.thermal = "nominal"
+
+    @property
+    def background_on_battery(self) -> bool:
+        return self.battery_mode == "normal"
+
+    @background_on_battery.setter
+    def background_on_battery(self, on: bool) -> None:
+        self.battery_mode = "normal" if on else "light"
+
+    def no_large_model(self) -> bool:
+        """现在在用电池、设置是「不运行大模型」：底座不加载，要用它的请求先不做"""
+        return not self.on_ac and self.battery_mode == "no_large_model"
 
     # ---- 交互判定 ------------------------------------------------------------------------------------
     def note_user_waiting(self) -> None:
@@ -78,7 +96,9 @@ class Dispatcher:
     def background_state(self, allow_battery: bool = False) -> tuple:
         """(state, reasons)。state 是 running 或 paused；reasons 是暂停原因列表。"""
         reasons = []
-        if not self.on_ac and not self.background_on_battery and not allow_battery:
+        if self.no_large_model():
+            reasons.append("battery_no_large_model")       # 配件自己说电池上也要做（allow_battery）也不做：用的是底座
+        elif not self.on_ac and self.battery_mode == "light" and not allow_battery:
             reasons.append("battery")
         if self.low_power:
             reasons.append("low_power")

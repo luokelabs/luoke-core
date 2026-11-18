@@ -49,7 +49,8 @@ RUNTIMES = {
 DEFAULT_RUNTIME = "3.12.15+20261009"
 RELEASE_URL = "https://github.com/astral-sh/python-build-standalone/releases/download/{tag}/{name}"
 CACHE = os.path.expanduser("~/Library/Caches/luoke-core/python-build-standalone")
-MIN_MACOS = "14.0"
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from minos_check import LUOKE_MIN_MACOS as MIN_MACOS  # noqa: E402  最低 macOS 只在 minos_check 定
 
 
 def die(msg: str) -> None:

@@ -7,20 +7,25 @@
   2. 读请求 issue 里新的留言：一行以 `/release` 开头（会话的留言前面可以有「（xxx 会话）」）就排进队列，回复"排上了"。
        /release internal-MMDD[-N]   出顶层仓库这个标签钉住的版（luoke-top 每天 10:00、21:00 钉版、打标签后发；10-23 定）
        /release            临时加一版：按各仓库 origin/main 的最新提交钉版（扫描钉 main 上最近的、发了 release 的 tag），名字从 internal-MMDD-3 起顺延（早版、晚版占着 MMDD 和 -2）
-       /release … --accept  差异报告里有总分回退时放行（只认负责人本人，不认会话）
+       /release … --accept  差异报告里有总分回退时放行（只认负责人的账号；候选版另认 release.rc_senders 里的账号）
        /release … --no-eval 不评测：整版沿用上一版真评过的证据和开关，不比差异、不做发布后复测，发布说明写明（只给内部版）
        /release betaN[.M]-rcM       出候选版：钉四个公开仓库 main 现在的提交（导出、推送做完以后），全评、打包、签名，不上传，
                                     拷到局域网托管的目录，回复里给测试机装的地址
-     谁能发：实验室配置里 release.allowed 的 GitHub 账号。会话、定时截版和负责人用的是同一个账号，靠留言开头的「（…会话）」「（…定时截版）」区分。
-     beta 只认负责人本人；候选版认负责人本人和 release.rc_senders 里的账号（机器账号；不在 allowed 里的只能发候选版）；正式版不归流水线。
+     谁能发、能发什么，只按留言的 GitHub 账号和实验室配置里的名单认（beta 2 安全审查 H1：之前负责人、会话、定时截版共用一个账号，
+     靠留言开头的「（…会话）」「（…定时截版）」区分，那只是约定，谁都能不写）：
+       allowed      能发内部版（/release、/release internal-…、--no-eval）
+       owner        负责人：另外能发 beta、能 --accept
+       rc_senders   能发候选版、能给候选版 --accept（不在 allowed 里的只能发候选版）
+       cut_senders  定时截版用的机器账号：只能发 /release internal-MMDD[-N]，不带别的参数；在这里的账号别的名单里有也不算
+     留言开头自称「（…会话）」「（…定时截版）」的，照旧不给负责人和候选版的权限：防会话误发，不算认证。正式版不归流水线。
   3. 设了 LUOKE_RELEASE_HOUR 时，每天那个钟点以后、当天还没定时出过：排一版（默认不设：定时由 luoke-top 的标签加 /release 管）。
   4. 没有正在出的版、队列不空：取一个，钉版（带标签的读顶层仓库的标签，不带的取 origin/main），起 internal_build.py（后台、新会话），
      记下进程号。上一版失败、钉住的提交没变时，新的请求接着那一版续跑（它会从停下的步骤接着做）。
 
 配置：请求 issue 和账号在实验室配置里（tools/lab_config.py，不进公开的树）的 release 一节——issue（形如 <owner>/<repo>#<n>）、
-allowed（能发 /release 的账号）、owner（负责人的账号：beta 和 --accept 只认本人的留言）。环境变量 LUOKE_RELEASE_ISSUE、
-LUOKE_RELEASE_ALLOWED（逗号分隔）、LUOKE_RELEASE_OWNER 设了就用环境变量。候选版另有三项，只在实验室配置里：rc_senders（能发
-候选版的机器账号，不在 allowed 里的只能发候选版）、rc_url_base（局域网托管的地址前缀，写局域网 IP：Tailscale 的 100.x 地址写进
+allowed（能发 /release 的账号）、owner（负责人的账号：beta 和除候选版以外的 --accept 只认本人的留言）。环境变量 LUOKE_RELEASE_ISSUE、
+LUOKE_RELEASE_ALLOWED（逗号分隔）、LUOKE_RELEASE_OWNER 设了就用环境变量。cut_senders（定时截版的机器账号，见上）只在实验室配置里。
+候选版另有三项，只在实验室配置里：rc_senders（能发候选版、也能给候选版 --accept 的账号，不在 allowed 里的只能发候选版）、rc_url_base（局域网托管的地址前缀，写局域网 IP：Tailscale 的 100.x 地址写进
 清单会被扫包拦下）、rc_serve_dir（那个地址对应的本机目录，由常驻的静态文件服务挂出去，流水线只往里拷）。其余是 launchd 的环境变量
 （模板在私有的 ops 仓库 lab/）：
   LUOKE_RELEASE_DRYRUN=1  空跑：只出不传（--no-publish），回复里写明
@@ -58,7 +63,7 @@ BUILD = os.path.join(CORE, "build.noindex")
 STATE = os.path.join(BUILD, "release-daemon.json")
 LOGF = os.path.join(BUILD, "release-daemon.log")
 SRC = os.path.join(BUILD, "src")
-TOP = os.path.dirname(CORE)     # 配件的私有仓库克隆在出版克隆旁边（TOP/<repo>，连 GitHub）；SRC 里的持久克隆是从它们 clone 的
+TOP = os.path.dirname(CORE)     # 配件的私有仓库克隆可以在出版克隆旁边（TOP/<repo>，连 GitHub）；没有的话用 SRC 里的持久克隆、直接从 GitHub 取（public_clone）
 PY = "/usr/bin/python3"
 REPOS = ["luoke-core", "luoke-mail", "luoke-mem", "luoke-ime"]      # 必须钉的；和 internal_build.py 的 ACCESSORIES 里不在 OPTIONAL 的一致
 # 新进流水线的配件（beta 2，11-03）：钉得到就钉，钉不到这一版不带（internal_build 也这样办）。持久克隆由 internal_build 的 freeze 建，
@@ -72,9 +77,8 @@ TOP_ALIAS = {"luoke-audit": "luoke-scan"}      # 顶层子模块还叫 luoke-aud
 # main 常常比最新的 tag 新（合完 PR 过一阵才打 tag）：钉 main 就编不过，退回旧版（11-09 internal-1109-6）
 TAG_PINNED = ["luoke-scan"]
 TAG_PREFIX = "（出版流水线）"
-# 会话和 luoke-top 的定时截版（10-29 起在出版机上定时跑）用的都是负责人的 gh 账号，靠留言开头的「（…会话）」
-# 「（…定时截版）」和负责人本人区分：这两种都不能出 beta、不能 --accept。哪一行以它开头都算（定时截版是开头一行标签、
-# /release 在第二行；开头先写了别的、会话标签写在后面也一样）
+# 权限只按账号认（parse_request）。留言开头自称「（…会话）」「（…定时截版）」的另外不给负责人和候选版的权限：防误发，不算认证。
+# 哪一行以它开头都算（定时截版是开头一行标签、/release 在第二行；开头先写了别的、会话标签写在后面也一样）
 COMMAND = re.compile(r"^\s*(?:（[^）]*(?:会话|定时截版)）\s*)?/release\b(.*)$", re.M)
 SESSION = re.compile(r"^\s*（[^）]*(?:会话|定时截版)）", re.M)
 TAG = re.compile(r"^internal-\d{4}(-\d+)?$")
@@ -132,16 +136,25 @@ def reply(body: str) -> None:
     sh(["gh", "issue", "comment", str(n), "--repo", repo, "--body", TAG_PREFIX + body], check=False)
 
 
-def parse_request(c: dict, allowed: set, owner: str, rc_senders: set = frozenset()) -> dict:
+def parse_request(c: dict, allowed: set, owner: str, rc_senders: set = frozenset(), cut_senders: set = frozenset()) -> dict:
     """一条留言 → 请求 {"accept": bool, "by": …, "comment": id}；不是请求返回 None；不允许返回 {"reject": 原因}。
-    候选版 /release betaN-rcM 认负责人本人和 rc_senders 里的账号（机器账号）；只在 rc_senders、不在 allowed 里的只能发候选版。"""
+    权限只按留言的账号认（模块开头的名单）：
+    候选版 /release betaN-rcM 认负责人和 rc_senders 里的账号；只在 rc_senders、不在 allowed 里的只能发候选版。
+    --accept：候选版认负责人和 rc_senders 里的账号（只在局域网给内部测，不对外）；beta 和内部版只认负责人。
+    cut_senders 里的账号只能发 /release internal-MMDD[-N]，别的名单里有也一样。
+    开头自称「（…会话）」「（…定时截版）」的留言，负责人、rc_senders 的权限都不给（防误发）。"""
     m = COMMAND.search(c.get("body") or "")
     if not m:
         return None
     who = (c.get("user") or {}).get("login", "")
     args = m.group(1).split()
-    by_owner = who == owner and not SESSION.search(c.get("body") or "")
-    if who not in allowed and who not in rc_senders:
+    if who and who in cut_senders:
+        if len(args) != 1 or not TAG.match(args[0]):
+            return {"reject": f"@{who} 是定时截版的账号，只能发 /release internal-MMDD[-N]"}
+        return {"accept": False, "by": who + "（定时截版）", "comment": c["id"], "tag": args[0]}
+    labelled = bool(SESSION.search(c.get("body") or ""))
+    by_owner = bool(owner) and who == owner and not labelled
+    if not who or (who not in allowed and who not in rc_senders):
         return {"reject": f"@{who} 不在能发 /release 的名单里"}
     rcs = [a for a in args if RC.match(a)]
     if rcs and not (by_owner or who in rc_senders):
@@ -156,8 +169,9 @@ def parse_request(c: dict, allowed: set, owner: str, rc_senders: set = frozenset
     if any(a.startswith("v") for a in args) or any(a.startswith("beta") and not BETA.match(a) and not RC.match(a) for a in args):
         return {"reject": "正式版不归流水线；beta 写成 betaN 或 betaN.M，候选版写成 betaN-rcM"}
     accept = "--accept" in args
-    if accept and not by_owner:
-        return {"reject": "--accept 只认负责人本人的留言"}
+    by_sender = who in rc_senders and not labelled
+    if accept and not (by_owner or (rcs and by_sender)):
+        return {"reject": "--accept 只认负责人本人的留言（候选版另认出候选版的账号；会话发的都不算）"}
     no_eval = "--no-eval" in args
     if no_eval and (rcs or betas):
         return {"reject": "--no-eval 只给内部版：beta 和候选版一律全评"}
@@ -294,19 +308,37 @@ def not_on_public(pins: dict) -> list:
 
 # ---- 候选版 ----------------------------------------------------------------------------------------------------
 
+def remote_url(repo: str) -> str:
+    return f"https://github.com/{GITHUB_ORG}/{repo}{REPO_SUFFIX}.git"     # 和 internal_build.py 的 remote_url 一样
+
+
+def public_clone(repo: str) -> tuple:
+    """取私有 public 分支用的本机克隆和从哪取：(目录, 远端)。core 是出版克隆，从 origin 取；配件先找出版克隆旁边的
+    TOP/<repo>（连 GitHub，从 origin 取；有的机器上 SRC 里的持久克隆是从它 clone 的，只看得到它的本地分支，取不到 public），
+    没有就用 SRC/<repo>，直接从 GitHub 上的私有仓库取：持久克隆的 origin 可能还指着当初 clone 它的 TOP/<repo>，
+    TOP 删了就取不到（internal_build 的 freeze 再按提交号用同一个克隆）。两处都没有就停，说清楚找过哪里。"""
+    if repo == "luoke-core":
+        return CORE, "origin"
+    top, src = os.path.join(TOP, repo), os.path.join(SRC, repo)
+    for d, remote in ((top, "origin"), (src, remote_url(repo))):
+        if os.path.exists(os.path.join(d, ".git")):
+            return d, remote
+    tried = [top, src]
+    raise RuntimeError(f"{repo}：本机没有它的克隆（找过 {'、'.join(tried)}），取不到私有 public")
+
+
 def pins_public() -> dict:
     """候选版钉的：四个公开仓库 main 现在的提交（导出、推送做完以后就是这一版要公开的）。同样的提交也在私有仓库的 public
-    分支上，从 GitHub 取进本机连 GitHub 的克隆：core 是出版克隆，配件是 TOP/<repo>（SRC 里的持久克隆是从它 clone 的、
-    只看得到它的本地分支，取不到 public；internal_build 的 freeze 再按提交号从 TOP/<repo> 取过去）。
+    分支上，从 GitHub 取进本机连 GitHub 的克隆（public_clone）。
     取下来还没有，说明私有 public 没推到这个提交（推送做了一半），停。"""
     pins = {}
     for repo in REPOS:
         sha = sh(["gh", "api", f"repos/{PUBLIC_OWNER}/{repo}/commits/main", "--jq", ".sha"]).strip()
-        d = CORE if repo == "luoke-core" else os.path.join(TOP, repo)
-        sh(["git", "-C", d, "fetch", "-q", "origin", "public"])
+        d, remote = public_clone(repo)
+        sh(["git", "-C", d, "fetch", "-q", remote, "public"])
         if not re.fullmatch(r"[0-9a-f]{40}", sha) or \
                 subprocess.run(["git", "-C", d, "cat-file", "-e", sha + "^{commit}"], capture_output=True).returncode != 0:
-            raise RuntimeError(f"{repo} 公开 main 是 {sha[:7] or '？'}，私有 public 上还没有（推送没做完？）")
+            raise RuntimeError(f"{repo} 公开 main 是 {sha[:7] or '？'}，{d} 从 {remote} 取过 public 以后还没有（推送没做完？）")
         pins[repo] = sha
     # 新配件（beta 2）照另外四个钉公开 main（不走私有提交的例外）。还没有公开仓库、或者 main 还是空的，
     # 这一版不带它；钉住的提交在不在私有 public 上由 internal_build 的 freeze 按提交号取时核（取不到就不带）
@@ -529,7 +561,7 @@ def finish_build(st: dict) -> None:
             pass
         why = why or ("进程没了，也没留下退出码（机器重启或被结束过）" if rc is None else f"退出码 {rc}")
         reply(f"**{tag}** 没出成（{why}）。\n\n{summ}\n\n日志末尾：\n```\n{tail[-3500:]}\n```\n"
-              "修好原因后再发一次 `/release`，钉住的提交没变就从停下的步骤接着做；差异报告里有总分回退的，负责人看过报告后发 `/release --accept`。")
+              "修好原因后再发一次 `/release`，钉住的提交没变就从停下的步骤接着做；差异报告里有总分回退的，负责人看过报告后发 `/release --accept`（候选版也可以由 rc_senders 里的账号发 `/release betaN-rcM --accept`）。")
     hist.append({"tag": tag, "ok": ok, "rc": rc, "pins": run["pins"], "started": run["started"], "ended": time.time()})
     st["history"] = hist[-50:]
     st["running"] = None
@@ -578,6 +610,7 @@ def tick() -> None:
         else set(lab.get("allowed") or [])
     owner = os.environ.get("LUOKE_RELEASE_OWNER") or lab.get("owner") or ""
     rc_senders = set(lab.get("rc_senders") or [])
+    cut_senders = set(lab.get("cut_senders") or [])
     first = st.get("last_comment") is None
     try:
         new = comments_after(st.get("last_comment") or 0)
@@ -593,7 +626,7 @@ def tick() -> None:
         st["last_comment"] = max(st.get("last_comment") or 0, c["id"])
         if (c.get("body") or "").startswith(TAG_PREFIX):
             continue                    # 自己的回复
-        req = parse_request(c, allowed, owner, rc_senders)
+        req = parse_request(c, allowed, owner, rc_senders, cut_senders)
         if req is None:
             continue
         if "reject" in req:

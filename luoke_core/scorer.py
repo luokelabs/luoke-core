@@ -30,8 +30,9 @@ class _Worker:
     log_name = "worker"
 
     def __init__(self, python: str, site: str, model_dir: str, log: Optional[Callable[[str], None]] = None,
-                 cache_mb: int = 1024):
+                 cache_mb: int = 1024, native: Optional[str] = None):
         self.python, self.site, self.model_dir = python, site, model_dir
+        self.native = native              # 螺壳引擎的可执行文件（engine.native_engine）：给了就起它的子命令，不起 Python 的工作进程
         self.cache_mb = cache_mb          # 工作进程里 MLX 缓冲的上限（配方专用模型的 cache_mb）
         self.log = log or (lambda s: None)
         self.proc: Optional[subprocess.Popen] = None
@@ -142,12 +143,13 @@ class ScoreWorker(_Worker):
     log_name = "scorer"
 
     def __init__(self, python: str, site: str, model_dir: str, snapshots: int, log: Optional[Callable[[str], None]] = None,
-                 cache_mb: int = 1024):
-        super().__init__(python, site, model_dir, log, cache_mb)
+                 cache_mb: int = 1024, native: Optional[str] = None):
+        super().__init__(python, site, model_dir, log, cache_mb, native)
         self.snapshots = snapshots
 
     def _argv(self) -> list:
-        return [self.python, "-B", WORKER, self.model_dir, "--snapshots", str(self.snapshots), "--cache-mb", str(self.cache_mb)]
+        tail = [self.model_dir, "--snapshots", str(self.snapshots), "--cache-mb", str(self.cache_mb)]
+        return [self.native, "score-worker"] + tail if self.native else [self.python, "-B", WORKER] + tail
 
     def score(self, ctx: str, cands: list, timeout: float) -> dict:
         """返回 {"lp", "ms", "hit"}；没就绪抛 ScorerError("not_ready")，超时或崩溃抛 ScorerError("engine_failed")。"""
@@ -168,12 +170,13 @@ class EmbedWorker(_Worker):
     log_name = "embedder"
 
     def __init__(self, python: str, site: str, model_dir: str, log: Optional[Callable[[str], None]] = None,
-                 cache_mb: int = 512, media: bool = False):
-        super().__init__(python, site, model_dir, log, cache_mb)
+                 cache_mb: int = 512, media: bool = False, native: Optional[str] = None):
+        super().__init__(python, site, model_dir, log, cache_mb, native)
         self.media = media        # 连视觉、声音一起加载（任务参数里有 image_batch / audio_batch 时）
 
     def _argv(self) -> list:
-        return [self.python, "-B", EMBED_WORKER, self.model_dir, "--cache-mb", str(self.cache_mb)] + (["--media"] if self.media else [])
+        tail = [self.model_dir, "--cache-mb", str(self.cache_mb)] + (["--media"] if self.media else [])
+        return [self.native, "embed-worker"] + tail if self.native else [self.python, "-B", EMBED_WORKER] + tail
 
     def embed(self, texts: list, max_tokens: int, timeout: float) -> dict:
         """texts 已带调用方的检索提示前缀；每条按 token 截到 max_tokens。返回 {"vectors", "dims", "ms"}；
@@ -194,7 +197,8 @@ class TranscribeWorker(_Worker):
     log_name = "transcriber"
 
     def _argv(self) -> list:
-        return [self.python, "-B", TRANSCRIBE_WORKER, self.model_dir, "--cache-mb", str(self.cache_mb)]
+        tail = [self.model_dir, "--cache-mb", str(self.cache_mb)]
+        return [self.native, "transcribe-worker"] + tail if self.native else [self.python, "-B", TRANSCRIBE_WORKER] + tail
 
     rewarming = False
 

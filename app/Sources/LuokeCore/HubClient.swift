@@ -102,13 +102,14 @@ struct HubStatus {
     let scorers: [String: String]
     let powerMode: String
     let backgroundOnBattery: Bool
+    /// 用电池时：normal 照常运行、light 少干活、no_large_model 不运行大模型（旧主控只给 background_on_battery）
+    let batteryMode: String
     let onAC: Bool
     let breaker: String?
     let memoryTier: String?
     let pendingTier: String?          // 换档等着底座下好的那一档（luoke-core#25）
     let neededDownloads: [String]
     let release: String?
-    let localAllowed: [[String: Any]]   // 本机放行的配件版本（只有内部版 / 本机版主控认）
     let downloads: [String: [String: Any]]
     var downloading: Bool { downloads.values.contains { ["queued", "downloading"].contains($0["state"] as? String ?? "") } }
     let smokeOK: Bool?
@@ -117,14 +118,27 @@ struct HubStatus {
     let resident: [String: Bool]      // 配件最近一次的常驻声明（主控持久化）
     let exited: [String: Double]      // 配件最近一次正常退出的时刻
     let uptime: Int
+    /// 任务队列（主控 /status 的 queue，右边栏用）：正在用模型的、排着的空闲任务
+    let queueRunning: [[String: Any]]
+    let queueWaiting: [[String: Any]]
+    /// 生成出来的 token 数（/status 的 output）：今天、累计、从哪天开始记（YYYY-MM-DD；没记过是 nil）
+    let tokensToday: Int?
+    let tokensTotal: Int?
+    let tokensSince: String?
 
     init(json o: [String: Any]) {
+        let q = o["queue"] as? [String: Any] ?? [:]
+        queueRunning = q["running"] as? [[String: Any]] ?? []
+        queueWaiting = q["queued"] as? [[String: Any]] ?? []
+        let out = o["output"] as? [String: Any]
+        tokensToday = (out?["today"] as? NSNumber)?.intValue
+        tokensTotal = (out?["total"] as? NSNumber)?.intValue
+        tokensSince = out?["since"] as? String
         tier = o["tier"] as? String ?? "?"
         memoryTier = o["memory_tier"] as? String
         pendingTier = o["pending_tier"] as? String
         neededDownloads = o["needed_downloads"] as? [String] ?? []
         release = o["release"] as? String
-        localAllowed = o["local_allowed"] as? [[String: Any]] ?? []
         downloads = o["downloads"] as? [String: [String: Any]] ?? [:]
         base = o["base"] as? String
         loaded = o["loaded"] as? String
@@ -141,6 +155,7 @@ struct HubStatus {
         let st = o["settings"] as? [String: Any] ?? [:]
         powerMode = st["power_mode"] as? String ?? "balanced"
         backgroundOnBattery = st["background_on_battery"] as? Bool ?? false
+        batteryMode = st["battery_mode"] as? String ?? (backgroundOnBattery ? "normal" : "light")
         onAC = (o["power"] as? [String: Any])?["on_ac"] as? Bool ?? true
         breaker = o["breaker"] as? String
         smokeOK = (o["smoke"] as? [String: Any])?["ok"] as? Bool
@@ -169,7 +184,7 @@ struct HubStatus {
     /// 后台暂停时菜单上多出的一行；在跑就不说
     var backgroundPaused: String? {
         if backgroundState == "running" { return nil }
-        let names: [String: String] = ["battery": "在用电池", "low_power": "低电量模式", "thermal": "过热", "memory": "等内存"]
+        let names: [String: String] = ["battery": "在用电池", "battery_no_large_model": "在用电池，不运行大模型", "low_power": "低电量模式", "thermal": "过热", "memory": "等内存"]
         let why = backgroundReasons.map { names[$0] ?? $0 }.joined(separator: "、")
         return why.isEmpty ? "后台已暂停" : "后台已暂停：\(why)"
     }

@@ -1,7 +1,10 @@
 import AppKit
 import SwiftUI
+#if canImport(LuokeWindow)
+import LuokeWindow
+#endif
 
-// 螺壳界面设计规范 v1（luoke-brand ui/DESIGN.md）在 SwiftUI 里的写法：颜色 token（浅色暖、深色中性灰）、主按钮、列表组、
+// 螺壳应用界面规范 v2（§2、§11）在 SwiftUI 里的写法：颜色 token（工作台那组，浅色、深色都是暖色）、主按钮、列表组、
 // 安装 / 升级窗口的左栏和底栏。安装、升级、完成三页照样板（ui/src/install/Install.tsx）改（10-21 定 beta1 前改）。
 
 extension Color {
@@ -12,23 +15,28 @@ extension Color {
                            blue: CGFloat(v & 0xFF) / 255, alpha: 1)
         })
     }
-    static let lkBackground = Color(light: 0xFCFAF7, dark: 0x111111)
-    static let lkCard       = Color(light: 0xFFFFFF, dark: 0x1A1A1A)
-    static let lkSidebar    = Color(light: 0xF7F2EB, dark: 0x161616)
-    static let lkForeground = Color(light: 0x2B1A12, dark: 0xFAFAF9)
-    static let lkMuted      = Color(light: 0x7A6558, dark: 0xB8B8B6)
-    static let lkMutedBg    = Color(light: 0xF4EEE6, dark: 0x232323)
-    static let lkBorder     = Color(light: 0xECE4DA, dark: 0x2A2A2A)
-    static let lkInput      = Color(light: 0xE2D8CC, dark: 0x3A3A3A)
-    static let lkPrimary    = Color(light: 0x3A1F14, dark: 0xF5F5F4)
-    static let lkOnPrimary  = Color(light: 0xFDF8F1, dark: 0x141414)
+    static let lkBackground = Color(light: 0xFCFAF7, dark: 0x1F1511)
+    static let lkCard       = Color(light: 0xFFFFFF, dark: 0x2C1F19)
+    static let lkSidebar    = Color(light: 0xF7F2EB, dark: 0x261A15)
+    static let lkForeground = Color(light: 0x2B1A12, dark: 0xFBF3E8)
+    static let lkMuted      = Color(light: 0x7A6558, dark: 0xBBA596)
+    static let lkMutedBg    = Color(light: 0xF4EEE6, dark: 0x372720)
+    static let lkBorder     = Color(light: 0xECE4DA, dark: 0x3B2A22)
+    static let lkInput      = Color(light: 0xE2D8CC, dark: 0x4A382E)
+    static let lkPrimary    = Color(light: 0x3A1F14, dark: 0xFDF4E4)
+    static let lkOnPrimary  = Color(light: 0xFDF8F1, dark: 0x2B1A12)
     static let lkBrand      = Color(light: 0xE8556B, dark: 0xF2707F)
-    static let lkBrandSoft  = Color(light: 0xFCE8EA, dark: 0x3B1F24)
+    static let lkBrandSoft  = Color(light: 0xFCE8EA, dark: 0x4A2329)
     static let lkSuccess    = Color(light: 0x2F7A4F, dark: 0x5CC98A)
     static let lkSuccessSoft = Color(light: 0xE4F2E8, dark: 0x16301F)
     static let lkWarning    = Color(light: 0xA86A12, dark: 0xE8B45A)
     static let lkWarningSoft = Color(light: 0xFBF0D9, dark: 0x33280F)
     static let lkDanger     = Color(light: 0xC2412D, dark: 0xF07A66)
+    static let lkDangerSoft = Color(light: 0xF9ECEA, dark: 0x472C24)
+    // -soft 底上的字：浅色压深一档才过 4.5:1，深色照原色（规范 v2 §2「标记上的字」）
+    static let lkBrandText   = Color(light: 0xBF2D45, dark: 0xF2707F)
+    static let lkWarningText = Color(light: 0x8F590C, dark: 0xE8B45A)
+    static let lkDangerText  = Color(light: 0xB33A27, dark: 0xF07A66)
 }
 
 /// 这块界面画在哪（11-10：螺壳只有一个窗口）：自己的小窗口（没带主窗口的这一份、安装器），或者主窗口里的一页、一张卡片、整个窗口
@@ -82,14 +90,14 @@ extension View {
 }
 
 /// 主按钮：lkPrimary 底 + 背景色的字，高 36、圆角 10、14/500（规范 §11：系统 .borderedProminent 深色下字看不清）
-/// destructive：只用于把东西移到废纸篓（卸载），lkDanger 底白字（规范 §11 Button）
+/// destructive：只用于把东西移到废纸篓（卸载），lkDanger 底；字和主按钮一样用 lkOnPrimary（深色下 lkDanger 是浅珊瑚，白字只有 2.7:1）
 struct LKPrimaryButton: ButtonStyle {
     var destructive = false
     @Environment(\.isEnabled) private var enabled
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.system(size: 14, weight: .medium))
-            .foregroundStyle(destructive ? Color.white : Color.lkOnPrimary)
+            .foregroundStyle(Color.lkOnPrimary)
             .padding(.horizontal, 16).frame(height: 36)
             .background((destructive ? Color.lkDanger : Color.lkPrimary).opacity(enabled ? (configuration.isPressed ? 0.85 : 1) : 0.4))
             .clipShape(.rect(cornerRadius: 10))
@@ -257,8 +265,8 @@ struct LKNote: View {
         switch kind {
         case .info: return (.lkForeground, .lkMuted, .lkMutedBg)
         case .success: return (.lkSuccess, .lkSuccess, .lkSuccessSoft)
-        case .warning: return (.lkWarning, .lkWarning, .lkWarningSoft)
-        case .danger: return (.lkDanger, .lkDanger, Color.lkDanger.opacity(0.12))
+        case .warning: return (.lkWarning, .lkWarningText, .lkWarningSoft)
+        case .danger: return (.lkDanger, .lkDangerText, .lkDangerSoft)
         }
     }
     var body: some View {
@@ -294,6 +302,27 @@ struct LKSegmented: View {
     }
 }
 
+/// 下拉（规范 v2 §6 Select）：和输入框同高同底，不用系统的蓝色箭头，右边画朝下的箭头（chevron-right 转 90°，包里没带 chevron-down；muted），文字左 12、右 34
+struct LKSelect<Value: Hashable>: View {
+    let options: [(Value, String)]
+    @Binding var selection: Value
+    var body: some View {
+        Menu {
+            ForEach(options, id: \.0) { v, label in
+                Button { selection = v } label: { if v == selection { Label { Text(label) } icon: { Lucide.menuImage("check") } } else { Text(label) } }
+            }
+        } label: {
+            Text(options.first { $0.0 == selection }?.1 ?? "").font(.system(size: 14)).foregroundStyle(Color.lkForeground)
+                .padding(.leading, 12).padding(.trailing, 34).frame(height: 36)
+                .overlay(alignment: .trailing) { LKIcon("chevron-right").rotationEffect(.degrees(90)).foregroundStyle(Color.lkMuted).padding(.trailing, 10) }
+                .background(Color.lkCard, in: .rect(cornerRadius: 10))
+                .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.lkInput))
+                .contentShape(.rect)
+        }
+        .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden).fixedSize()
+    }
+}
+
 /// 小标记（Badge）
 struct LKBadge: View {
     enum Kind { case brand, success, warning, secondary, outline }
@@ -302,9 +331,9 @@ struct LKBadge: View {
     var body: some View {
         let (fg, bg): (Color, Color) = {
             switch kind {
-            case .brand: return (.lkBrand, .lkBrandSoft)
+            case .brand: return (.lkBrandText, .lkBrandSoft)
             case .success: return (.lkSuccess, .lkSuccessSoft)
-            case .warning: return (.lkWarning, .lkWarningSoft)
+            case .warning: return (.lkWarningText, .lkWarningSoft)
             case .secondary: return (.lkForeground, .lkMutedBg)
             case .outline: return (.lkForeground, .clear)
             }
@@ -392,21 +421,29 @@ enum LKAsset {
     }
 }
 
-/// 安装 / 升级窗口的左栏：螺壳的 logo + 螺壳、步骤（编号圆圈，做完的变成 primary 底加勾，当前步高亮）、底部隐私说明
+/// 带字的 logo（海螺 + luoke），和主窗口侧栏左下角的同一套图（luoke-agent 的 lockup-light/dark.png，拷在 Resources/ui）。
+/// 11-12 定：logo 一律放左下，高 20，主窗口和占整个窗口的界面都一样
+struct LKBrandLockup: View {
+    var height: CGFloat = 20
+    @Environment(\.colorScheme) private var scheme
+    var body: some View {
+        if let img = LKAsset.image(scheme == .dark ? "lockup-dark.png" : "lockup-light.png") {
+            Image(nsImage: img).resizable().interpolation(.high)
+                .aspectRatio(img.size.width / max(img.size.height, 1), contentMode: .fit)
+                .frame(height: height)
+                .accessibilityLabel("螺壳")
+        }
+    }
+}
+
+/// 安装 / 升级窗口的左栏：步骤（编号圆圈，做完的变成 primary 底加勾，当前步高亮）、底部隐私说明，最底下是带字的 logo
 struct LKRail: View {
     let steps: [String]
     let current: Int
     @Environment(\.lkTopInset) private var topInset
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 8) {
-                if let logo = LKAsset.image("logo.svg") {      // 珊瑚红底方块、奶油海螺，原色画、不裁圆角（luoke-core#38）
-                    Image(nsImage: logo).resizable().scaledToFit().frame(width: 24, height: 24)
-                }
-                Text("螺壳").font(.system(size: 14, weight: .semibold))
-            }
-            .padding(.horizontal, 4).padding(.bottom, 28)
-            .padding(.top, topInset)       // 占整个主窗口：左栏顶到窗口上沿，logo 在红黄绿下面
+            Color.clear.frame(height: topInset)     // 占整个主窗口：左栏顶到窗口上沿，步骤从红黄绿那一行下面开始
             VStack(alignment: .leading, spacing: 2) {
                 ForEach(Array(steps.enumerated()), id: \.offset) { i, name in
                     HStack(spacing: 10) {
@@ -432,8 +469,9 @@ struct LKRail: View {
             // brand DESIGN §7：安装栏底部一句隐私说明（10-23 审计恢复）
             Text("模型在这台 Mac 上运行，数据不经过任何云服务。").font(.system(size: 11)).foregroundStyle(Color.lkMuted)
                 .fixedSize(horizontal: false, vertical: true).padding(.horizontal, 4)
+            LKBrandLockup(height: 20).padding(.horizontal, 4).padding(.top, 16)
         }
-        .padding(.horizontal, 16).padding(.vertical, 24)
+        .padding(.horizontal, 16).padding(.top, topInset > 0 ? 0 : 24).padding(.bottom, 24)     // 占整个主窗口：和侧栏的导航一样贴着红黄绿那一行
         .frame(width: 200)
         .frame(maxHeight: .infinity)
         .background(Color.lkSidebar)
@@ -458,6 +496,59 @@ struct LKTitle: View {
 
 /// 截图用（issue 验收要浅色、深色各一张）：`LuokeCore --render-ui <目录>` 把安装、升级、完成几页用示例数据画成 PNG 就退出，
 /// 不起主控、不碰任何安装。素材目录可用 LUOKE_UI_ASSETS 指（直接跑 .build 里的可执行文件时没有 .app 的 Resources）。
+#if canImport(LuokeWindow)
+/// 截图用的本体：只给「应用管理」的示例数据，走和 AgentCore 同一条换算（AppsSnapshot → HostAppRow）
+@MainActor final class SampleAppsHost: WindowHost {
+    func openModelSettings() {}
+    func openPrivacySettings() {}
+    func openAddApps() {}
+    func upgrade(app: String) {}
+    func appsSnapshot() -> HostApps? {
+        func row(_ id: String, _ name: String, _ tagline: String, type: String = "app", installed: String?, latest: String?,
+                 size: Int64 = 0, bundled: Bool = false, disabled: Bool = false) -> AppsModel.Row {
+            var r = AppsModel.Row(id: id, name: name, type: type, installed: installed, latest: latest, size: size, unavailable: nil,
+                                  bundled: bundled, disabled: disabled)
+            r.tagline = tagline
+            return r
+        }
+        let rows = [
+            row("luoke-mail", "螺壳邮件助手", "每天替你把收件箱理一遍", installed: "0.15.0", latest: "0.16.0"),
+            row("luoke-ime", "螺壳输入法", "越打越懂你的输入法", type: "input-method", installed: "1.2.0", latest: "1.2.0"),
+            row("luoke-search", "螺壳搜索", "在这台 Mac 上找文件、邮件、记忆", installed: "0.3.1", latest: nil, bundled: true),
+            row("luoke-scan", "螺壳扫描", "看看这台 Mac 上占地方的东西", installed: "0.2.0", latest: nil, bundled: true, disabled: true),
+        ]
+        return HostApps(rows: AppsSnapshot.entries(rows: rows, phase: .idle, progress: "", fraction: nil, previous: ["luoke-mail": "0.14.2"])
+            .map(AgentCore.hostRow))
+    }
+
+    /// 「设置」的示例：128 GB 的 Mac，完整在用、省空间下载中；走和 AgentCore 同一条换算（SettingsSnapshot → HostTier、HostModelRow）
+    func settingsSnapshot() -> HostSettings? {
+        let recipe: [String: Any] = [
+            "models": ["qwen3.5-9b-4bit": ["dir": "Qwen3.5-9B-4bit", "size_gb": 5.8],
+                       "gemma-4-26b-8bit": ["dir": "gemma-4-26b-a4b-it-8bit", "size_gb": 26.0],
+                       "qwen3.5-0.8b-base-4bit": ["dir": "Qwen3.5-0.8B-Base-4bit", "size_gb": 0.5]],
+            "assignment": ["32": ["base": "qwen3.5-9b-4bit", "special": ["luoke-ime.rerank": "qwen3.5-0.8b-base-4bit"]],
+                           "128": ["base": "gemma-4-26b-8bit", "special": ["luoke-ime.rerank": "qwen3.5-0.8b-base-4bit"]]],
+        ]
+        let choices = [Manifests.TierChoice(tier: "128", label: "完整", base: "gemma-4-26b-a4b-it-8bit", sizeGB: 26, note: ""),
+                       Manifests.TierChoice(tier: "32", label: "省空间", base: "Qwen3.5-9B-4bit", sizeGB: 5.8, note: "")]
+        let tiers = SettingsSnapshot.tiers(choices: choices, recipe: recipe, current: "128", pending: "32",
+                                           downloads: ["qwen3.5-9b-4bit": ["state": "downloading", "done": 2_300_000_000, "total": 5_800_000_000]],
+                                           needed: ["qwen3.5-9b-4bit"], tierError: nil, installed: { $0 != "qwen3.5-9b-4bit" },
+                                           sizeGB: { SettingsSnapshot.sizeGB(recipe, $0) })
+        let catalog = SettingsSnapshot.catalog(choices: choices, recipe: recipe)
+        return HostSettings(
+            general: HostGeneral(loginItem: .on, currentVersion: SettingsSnapshot.versionText("internal-1113"),
+                                 lastChecked: Date(), powerMode: .balanced, batteryMode: .light),
+            models: HostModels(tiers: tiers.map(AgentCore.hostTier), catalog: catalog.map(AgentCore.hostModelRow),
+                               advanced: HostLocalAPI(enabled: true, address: "127.0.0.1", port: 17861, models: ["luoke"], hasKey: true)),
+            privacy: HostPrivacy(dataLine: "模型在这台 Mac 上跑，数据只存在这台 Mac 上，没有遥测。",
+                                 systemChecks: [HostSystemCheck(name: "通知", ok: true),
+                                                HostSystemCheck(name: "完全磁盘访问", ok: false, detail: "螺壳扫描要用")]))
+    }
+}
+#endif
+
 enum UIRender {
     @MainActor
     static func run(to dir: String) {
@@ -608,6 +699,69 @@ enum UIRender {
                 save(AnyView(FirstRunView(m: m).environment(\.colorScheme, scheme)), scheme: scheme, to: dir, name: name + suffix)
             }
         }
+        #if canImport(LuokeWindow)
+        // 占整个主窗口：建一个和主窗口一样的真窗口（LuokeWindow 的 MainWindowChrome），连系统画的红黄绿一起截，看左上角让开得对不对
+        HubModel.shared.status = nil
+        HubModel.shared.hubExit = nil
+        for (name, step) in [("takeover-install", FirstRunModel.Step.preflight), ("takeover-install-3", .fetching)] {
+            for (suffix, scheme) in [("", ColorScheme.light), ("-dark", ColorScheme.dark)] {
+                let m = step == .fetching ? fetching(model(.fetching)) : model(step)
+                // 主窗口的根顶到窗口上沿（LuokeWindow 的 MainWindowView 不让工具栏的安全区），这里照样
+                windowShot(AnyView(FirstRunView(m: m).environment(\.lkHost, .takeover).environment(\.lkTopInset, HostPage.lightsInset)
+                    .ignoresSafeArea(.container, edges: .top).environment(\.colorScheme, scheme)), scheme: scheme, to: dir, name: name + suffix)
+            }
+        }
+        // 主窗口右边栏：主控 /status 的 queue、output 换成任务行和生成量（样例数据）
+        let railStatus = HubStatus(json: ["engine_alive": true, "engine_ready": true, "queue": [
+            "running": [["id": "request:luoke-mail:mail.triage", "tool": "luoke-mail", "name": "mail.triage", "kind": "request", "fraction": 0.4]],
+            "queued": [["id": "luoke-mem.learn", "tool": "luoke-mem", "name": "learn", "title": "整理记忆", "wait": ["kind": "quiet"]],
+                       ["id": "luoke-mail.clean", "tool": "luoke-mail", "name": "clean", "wait": ["kind": "time", "at": Date().timeIntervalSince1970 + 5400]],
+                       ["id": "luoke-scan.scan", "tool": "luoke-scan", "name": "scan", "wait": ["kind": "power"]]],
+        ] as [String: Any], "output": ["today": 18_400, "total": 1_236_000, "since": "2026-11-12"]])
+        for (suffix, scheme) in [("", ColorScheme.light), ("-dark", ColorScheme.dark)] {
+            let wm = WindowModel(defaults: UserDefaults(suiteName: "luoke-render-ui"))
+            wm.engineReady = true
+            (wm.tasks, wm.outputStats) = AgentCore.rail(railStatus)
+            wm.openPanel(.tasks)
+            windowShot(AnyView(MainWindowView(model: wm).environment(\.colorScheme, scheme)), scheme: scheme, to: dir, name: "main-rail-tasks" + suffix,
+                       size: NSSize(width: 1280, height: 760))
+        }
+        // 主窗口左下角那一行（CoreNotice → WindowModel.sidebarNotice）：和 logo 共存，有事才出现
+        let notices: [(String, SidebarNotice.Kind, String)] = [("main-notice-update", .update, "有新版本"), ("main-notice-error", .error, "出错了"),
+                                                               ("main-notice-downloading", .downloading, "下载中")]
+        for (name, kind, text) in notices {
+            for (suffix, scheme) in [("", ColorScheme.light), ("-dark", ColorScheme.dark)] {
+                let wm = WindowModel(defaults: UserDefaults(suiteName: "luoke-render-ui"))
+                wm.engineReady = true
+                wm.sidebarNotice = SidebarNotice(id: "core.\(kind)", kind: kind, text: text)
+                windowShot(AnyView(MainWindowView(model: wm).environment(\.colorScheme, scheme)), scheme: scheme, to: dir, name: name + suffix)
+            }
+        }
+        // 「应用管理」页：本体给数据（appsSnapshot），主窗口画
+        for (suffix, scheme) in [("", ColorScheme.light), ("-dark", ColorScheme.dark)] {
+            let wm = WindowModel(defaults: UserDefaults(suiteName: "luoke-render-ui"))
+            wm.engineReady = true
+            let host = SampleAppsHost()
+            wm.host = host
+            wm.go(.apps)
+            windowShot(AnyView(MainWindowView(model: wm).environment(\.colorScheme, scheme)), scheme: scheme, to: dir, name: "main-apps" + suffix,
+                       size: NSSize(width: 1280, height: 760))
+            withExtendedLifetime(host) {}
+        }
+        // 「设置」三个标签：本体给数据（settingsSnapshot），主窗口画
+        for tab in [PrefsTab.general, .model, .privacy] {
+            for (suffix, scheme) in [("", ColorScheme.light), ("-dark", ColorScheme.dark)] {
+                let wm = WindowModel(defaults: UserDefaults(suiteName: "luoke-render-ui"))
+                wm.engineReady = true
+                let host = SampleAppsHost()
+                wm.host = host
+                wm.go(.prefs, tab: tab.rawValue)
+                windowShot(AnyView(MainWindowView(model: wm).environment(\.colorScheme, scheme)), scheme: scheme, to: dir,
+                           name: "main-settings-\(tab.rawValue)" + suffix, size: NSSize(width: 1280, height: 900))
+                withExtendedLifetime(host) {}
+            }
+        }
+        #endif
         // 小窗口：卸载、配件回退、主控小窗口、设置
         func shot(_ name: String, _ v: AnyView, _ size: NSSize) {
             for (suffix, scheme) in [("", ColorScheme.light), ("-dark", ColorScheme.dark)] {
@@ -651,6 +805,18 @@ enum UIRender {
                                                   "release": "internal-1022", "smoke": ["ok": true], "settings": ["power_mode": "balanced", "background_on_battery": false]])
         shot("home", AnyView(HomeView(model: HubModel.shared)), NSSize(width: 480, height: 520))
         shot("settings", AnyView(SettingsView().environmentObject(HubModel.shared)), NSSize(width: 560, height: 680))
+        // 主窗口「设置」里归本体的两个标签（通用、隐私）：高级收起、展开各一张
+        StorageView.sample = [("gemma-4-26b-a4b-8bit", 26_400_000_000), ("qwen3-asr-0.6b-8bit", 980_000_000)]
+        HubModelSettings.sampleTiers = [Manifests.TierChoice(tier: "128", label: "完整", base: "gemma-4-26b-a4b-8bit", sizeGB: 26, note: ""),
+                                        Manifests.TierChoice(tier: "32", label: "省空间", base: "qwen3.5-9b-4bit", sizeGB: 6, note: "")]
+        HubModel.shared.status = HubStatus(json: ["tier": "128", "memory_tier": "128", "base": "gemma-4-26b-a4b-8bit", "engine_alive": true, "engine_ready": true,
+                                                  "release": "internal-1111", "smoke": ["ok": true], "settings": ["power_mode": "balanced", "background_on_battery": false]])
+        for (name, open) in [("settings-general", false), ("settings-general-advanced", true)] {
+            shot(name, AnyView(HubModelSettings(advanced: open).padding(24).frame(maxHeight: .infinity, alignment: .top).background(Color.lkBackground).environmentObject(HubModel.shared)), NSSize(width: 640, height: open ? 1100 : 820))
+        }
+        shot("settings-privacy", AnyView(HubPrivacySettings().padding(24).frame(maxHeight: .infinity, alignment: .top).background(Color.lkBackground)), NSSize(width: 640, height: 260))
+        StorageView.sample = nil
+        HubModelSettings.sampleTiers = nil
         HubModel.shared.status = nil
         HubModel.shared.hubExit = nil
         let ip = InstallerProgressModel(title: "正在升级到 internal-1022", text: "螺壳会先退出，换好新版后自己重新打开，大约一分钟。")
@@ -796,4 +962,26 @@ enum UIRender {
             try? png.write(to: URL(fileURLWithPath: dir).appendingPathComponent(name + ".png"))
         }
     }
+
+    #if canImport(LuokeWindow)
+    /// 真窗口截图：样式同 AgentCore.makeWindow，截整个窗口框（含系统画的红黄绿），不上屏（一个窗口的例外：只画 PNG，用户看不到）
+    @MainActor
+    static func windowShot(_ view: AnyView, scheme: ColorScheme, to dir: String, name: String, size: NSSize = NSSize(width: 1004, height: 760)) {
+        let w = NSWindow(contentRect: NSRect(origin: .zero, size: size),
+                         styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
+        MainWindowChrome.apply(to: w)
+        w.appearance = NSAppearance(named: scheme == .dark ? .darkAqua : .aqua)
+        // lkSnapshot：主窗口按截图画（不走进场动画，不然页里的块还是透明的；红黄绿它自己画，系统的那三个藏起来，不然叠成两层）
+        w.contentView = NSHostingView(rootView: view.environment(\.lkSnapshot, true))
+        for b in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] { w.standardWindowButton(b)?.isHidden = true }
+        w.isReleasedWhenClosed = false
+        guard let frame = w.contentView?.superview else { return }
+        frame.layoutSubtreeIfNeeded()
+        guard let rep = frame.bitmapImageRepForCachingDisplay(in: frame.bounds) else { return }
+        frame.cacheDisplay(in: frame.bounds, to: rep)
+        if let png = rep.representation(using: .png, properties: [:]) {
+            try? png.write(to: URL(fileURLWithPath: dir).appendingPathComponent(name + ".png"))
+        }
+    }
+    #endif
 }

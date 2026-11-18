@@ -15,7 +15,7 @@ import sys
 import threading
 
 from . import __version__
-from .hub import Hub, serve
+from .hub import Hub, hub_answering, serve
 from .recipe import Recipe
 
 
@@ -28,12 +28,15 @@ def main(argv=None) -> int:
     s.add_argument("--env", default=None)
     s.add_argument("--socket", default=None)
     s.add_argument("--lab", action="store_true")
+    s.add_argument("--real-data", action="store_true", help="实验室构建也用本机用户的真实数据、装到真实的位置（开发实例）")
     s.add_argument("--accessory-dir", action="append", default=[])
     s.add_argument("--mem-gb", type=float, default=None)
     s.add_argument("--tier", default=None, help="按这一档的策略和任务参数跑（实验室评测用；内存仍按真机算）")
     s.add_argument("--no-smoke", action="store_true", help="启动时不做冒烟检查（默认做，同一组合通过过就不重做）")
     s.add_argument("--parent-watch", action="store_true", help="父进程（主控 .app）没了就退出，免得引擎成孤儿；终端里起的不要带")
     s.add_argument("--release", default=None, help="发布清单 release.json（没有就不能下载模型）")
+    s.add_argument("--bundled-engine", default=None, help="打进螺壳.app 的螺壳引擎（Contents/Helpers/luoke-engine）")
+    s.add_argument("--bundled-engine-version", default=None, help="它的版本：配方要的正是 luoke-engine-<这个版本> 才用它")
     sub.add_parser("version")
     a = ap.parse_args(argv)
     if a.cmd == "version":
@@ -43,9 +46,13 @@ def main(argv=None) -> int:
     sock = a.socket or os.path.join(env, "run", "hub.sock")
     if len(sock.encode("utf-8")) > 100:
         sys.exit(f"socket 路径太长（macOS 的 AF_UNIX 限 104 字节）：{sock}；用 --socket 指定短路径")
+    if hub_answering(sock):     # 同一个环境目录里另一个主控开着：不抢它的 socket，也不碰同一份状态
+        print(f"已经有主控在 {sock} 应答，这一个不起", flush=True)
+        return 4
     recipe = Recipe.load(a.recipe)
     hub = Hub(recipe, env, os.path.abspath(a.model_dir), lab=a.lab, accessory_dirs=a.accessory_dir, mem_gb=a.mem_gb,
-              smoke=not a.no_smoke, release=os.path.abspath(a.release) if a.release else None, tier=a.tier)
+              smoke=not a.no_smoke, release=os.path.abspath(a.release) if a.release else None, tier=a.tier,
+              bundled_engine=a.bundled_engine, bundled_engine_version=a.bundled_engine_version, real_data=a.real_data)
     srv = serve(hub, sock)          # 先占住 socket 并开始应答（启动期间只答 /status），再起引擎：起不来时不会留下孤儿引擎
     hub.socket_path = sock
     sock_ino = os.stat(sock).st_ino

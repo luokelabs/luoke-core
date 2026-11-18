@@ -20,8 +20,8 @@ from collections import deque
 from . import jobs as idle_jobs, CONTRACT, __version__, accessories, machine
 from . import apps, download, procs
 from . import endpoint as endpoint_mod
-from .dispatch import Dispatcher
-from .engine import Engine, EngineError
+from .dispatch import BATTERY_MODES, Dispatcher
+from .engine import Engine, EngineError, engine_package, is_engine_version, native_engine
 from .proxy import STATUS, BadRequest, build_engine_payload, error_body, estimate_secs, tokenizer_markers
 from .recipe import SPECIAL_KINDS, Recipe
 from .scorer import EmbedWorker, ScoreWorker, ScorerError, TranscribeWorker
@@ -94,10 +94,12 @@ BREAKER_WINDOW_SECS = 600    # ……发生在这么长时间内
 # 冒烟检查的测量方法版本：量法变了就加一，旧记录（没有 method 或更低）在下次启动时重测，不再按组合沿用。
 # 2：量速度前先空跑一条（2026-10-19；之前的 prefill 被首条请求现编内核拖慢，一台 M3 Pro 36 GB（beta0）上 9B 记成 50，配方是 230）
 SMOKE_METHOD = 2
+NO_LARGE_MODEL_MSG = "在用电池，按设置不运行大模型：接上电源就能用；想在电池上也用，在「设置 · 通用」的「用电池时」里改"
 
 
 def engine_app_matching(app: str, version: str) -> Optional[str]:
-    """app（某个 oMLX.app）在、且 Info.plist 的 CFBundleShortVersionString 等于配方引擎版本去掉 "omlx-" 前缀的部分时返回它，否则 None。"""
+    """app（某个引擎包）在、且 Info.plist 的 CFBundleShortVersionString 等于配方引擎版本去掉前缀（"omlx-"、"luoke-engine-"）的部分时
+    返回它，否则 None。"""
     plist = os.path.join(app, "Contents", "Info.plist")
     if not app or not os.path.isfile(plist):
         return None
@@ -107,21 +109,22 @@ def engine_app_matching(app: str, version: str) -> Optional[str]:
             have = str(plistlib.load(f).get("CFBundleShortVersionString") or "")
     except Exception:
         return None
-    want = version[5:] if version.startswith("omlx-") else version
-    return app if have == want else None
+    return app if have == engine_package(version)["version"] else None
 
 
 class Hub:
     def __init__(self, recipe: Recipe, env_dir: str, model_dir: str, lab: bool = False,
                  accessory_dirs: Optional[list] = None, mem_gb: Optional[float] = None, smoke: bool = True,
                  tier: Optional[str] = None,
-                 release: Optional[str] = None):
+                 release: Optional[str] = None, bundled_engine: Optional[str] = None,
+                 bundled_engine_version: Optional[str] = None, real_data: bool = False):
         self.recipe = recipe
+        # 打进螺壳.app 的螺壳引擎（Contents/Helpers/luoke-engine）和它的版本：本体起主控时给（bundled_engine()）
+        self.bundled_engine_path = bundled_engine
+        self.bundled_engine_version = bundled_engine_version
         self.smoke = smoke
         self.release_path = release          # 发布清单 release.json（V1 §4），没有就不能下载
         self._release_tag: Optional[str] = None
-        self._local_allow: tuple = (None, [])
-        self._local_allow_used: set = set()
         # 给高级用户的本机端点（顶层 ADR 0014 修订）：引擎一次只留一个生成模型，谁在用记在这里；换模型要等用着旧的请求做完
         self.embed_lane = threading.Condition()       # 嵌入的优先通道（#5 审阅）：有查询在等，后台批的下一份先让
         self.embed_priority_waiting = 0
@@ -135,6 +138,9 @@ class Hub:
         self.model_dir = model_dir
         self.markers: dict = {}              # 底座名 -> 分词器里要中和的记号（special_tokens()）
         self.lab = lab
+        # 用不用本机用户的真实数据、装到真实的位置：正式版和开发实例（实验室构建带 --real-data）用；普通的实验室实例（评测、自动化测试）
+        # 用自己环境目录里的（docs/dev-instance.md）。开发实例和正式版一样核签名、核本体，只有任务全开、配件哪一版都认跟着 lab
+        self.real_data = not lab or real_data
         self.accessory_dirs = accessory_dirs or []
         os.makedirs(os.path.join(env_dir, "run"), mode=0o700, exist_ok=True)
         os.makedirs(os.path.join(env_dir, "logs"), exist_ok=True)
@@ -143,7 +149,7 @@ class Hub:
         self.loglock = threading.Lock()
         self.mem_gb = mem_gb or machine.mem_gb()
         self.settings_path = os.path.join(env_dir, "settings.json")
-        self.settings = {"power_mode": "balanced", "background_on_battery": False, "tier": None,
+        self.settings = {"power_mode": "balanced", "background_on_battery": False, "battery_mode": None, "tier": None,
                          "endpoint_enabled": False, "endpoint_port": endpoint_mod.DEFAULT_PORT}   # 给高级用户的本机端点，默认关
         try:
             with open(self.settings_path, encoding="utf-8") as f:
@@ -169,19 +175,20 @@ class Hub:
         self.dispatcher = Dispatcher(time.time, self.tier)
         self.base_name = recipe.base_for(self.tier_name)
         eng = recipe.engine
-        # 引擎：按清单装上的那份优先（<env>/engines/<版本>/oMLX.app）；没有就用配方写的那份（开发版：本机的 oMLX.app），但只认版本和配方一致的。
+        # 引擎：打进螺壳.app 的那一个文件、版本正是配方要的，就用它，不用下载（bundled_engine()）。
+        # 不然按清单装上的那份优先（<env>/engines/<版本>/<包名>，包名见 engine.PACKAGES）；没有就用配方写的那份（开发版：本机的 oMLX.app），但只认版本和配方一致的。
         # 都没有就指着引擎包要装到的地方：engine_missing() 为真，等引擎包下完（_after_downloads 换上）。不退回配方写的
         # /Applications/oMLX.app：那是用户自己装的，版本、参数都可能对不上，起了只会反复崩到熔断（luoke-core#143）
-        self.engine_app = self.installed_engine_app() or self.recipe_engine_app() or self.engine_install_app()
+        self.engine_app = self.bundled_engine() or self.installed_engine_app() or self.recipe_engine_app() or self.engine_install_app()
         self.engine = Engine(self.engine_app, os.path.join(env_dir, "engine", eng["version"]), model_dir,
                              self.tier["guard_gb"], eng.get("log_level", "warning"), self.log)
-        self.engine_python = os.path.join(self.engine_app, eng["python"])
-        self.engine_site = os.path.join(self.engine_app, eng["site"])
+        self.engine_python = os.path.join(self.engine_app, eng.get("python", ""))      # 螺壳引擎的包不带 Python，配方里可以没有这两项
+        self.engine_site = os.path.join(self.engine_app, eng.get("site", ""))
         # 配件装到哪：正式 ~/Applications（输入法 ~/Library/Input Methods）；实验室构建装在自己的环境目录里，不碰本机用户的
         # 实验室构建的目录带 .noindex、装完也不登记 LaunchServices：不然 Spotlight 会把测试副本按 bundle id 登记进去，别的配件按 id 打开时可能落到它
-        self.apps_dir = os.path.join(env_dir, "Applications.noindex") if lab else os.path.expanduser("~/Applications")
-        self.input_methods_dir = os.path.join(env_dir, "Input Methods.noindex") if lab else os.path.expanduser("~/Library/Input Methods")
-        if lab:
+        self.apps_dir = os.path.join(env_dir, "Applications.noindex") if not self.real_data else os.path.expanduser("~/Applications")
+        self.input_methods_dir = os.path.join(env_dir, "Input Methods.noindex") if not self.real_data else os.path.expanduser("~/Library/Input Methods")
+        if not self.real_data:
             self.accessory_dirs = list(self.accessory_dirs) + [self.apps_dir, self.input_methods_dir]
         self.base_id: Optional[str] = None
         self.scorers: dict = {}      # 模型名 -> ScoreWorker / EmbedWorker
@@ -207,7 +214,9 @@ class Hub:
                                        socket_path=lambda: self.socket_path, logs_dir=os.path.join(env_dir, "logs", "jobs"))
         self._manifest_rescan_at = 0.0
         self.dispatcher.power_mode = self.settings["power_mode"]
-        self.dispatcher.background_on_battery = bool(self.settings["background_on_battery"])
+        self._set_battery_mode(self.settings.get("battery_mode") if self.settings.get("battery_mode") in BATTERY_MODES
+                               else ("normal" if self.settings["background_on_battery"] else "light"))
+        self.endpoint_active: dict = {}  # 线程 -> {"model", "started"}：本机接口正在生成的请求（queue_status）
         self.score_ms: dict = {}      # 任务名 -> 最近的打分耗时（毫秒），只作诊断（state.json 的 tasks）
         self.score_full_ms: dict = {} # 同上，只记候选数 >= 8 的（接近全量，和探针可比）
         self.asr_sessions: dict = {}  # (配件, 会话号) -> 这次听写攒下的音频（Hub.transcribe）；只在内存里，30 秒没消息就丢
@@ -297,73 +306,29 @@ class Hub:
         实验室实例也**只扫自己的配件目录**（accessory_dirs，含环境目录里的 Applications.noindex）：不然它扫到本机用户 ~/Applications 里
         真实装着的配件——还没迁走的旧「螺壳记忆.app」带着 learn 空闲任务、{memory} 指真实的 mem.db，安静时刻就会被实验室拉起
         （2026-10-16 gateway 集成测试发现，10-19 用 main 复现）；邮件助手、输入法的清单也会混进来。"""
-        bundled = not (self.lab and not os.environ.get("LUOKE_HOME"))
-        if self.lab:
+        bundled = self.real_data or bool(os.environ.get("LUOKE_HOME"))
+        if not self.real_data:
             return accessories.installed(only=self.accessory_dirs, hub=accessories.hub_app(), bundled=bundled)
-        found = accessories.installed(self.accessory_dirs, bundled=bundled)
-        self._note_verified(found)
-        return found
+        return accessories.installed(self.accessory_dirs, bundled=bundled)
 
-    # ---- 验证记录（配件回滚，issue #12，10-20 定"认它当时的验证"）：每一版主控只认它评测过的那一个配件版本；换回上一版的配件，
-    # 主控按"在这台 Mac 上哪一版发布验证过它、验证了哪些任务"认它，只给当时验证过的任务。记录在装着的配件的版本被本版配方认时写下 ----
-    VERIFIED_HISTORY = "verified-history.json"
-    HISTORY_KEEP = 3          # 每个配件留最近这么多个版本
-
-    def _history(self) -> dict:
-        try:
-            with open(os.path.join(self.env_dir, self.VERIFIED_HISTORY), encoding="utf-8") as f:
-                h = json.load(f)
-            return h if isinstance(h, dict) else {}
-        except (OSError, ValueError):
-            return {}
-
-    def _note_verified(self, found: dict) -> None:
-        h = self._history()
-        changed = False
-        for m in found.values():
-            name, version = m.get("accessory"), m.get("version")
-            if not name or not version or m.get("_bundled") or not self.recipe.version_verified(name, version):
-                continue
-            # 记本版当时实际放行的任务：评测过、这个版本硬性条目过了的，加上配方里这个配件根本没有评测记录的（草稿、每日摘要这类，
-            # 本版对认的版本不逐项查评测就给）。只记前一种的话，主控先升级、应用还没升级时这几项就用不了（issue #32）
-            v = self.recipe.verified.get(name) or {}
-            evals = v.get("tasks") or {}
-            tasks = sorted({t for t, entries in evals.items() if any(e.get("hard_ok") and e.get("accessory_version") == version for e in entries)}
-                           | {t for t, spec in (self.recipe.tasks or {}).items() if spec.get("accessory") == name and not evals.get(t)})
-            entry = {"release": self.release_tag() or "", "tasks": tasks}
-            per = h.setdefault(name, {})
-            if {k: per.get(version, {}).get(k) for k in entry} == entry:
-                continue
-            per[version] = dict(entry, at=time.time())
-            for old in sorted(per, key=lambda k: per[k].get("at", 0))[:-self.HISTORY_KEEP]:
-                del per[old]
-            changed = True
-        if changed:
-            try:
-                p = os.path.join(self.env_dir, self.VERIFIED_HISTORY)
-                with open(p + ".tmp", "w", encoding="utf-8") as f:
-                    json.dump(h, f, ensure_ascii=False, indent=1)
-                os.replace(p + ".tmp", p)
-            except OSError as e:
-                self.log(f"verified history not saved: {e}")
-
-    def history_entry(self, name: str, version: str) -> Optional[dict]:
-        """装着的正是这个版本、本版配方不认它、但这台 Mac 上以前的发布验证过它：答那条记录。"""
-        if self.lab or self.recipe.version_verified(name, version):
-            return None
-        m = accessories.by_accessory(self.manifests or {}, name)
-        if not m or m.get("version") != version:
-            return None
-        return (self._history().get(name) or {}).get(version)
-
+    # ---- 认配件：主控不核配件的版本，配件发版的 CI 把质量底线；配件清单写了 min_core 的，主控够新才放行 ----
     def version_accepted(self, name: str, version: str) -> bool:
-        return (self.lab or self.recipe.version_verified(name, version) or self.locally_allowed(name, version)
-                or self.history_entry(name, version) is not None)
+        """认得这个配件就放行，哪一版都行：配方里有它（任务归它、或 verified 里有它）、或者装着它。实验室实例都放行。"""
+        if self.lab or name == "luoke-core":
+            return True
+        return (name in self.recipe.verified or any(t.get("accessory") == name for t in (self.recipe.tasks or {}).values())
+                or accessories.by_accessory(self.manifests or {}, name) is not None)
+
+    def core_needed(self, name: str) -> Optional[str]:
+        """装着的这个配件的清单要更新的主控（min_core 比本主控的版本新）时答它要的版本，否则 None"""
+        m = accessories.by_accessory(self.manifests or {}, name)
+        need = str((m or {}).get("min_core") or "")
+        return need if need and accessories._version_tuple(__version__) < accessories._version_tuple(need) else None
 
     def check_uninstall_data(self, data: bool, dry_run: bool) -> None:
         """实验室实例在 HOME 没隔离时不删配件数据：实验室装的配件清单里声明的 ~/.luoke-mail 之类就是本机用户真实的数据
         （data_dirs 只挡记忆，挡不住这些）。只算计划（dry_run）、不删数据的卸载照常。"""
-        if self.lab and data and not dry_run and accessories.home_is_real():
+        if not self.real_data and data and not dry_run and accessories.home_is_real():
             raise BadRequest("forbidden", "实验室实例不删配件数据：HOME 是你真实的主目录，配件声明的数据就是你自己的。"
                                           "要测删数据，把 HOME 和 LUOKE_HOME 指向测试目录再起实验室主控")
 
@@ -446,6 +411,12 @@ class Hub:
             self.engine_error = str(e)
             self.log(f"engine restart failed: {e}")
 
+    def _set_battery_mode(self, mode: str) -> None:
+        """用电池时怎么办；旧字段 background_on_battery 跟着写，只认旧字段的读者照样看得懂"""
+        self.settings["battery_mode"] = mode
+        self.settings["background_on_battery"] = mode == "normal"
+        self.dispatcher.battery_mode = mode
+
     def update_settings(self, patch: dict) -> dict:
         """主控本体（菜单栏）改设置：功耗档、用电池时是否运行后台、用户选的档。立即生效并落盘。"""
         if "tier" in patch:
@@ -464,9 +435,12 @@ class Hub:
                 raise BadRequest("invalid_request", "power_mode 只能是 full / balanced / quiet")
             self.settings["power_mode"] = patch["power_mode"]
             self.dispatcher.power_mode = patch["power_mode"]
-        if "background_on_battery" in patch:
-            self.settings["background_on_battery"] = bool(patch["background_on_battery"])
-            self.dispatcher.background_on_battery = bool(patch["background_on_battery"])
+        if "background_on_battery" in patch:          # 旧的开关：true = 照常运行，false = 少干活
+            self._set_battery_mode("normal" if patch["background_on_battery"] else "light")
+        if "battery_mode" in patch:
+            if patch["battery_mode"] not in BATTERY_MODES:
+                raise BadRequest("invalid_request", "battery_mode 只能是 " + " / ".join(BATTERY_MODES))
+            self._set_battery_mode(patch["battery_mode"])
         if "endpoint_key" in patch:
             # 用户自己设的密钥（任意字符串，空 = 不校验）：只写进 0600 的密钥文件，不进 settings.json（10-19 定）
             if not isinstance(patch["endpoint_key"], str):
@@ -498,31 +472,32 @@ class Hub:
 
     # ---- 下载（V1 §6 第 4 步）：按发布清单，后台线程一项一项下，完了重启引擎让它看见新模型 ----------------------
     def engine_install_app(self) -> str:
-        """清单里的引擎包装到哪（<env>/engines/<版本>/oMLX.app）。"""
-        return os.path.join(self.env_dir, "engines", self.recipe.engine["version"], "oMLX.app")
+        """清单里的引擎包装到哪（<env>/engines/<版本>/oMLX.app 或 LuokeEngine.app，按配方引擎版本的前缀）。"""
+        version = self.recipe.engine["version"]
+        return os.path.join(self.env_dir, "engines", version, engine_package(version)["app"])
+
+    def bundled_engine(self) -> Optional[str]:
+        """打进螺壳.app 的螺壳引擎（一个可执行文件，跟着螺壳一起签名、升级）：配方的引擎版本正是它（"luoke-engine-<它的版本>"）才用，
+        这时不要引擎包、不用下载。配方还是 oMLX、或者版本对不上，照旧按清单装的引擎包（换引擎的过渡）。"""
+        p, v = getattr(self, "bundled_engine_path", None), getattr(self, "bundled_engine_version", None)
+        if not p or not v or self.recipe.engine["version"] != "luoke-engine-" + v:
+            return None
+        return p if os.path.isfile(p) and os.access(p, os.X_OK) else None
 
     def installed_engine_app(self) -> Optional[str]:
         p = self.engine_install_app()
         return p if os.path.isdir(os.path.join(p, "Contents")) else None
 
     def recipe_engine_app(self) -> Optional[str]:
-        """配方 engine.app 指的那份（开发版用本机的 oMLX.app）：在、而且 Info.plist 的版本和配方的引擎版本一致才算（"omlx-0.7.0" ↔ "0.7.0"）。
+        """配方 engine.app 指的那份（开发版用本机的引擎包）：在、而且 Info.plist 的版本和配方的引擎版本一致才算（"omlx-0.7.0" ↔ "0.7.0"）。
         用户自己装的别的版本不拿来用：引擎包照样下（2026-10-15 16 GB 测试机实测时定）。"""
         if not self.lab and self.release_path and os.path.exists(self.release_path):
             return None     # 发布版只用清单里装的引擎包（钉了哈希、我们签的），不用本机另装的 oMLX（审查 2026-10-17，ADR 0001）
         return engine_app_matching(self.recipe.engine.get("app") or "", self.recipe.engine["version"])
 
     def task_open_here(self, task: str, tier: str) -> bool:
-        """这台 Mac 上这个任务在这一档开着：配方认的（Recipe.task_open）；或者配件不在本版配方的 verified 里，但装着的版本
-        以前的发布验证过这一项（验证记录里有这个任务，同 check_accessory）。实验室实例都开。"""
-        if self.lab or self.recipe.task_open(task, tier):
-            return True
-        t = self.recipe.task(task)
-        if not t or not self.recipe.task_on_tier(task, tier):
-            return False
-        inst = accessories.by_accessory(self.manifests or {}, t["accessory"])
-        past = self.history_entry(t["accessory"], inst["version"]) if inst and inst.get("version") else None
-        return past is not None and task in past.get("tasks", [])
+        """这台 Mac 上这个任务在这一档开着（Recipe.task_open：配方里有、这一档没排除）。实验室实例都开。"""
+        return self.lab or self.recipe.task_open(task, tier)
 
     def tier_models(self, tier: str) -> list:
         """这一档要下的模型：底座，加上开着的任务（task_open_here）用的专用模型（2026-11-03 起；之前分到档就下，
@@ -548,7 +523,7 @@ class Hub:
                 return not download.item_installed(item, self.model_dir_of(n))
             return not os.path.isdir(self.model_dir_of(n))
         need = [n for n in dict.fromkeys(names) if missing(n)]
-        if not self.installed_engine_app() and not self.recipe_engine_app():
+        if not self.bundled_engine() and not self.installed_engine_app() and not self.recipe_engine_app():
             need.append("engine")
         return need
 
@@ -574,7 +549,10 @@ class Hub:
             want = self.recipe.engine["version"]
             hint = []
             if "engine" in need:
-                hint.append(f"引擎：装官方 oMLX {want.replace('omlx-', '')} 到 {self.recipe.engine.get('app') or '/Applications/oMLX.app'}（版本要一样）")
+                pkg = engine_package(want)
+                where = self.recipe.engine.get("app") or "/Applications/" + pkg["app"]
+                hint.append(f"引擎：装官方 oMLX {pkg['version']} 到 {where}（版本要一样）" if pkg["app"] == "oMLX.app" else
+                            f"引擎：打包时给 LUOKE_ENGINE_PKG（luoke-engine 的 release 里 {pkg['version']} 的 tar.gz），打进螺壳.app")
             models = [n for n in need if n != "engine"]
             if models:
                 hint.append("模型：把 " + "、".join(self.recipe.model(n)["dir"] for n in models) + " 放进模型目录 " + self.model_dir)
@@ -630,8 +608,9 @@ class Hub:
                         raise download.DownloadError(f"{n} 应当只有一个 zip")
                     dest = self.install_dir_for(item)
                     if kind == "engine":
-                        app = download.install_app_zip(os.path.join(staged, zips[0]), dest, expect_name="oMLX.app", rename_if_bundle="app.omlx", register=False,
-                                                       verify=not self.lab)
+                        pkg = engine_package(self.recipe.engine["version"])
+                        app = download.install_app_zip(os.path.join(staged, zips[0]), dest, expect_name=pkg["app"], rename_if_bundle=pkg["bundle_id"], register=False,
+                                                       verify=not self.lab or self.real_data)
                     else:
                         old = accessories.by_accessory(self.manifests, item.get("accessory") or n)
                         if old and old.get("_bundled"):
@@ -643,11 +622,11 @@ class Hub:
                             self.log(f"upgrade {n}: replacing {old['_app']} ({old.get('version')} -> {item.get('version')}), stopped {killed} process(es)")
                         # 旧版挪进 previous.noindex 当回退；旧 .app 名字不同也一起挪（审查 2026-10-17）
                         app = download.install_app_zip(os.path.join(staged, zips[0]), dest, expect_bundle_id=item.get("bundle_id"),
-                                                       register=not self.lab, verify=not self.lab,
+                                                       register=self.real_data, verify=not self.lab or self.real_data,
                                                        backup_dir=os.path.join(self.env_dir, "previous.noindex") if old else None,
                                                        replace=old["_app"] if old else None)
                     shutil.rmtree(staged, ignore_errors=True)
-                    if kind != "engine" and old and not self.lab:
+                    if kind != "engine" and old and self.real_data:
                         stale = accessories.after_swap(app, os.path.join(self.env_dir, "previous.noindex", os.path.basename(old["_app"])), im)
                         self.log(f"upgrade {n}: stopped {stale} process(es) still running the replaced copy" + ("; relaunched input method" if im else ""))
                     d["installed"] = app
@@ -672,8 +651,8 @@ class Hub:
             # 换用刚装上的引擎包：新的 Engine 对象，下面的重启用它。只看这一批：之前那批引擎的 done 一直留在 downloads 里，
             # 不看 names 的话之后每装一个应用都会停掉引擎、又不重启，守护线程按崩溃记，三次熔断（luoke-core#34）
             self.engine_app = self.installed_engine_app()
-            self.engine_python = os.path.join(self.engine_app, self.recipe.engine["python"])
-            self.engine_site = os.path.join(self.engine_app, self.recipe.engine["site"])
+            self.engine_python = os.path.join(self.engine_app, self.recipe.engine.get("python", ""))
+            self.engine_site = os.path.join(self.engine_app, self.recipe.engine.get("site", ""))
             try:
                 self.engine.stop()
             except Exception:  # noqa: BLE001
@@ -733,6 +712,15 @@ class Hub:
             self.smoke_failed = rec["error"]
             self.state["smoke"] = rec
             self._save_state()
+            return rec
+        if self.dispatcher.no_large_model():
+            # 在用电池、设置是不运行大模型：不算失败，接上电源再做
+            rec["deferred"] = True
+            rec["error"] = NO_LARGE_MODEL_MSG
+            self.smoke_failed = None
+            self.state["smoke"] = rec
+            self._save_state()
+            self.log("smoke check deferred: on battery, large model off by setting")
             return rec
         if not self.fits_memory(self.base_name):
             # 这台机器现在被别的引擎占着（例如用户自己的 oMLX 加载着大模型）：不算失败，先不做，空出来再做
@@ -801,15 +789,15 @@ class Hub:
 
     def prune_old_engines(self) -> list:
         """新引擎冒烟检查过了：engines/ 里别的版本删掉（每份约 1.6 GB，换一次引擎留一份，10-27 定进 beta1.1）。
-        只在发布版、正跑着清单装的引擎包时做；开发版和实验室实例不动。旧版主控（previous.noindex）缺引擎时照常重新下载。"""
-        cur = self.installed_engine_app()
+        只在发布版、正跑着清单装的引擎包或打进螺壳的引擎时做；开发版和实验室实例不动。旧版主控（previous.noindex）缺引擎时照常重新下载。"""
+        cur = self.bundled_engine() or self.installed_engine_app()
         if self.lab or not self.release_path or not os.path.exists(self.release_path) or not cur:
             return []
         root = os.path.join(self.env_dir, "engines")
         removed = []
         for name in sorted(os.listdir(root)):
             p = os.path.join(root, name)
-            if name == self.recipe.engine["version"] or not name.startswith("omlx-") or os.path.islink(p) or not os.path.isdir(p):
+            if name == self.recipe.engine["version"] or not is_engine_version(name) or os.path.islink(p) or not os.path.isdir(p):
                 continue
             shutil.rmtree(p, ignore_errors=True)
             removed.append(name)
@@ -931,7 +919,7 @@ class Hub:
     # ---- 生命周期 ------------------------------------------------------------------------------------
     def start(self) -> None:
         self.log(f"hub {__version__} tier={self.tier_name} mem={self.mem_gb:.0f}GB base={self.base_name} recipe={self.recipe.version}")
-        if not self.lab:
+        if self.real_data:
             try:   # 螺壳记忆并进主控（V1 §6）：旧的单独 螺壳记忆.app 迁走；mem.db 不动
                 if accessories.migrate_old_memory_app(log=self.log):
                     self.manifests = self.scan_accessories()
@@ -985,7 +973,10 @@ class Hub:
             self.model_cv.notify_all()
 
     def load_base(self) -> float:
-        """装底座（会先卸掉独占的用户模型），再把引擎的天花板还原成本档的预算（独占用户模型时放大过）。"""
+        """装底座（会先卸掉独占的用户模型），再把引擎的天花板还原成本档的预算（独占用户模型时放大过）。
+        在用电池、设置是「不运行大模型」时不装（预热、换回底座、本机检查都走这里）。"""
+        if self.dispatcher.no_large_model():
+            raise EngineError(NO_LARGE_MODEL_MSG)
         secs = self.engine.load(self.base_id)
         self.apply_budget()
         return secs
@@ -1037,7 +1028,54 @@ class Hub:
         day["requests"] += 1
         for k in ("prompt_tokens", "completion_tokens"):
             day[k] += int((usage or {}).get(k) or 0)
+        self.count_output(usage, save=False)
         self._save_state()
+
+    # ---- 生成了多少 token（右边栏「今天」和「这台 Mac 累计」，2026-11-12 和 luoke-agent 商定）--------------------
+    # 只记生成出来的（completion）：各应用的生成任务（/v1/tasks/<任务>/chat）和本机接口。不记输入法的续写（每敲一个键 k 个分支
+    # 各几个 token，会把数字撑大，用户也不觉得那是「生成」）、打分、嵌入、主控自己的试跑和预热，也不记输入的 token。
+    # 从加上这个的那一版开始记：state.json 的 output_tokens = {"since": 开始记的日期, "total": 累计, "days": {日期: 当天}}，
+    # 日期按本地时间，days 只留 30 天。
+
+    def count_output(self, usage: Optional[dict], save: bool = True) -> None:
+        n = int((usage or {}).get("completion_tokens") or 0)
+        if n <= 0:
+            return
+        today = time.strftime("%Y-%m-%d")
+        o = self.state.setdefault("output_tokens", {"since": today, "total": 0, "days": {}})
+        o["total"] = int(o.get("total") or 0) + n
+        days = o.setdefault("days", {})
+        days[today] = int(days.get(today) or 0) + n
+        cutoff = time.strftime("%Y-%m-%d", time.localtime(time.time() - 30 * 86400))
+        for d in [k for k in days if k < cutoff]:
+            days.pop(d, None)
+        if save:
+            self._save_state()
+
+    def output_status(self) -> dict:
+        """{"today", "total", "since"}：since 是开始记的日期（YYYY-MM-DD），还没记过是 None"""
+        o = self.state.get("output_tokens") or {}
+        return {"today": int((o.get("days") or {}).get(time.strftime("%Y-%m-%d")) or 0), "total": int(o.get("total") or 0),
+                "since": o.get("since")}
+
+    def queue_status(self) -> dict:
+        """右边栏的任务队列（2026-11-12 和 luoke-agent 商定，第一版只用主控现在就有的）。主控不排请求的队：后台请求要么接、
+        要么答 busy 让配件自己再来，所以「排着的」只有清单里登记的空闲任务。
+        running：正在用模型的——后台生成请求（配件、任务名、按估计时间算的进度）、空闲任务、本机接口的请求；
+        queued：没在跑的空闲任务，按主控会先起哪个排好，各带卡在什么条件上（jobs.IdleJobs.queue）。"""
+        running = []
+        job = self.dispatcher.job
+        if job is not None:
+            est = max(float(job.est_total_secs or 0), 1.0)
+            running.append({"id": f"request:{job.accessory or ''}:{job.task}", "tool": job.accessory, "name": job.task,
+                            "kind": "request", "started": job.started, "fraction": round(min(job.progress_secs / est, 0.99), 2)})
+        r = self.jobs.running
+        if r is not None:
+            running.append({"id": r.spec["key"], "tool": r.spec["accessory"], "name": r.spec["name"], "title": r.spec.get("title"),
+                            "kind": "job", "started": r.started})
+        for a in list(self.endpoint_active.values()):
+            running.append({"id": "endpoint", "tool": None, "name": a["model"], "kind": "endpoint", "started": a["started"]})
+        return {"running": running, "queued": self.jobs.queue(self.enabled_manifests())}
 
     def endpoint_chat(self, handler, body: dict) -> None:
         """端点的一条 chat/completions。算"用户在等"：打断后台，等手上用别的模型的请求做完，换模型（放不下答 507），转给引擎。"""
@@ -1045,6 +1083,8 @@ class Hub:
         t0 = time.time()
         if self.phase != "running" or not self.engine.serving():
             return handler._err(503, "not_ready", "螺壳还没准备好")
+        if self.dispatcher.no_large_model():
+            return handler._err(503, "needs_user", NO_LARGE_MODEL_MSG)
         if name.startswith(endpoint_mod.USER_PREFIX):
             m = self.user_models.get(name[len(endpoint_mod.USER_PREFIX):])
             if not m:
@@ -1107,11 +1147,13 @@ class Hub:
             if stream:
                 payload["stream_options"] = dict(payload.get("stream_options") or {}, include_usage=True)
             t_gen = time.time()
+            self.endpoint_active[threading.get_ident()] = {"model": name, "started": t_gen}
             info = endpoint_mod.forward(self.engine, payload, handler, stream, cancel)
             gen_secs = time.time() - t_gen
             usage = info.get("usage")
             outcome = info.get("error") or (f"status_{info['status']}" if info.get("status") != 200 else "ok")
         finally:
+            self.endpoint_active.pop(threading.get_ident(), None)
             if self.is_user_model(model_id):
                 self.user_model_last_use = time.time()
             if alongside:
@@ -1179,6 +1221,7 @@ class Hub:
                     if job:
                         self.log(f"background interrupted: {','.join(reasons)}")
                 self._idle_unload()
+                self._battery_unload()
                 self._expire_asr_sessions()
                 self._retry_smoke()
                 self._probe_scorers()
@@ -1197,7 +1240,7 @@ class Hub:
         if time.time() - getattr(self, "_last_smoke_try", 0) < 300:
             return
         self._last_smoke_try = time.time()
-        if self.base_name and self.fits_memory(self.base_name):
+        if self.base_name and self.fits_memory(self.base_name) and not self.dispatcher.no_large_model():
             self.log("retrying deferred smoke check")
             self.smoke_check(force=True)
 
@@ -1271,6 +1314,17 @@ class Hub:
             self.engine.unload()
             self.log(f"base unloaded (idle {idle:.0f}s, resident={self.tier.get('base_resident')})")
 
+    def _battery_unload(self) -> None:
+        """在用电池、设置是「不运行大模型」：底座和端点的用户模型都卸掉（手上有请求的做完再卸）"""
+        if not self.dispatcher.no_large_model() or self.dispatcher.job is not None:
+            return
+        for x in list(self.engine.extras):
+            if not self.extra_users.get(x) and self.engine.unload(x):
+                self.log(f"model {x} unloaded: on battery, large model off by setting")
+        loaded = self.engine.loaded
+        if loaded and not self.model_users.get(loaded) and self.engine.unload(loaded):
+            self.log(f"model {loaded} unloaded: on battery, large model off by setting")
+
     def _reload_base(self) -> None:
         if not self.acquire_model(self.base_id, timeout=5):
             return
@@ -1288,22 +1342,19 @@ class Hub:
             raise BadRequest("unknown_accessory", "缺 X-Luoke-Accessory: <配件标识>/<版本>")
         name, version = header.split("/", 1)
         if not self.version_accepted(name, version):
-            raise BadRequest("unknown_accessory", f"{name}/{version} 不在已验证版本里")
+            raise BadRequest("unknown_accessory", f"螺壳不认得 {name}")
+        need = self.core_needed(name)
+        if need:
+            raise BadRequest("core_too_old", f"{name} 要螺壳主控 {need} 以上（现在是 {__version__}）：先更新螺壳")
         if task is not None:
             t = self.recipe.task(task)
             if not t:
                 raise BadRequest("task_unavailable", f"没有任务 {task}", )
             if t["accessory"] != name:
                 raise BadRequest("unknown_accessory", f"任务 {task} 不归 {name}")
-            past = None if self.lab or self.recipe.version_verified(name, version) or self.locally_allowed(name, version) \
-                else self.history_entry(name, version)
-            if past is not None and task not in past.get("tasks", []):
-                raise BadRequest("task_unavailable", f"{task} 要{name}升级到这一版螺壳验证过的版本才能用（{version} 当时在 "
-                                                     f"{past.get('release') or '上一版'}里没验证过这一项），到「应用」里升级就好")
         return name, version
 
-    # ---- 本机放行（试用期，2026-10-17 定）：内部版 / 本机版主控上，项目会话把自己签名公证过的新版配件追加进来，不用等下一版主控 ----
-    LOCAL_ALLOW = "local-verified.json"
+    # ---- 发布号：内部版 / 本机版主控上多几条试用的路（提前跑空闲任务） ----
 
     def release_tag(self) -> Optional[str]:
         if self._release_tag is None:
@@ -1314,40 +1365,9 @@ class Hub:
                 self._release_tag = ""
         return self._release_tag or None
 
-    def local_allow_enabled(self) -> bool:
-        """只有内部版（internal-*）和本机版（local-*）主控认本机放行；beta 和公开发布的校验一点不放松。"""
+    def trial_build(self) -> bool:
+        """内部版（internal-*）和本机版（local-*）主控：多几条试用的路（提前跑空闲任务）；beta 和公开发布不算。"""
         return not self.lab and bool(re.match(r"(internal|local)-", self.release_tag() or ""))
-
-    def local_allow_list(self) -> list:
-        """local-verified.json 里还有效的条目：配件得已经在配方里（只放行新版本，不放行新配件），版本不在配方里（在了就不算绕过）。"""
-        if not self.local_allow_enabled():
-            return []
-        p = os.path.join(self.env_dir, self.LOCAL_ALLOW)
-        try:
-            mtime = os.stat(p).st_mtime
-        except OSError:
-            self._local_allow = (None, [])
-            return []
-        if self._local_allow[0] != mtime:
-            try:
-                with open(p, encoding="utf-8") as f:
-                    raw = json.load(f).get("allowed") or []
-            except (OSError, ValueError) as e:
-                self.log(f"local allow: {p} unreadable ({e}), ignored")
-                raw = []
-            ok = [e for e in raw if isinstance(e, dict) and isinstance(e.get("accessory"), str) and isinstance(e.get("version"), str)
-                  and e["accessory"] in self.recipe.verified and e["accessory"] != "luoke-core"
-                  and not self.recipe.version_verified(e["accessory"], e["version"])]
-            self._local_allow = (mtime, ok)
-            self.log("local allow: " + ("; ".join(f"{e['accessory']} {e['version']} (by {e.get('by', '?')}: {e.get('reason', '')})" for e in ok) or "none"))
-        return self._local_allow[1]
-
-    def locally_allowed(self, name: str, version: str) -> bool:
-        hit = any(e["accessory"] == name and e["version"] == version for e in self.local_allow_list())
-        if hit and (name, version) not in self._local_allow_used:
-            self._local_allow_used.add((name, version))
-            self.log(f"local allow used: {name}/{version} accepted without release evidence")
-        return hit
 
     def model_dir_of(self, model_name: str) -> str:
         return os.path.join(self.model_dir, self.recipe.model(model_name)["dir"])
@@ -1415,7 +1435,7 @@ class Hub:
                 tasks[name]["vector_space"] = self.recipe.vector_space(name, self.tier_name)
         out = {"contract": CONTRACT, "hub_version": __version__, "tier": self.tier_name, "tasks_version": self.tasks_version(),
                "background": {"state": state, "reasons": reasons}, "tasks": tasks}
-        lib = None if self.lab else accessories.bundled_memory_lib()
+        lib = accessories.bundled_memory_lib() if self.real_data else None
         if lib:
             out["luoke_mem"] = lib      # 配件用主控里这份记忆库（10-19 定）；每次新起进程时问一次，主控升级后路径会变
         return out
@@ -1525,17 +1545,19 @@ class Hub:
             if w is None:
                 params = self.recipe.params(task, self.tier_name)
                 cache_mb = self.recipe.model(model).get("cache_mb")   # MLX 缓冲上限，见 score_worker.py
+                native = native_engine(self.engine_app)             # 引擎包是螺壳引擎：工作进程起它的子命令
                 if self.recipe.task(task)["kind"] == "transcribe":
                     w = TranscribeWorker(self.engine_python, self.engine_site, self.model_dir_of(model), self.log,
-                                         cache_mb=int(cache_mb if cache_mb is not None else 512))
+                                         cache_mb=int(cache_mb if cache_mb is not None else 512), native=native)
                 elif self.recipe.task(task)["kind"] == "embed":
                     w = EmbedWorker(self.engine_python, self.engine_site, self.model_dir_of(model), self.log,
                                     cache_mb=int(cache_mb if cache_mb is not None else 512),
-                                    media=media_kinds(params) != set())     # 任务参数说收图片 / 声音才连视觉、声音一起加载
+                                    media=media_kinds(params) != set(),     # 任务参数说收图片 / 声音才连视觉、声音一起加载
+                                    native=native)
                 else:
                     w = ScoreWorker(self.engine_python, self.engine_site, self.model_dir_of(model),
                                     int(params.get("prefix_snapshots", 16)), self.log,
-                                    cache_mb=int(cache_mb if cache_mb is not None else 1024))
+                                    cache_mb=int(cache_mb if cache_mb is not None else 1024), native=native)
                 self.scorers[model] = w
             started = w.state in ("stopped", "failed") and w.failures < 3
             if started:
@@ -1978,6 +2000,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _body(self) -> dict:
         n = int(self.headers.get("Content-Length") or 0)
+        # 不跟引擎的上限（螺壳引擎 8 MB）：生成请求只把文字交给引擎、受任务的 max_chars 管；转写、嵌入的音频和图片交给工作进程，不经过引擎
         if n > 32 * 1024 * 1024:
             raise BadRequest("invalid_request", "请求体超过 32 MB")
         raw = self.rfile.read(n) if n else b""
@@ -2127,7 +2150,7 @@ class Handler(BaseHTTPRequestHandler):
             if method == "POST" and path == "/jobs/run":
                 # 试用期（2026-10-17）：内部版 / 本机版上让某个空闲任务在下一个安静时刻就跑，不等两小时间隔；
                 # 安静、电源、后台暂停这些条件照旧。beta 和公开发布没有这条路
-                if not (hub.lab or hub.local_allow_enabled()):
+                if not (hub.lab or hub.trial_build()):
                     raise BadRequest("unsupported", "只有内部版和本机版能提前跑空闲任务")
                 b = self._body()
                 job = b.get("job") if isinstance(b, dict) else None
@@ -2236,22 +2259,18 @@ class Handler(BaseHTTPRequestHandler):
                 if method == "GET" and path == "/accessories/previous":
                     out = []
                     for c in accessories.rollback_candidates(hub.manifests, previous):
-                        ok = hub.recipe.version_verified(c["accessory"], c["previous"]) or hub.locally_allowed(c["accessory"], c["previous"])
-                        past = (hub._history().get(c["accessory"]) or {}).get(c["previous"])
+                        # 配件版本不再核：上一版都换得回去（verified 留着给旧的界面读，一律 true）
                         out.append({k: c[k] for k in ("accessory", "name", "type", "bundle_id", "current", "previous")} |
-                                   {"verified": bool(ok or past), "release": (past or {}).get("release")})
+                                   {"verified": True, "release": None})
                     return self._json(200, {"accessories": out})
                 if method == "POST" and path == "/accessories/rollback":   # POST /accessories/previous 不回滚（core#129）
                     target = str(self._body().get("accessory") or "")
                     c = next((x for x in accessories.rollback_candidates(hub.manifests, previous) if x["accessory"] == target), None)
                     if not c:
                         raise BadRequest("unsupported", f"{target} 没有可以换回的上一版")
-                    if not (hub.lab or hub.recipe.version_verified(target, c["previous"]) or hub.locally_allowed(target, c["previous"])
-                            or (hub._history().get(target) or {}).get(c["previous"])):
-                        raise BadRequest("unsupported", f"{c['name']} {c['previous']} 在这台 Mac 上没有验证记录，换回去螺壳也用不了它")
                     hub.jobs.stop_accessory(target)
                     hub.release_accessory(target)
-                    r = accessories.rollback(hub.manifests, target, previous, verify=not hub.lab)
+                    r = accessories.rollback(hub.manifests, target, previous, verify=not hub.lab or hub.real_data)
                     if r.get("code"):
                         raise BadRequest(r["code"], r.get("error") or r["code"])
                     hub.manifests = hub.scan_accessories()
@@ -2284,7 +2303,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, r)
             self._error("invalid_request", f"没有这个端点：{method} {path}")
         except BadRequest as e:
-            self._error(e.code, e.message, e.retry_after, **dict(getattr(e, "extra", {}) or {}, **({"occupants": hub.occupants()} if e.code == "needs_user" else {})))
+            extra = dict(getattr(e, "extra", {}) or {})
+            if e.code == "needs_user" and extra.get("reason") != "battery_no_large_model":    # 电池那条不是谁占着内存
+                extra["occupants"] = hub.occupants()
+            self._error(e.code, e.message, e.retry_after, **extra)
         except Exception as e:  # noqa: BLE001
             hub.log(f"handler error: {type(e).__name__}: {e}")
             try:
@@ -2310,13 +2332,19 @@ class Handler(BaseHTTPRequestHandler):
     def peer_is_hub_app(self, allow_cli: bool = False) -> bool:
         """对端是不是主控本体（菜单栏 app）：本体是主控进程的父进程，用 LOCAL_PEERPID 核对，不只信请求头里自报的身份
         （2026-10-16 审查：配件可以自称 luoke-core）。allow_cli：主控自带的命令行（app/Resources/luoke：用主控同一个 Python 跑
-        `-m luoke_core.cli`）也算，按内核报的可执行文件路径和参数核对。实验室 / 开发时主控不是本体拉起的，放行。"""
-        if self.hub.lab or os.getppid() == 1:
+        `-m luoke_core.cli`）也算，按内核报的可执行文件路径和参数核对。普通的实验室 / 开发时主控不是本体拉起的，放行；开发实例
+        （--real-data）由它的本体拉起、占着装着的螺壳的 socket，和正式版一样核。
+        父进程是 1（本体没了，主控成了孤儿，--parent-watch 半秒内自己退出）时谁都不算：之前这时也放行，同账户的程序先结束本体、
+        赶在主控退出前连上来，就能冒充本体拿端点密钥（beta 2 安全审查 M4）。正式版和开发实例的主控都是本体带 --parent-watch 起的。"""
+        if self.hub.lab and not self.hub.real_data:
             return True
+        parent = os.getppid()
+        if parent == 1:
+            return False
         pid = self._peer_pid()
         if pid is None:
             return False
-        if pid == os.getppid():
+        if pid == parent:
             return True
         if not allow_cli:
             return False
@@ -2340,7 +2368,8 @@ class Handler(BaseHTTPRequestHandler):
                 "engine_missing": hub.engine_missing(), "engine_error": hub.engine_error,
                 "resident": hub.state.get("resident", {}), "exited": hub.state.get("exited", {}),
                 "downloads": hub.downloads, "needed_downloads": hub.needed_downloads(), "jobs": hub.jobs.status(),
-                "release": hub.release_tag(), "local_allowed": hub.local_allow_list(), "endpoint": hub.endpoint_status(),
+                "release": hub.release_tag(), "endpoint": hub.endpoint_status(),
+                "queue": hub.queue_status(), "output": hub.output_status(),
                 "uptime": round(time.time() - hub.started)}
 
     def _load_base_quietly(self) -> None:
@@ -2396,10 +2425,13 @@ class Handler(BaseHTTPRequestHandler):
                                  **precise_wait(d, reason))
             cancel = threading.Event()
             job = d.start_background(task, est + (0 if hub.engine.loaded == hub.base_id else model_meta.get("load_secs", 15)), cancel.set)
+            job.accessory = acc_name
         else:
             interrupted = d.user_waiting_arrived()
             if interrupted:
                 hub.log(f"background {interrupted.task} interrupted for user-waiting {task}")
+            if d.no_large_model():
+                raise BadRequest("needs_user", NO_LARGE_MODEL_MSG, 60, reason="battery_no_large_model")
             if not fits:
                 raise BadRequest("needs_user", "内存不够加载底座", 60)
             cancel = threading.Event()
@@ -2519,6 +2551,7 @@ class Handler(BaseHTTPRequestHandler):
                     self._event("luoke.error", {"code": "engine_failed", "message": f"引擎出错：{info['error']}", "retry_after": 30})
             hub.last_base_use = time.time()
             usage = info.get("usage") or {}
+            hub.count_output(usage)
             hub.log(f"chat task={task} prio={priority} combo={st['combo']} prompt_tokens={usage.get('prompt_tokens')} "
                     f"completion_tokens={usage.get('completion_tokens')} secs={time.time() - t0:.1f} outcome={outcome}")
         finally:
@@ -2546,6 +2579,19 @@ class UnixServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
     # 默认 listen 队列只有 5：macOS 上 Unix socket 的队列满了不是等着、而是直接拒绝连接。
     # 11-03 16 GB 测试机上 8 条请求同时到，有 2 条连都没连上（ConnectionRefusedError），配件当成主控不在
     request_queue_size = 128
+
+
+def hub_answering(socket_path: str) -> bool:
+    """这个 socket 上已经有主控在应答（同一个环境目录里另一个主控开着）。连不上（没有、或者是上次留下的文件）不算。"""
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        s.settimeout(2)
+        s.connect(socket_path)
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
 
 
 def serve(hub: Hub, socket_path: str) -> UnixServer:

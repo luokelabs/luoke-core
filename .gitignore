@@ -3,5 +3,7 @@ CLAUDE.local.md
 app/.build/
 app/build/
 app/build.noindex/
+app/build-*.noindex/
 build/
 build.noindex/
+__pycache__/

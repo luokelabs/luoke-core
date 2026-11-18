@@ -9,7 +9,7 @@ let agentSrc: String? = Context.environment["LUOKE_AGENT_SRC"].flatMap { $0.isEm
 
 let package = Package(
     name: "LuokeCore",
-    platforms: [.macOS(.v14)],
+    platforms: [.macOS("26.2")],   // 螺壳最低 macOS 26.2：引擎和 agent 的窗口都要这个版本
     dependencies: agentSrc.map { [.package(path: "\($0)/window")] } ?? [],
     targets: [
         .executableTarget(

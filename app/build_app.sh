@@ -5,8 +5,12 @@
 #   LUOKE_AGENT_SRC（luoke-agent：主窗口和 agent 核心，luoke-core#68；没设用并排的 ../luoke-agent，设成空的不带）、
 #   LUOKE_SEARCH_SRC（luoke-search：放进 Contents/Helpers；没设不带，不退回并排的工作区）、
 #   LUOKE_SCAN_SRC（luoke-scan：程序放进 Contents/Helpers、库放 Contents/Frameworks、数据放 Contents/Resources/scan；没设不带；
-#   LUOKE_SCAN_TOOLS 是带 ClamAV、YARA 的 Homebrew 前缀，LUOKE_RELEASE_TEAM 编进扫描的团队标识，发布脚本给）、
-#   LUOKE_MAIL_SRC（luoke-mail：代码进自带 Python 的 site-packages，清单进 Resources/mail；没设不带，不退回并排的工作区）
+#   LUOKE_SCAN_TOOLS 是带 ClamAV、YARA 的 Homebrew 前缀，LUOKE_RELEASE_TEAM 编进扫描的团队标识，发布脚本给；
+#   或者 LUOKE_SCAN_PKG：扫描 release 里打好的 luoke-scan-<版本>-macos-arm64.tar.gz，放法一样，不用扫描的开发环境）、
+#   LUOKE_MAIL_SRC（luoke-mail：代码进自带 Python 的 site-packages，清单进 Resources/mail；没设不带，不退回并排的工作区）、
+#   LUOKE_ENGINE_PKG（螺壳引擎：luoke-engine 的 release 里的 luoke-engine-<版本>-macos-arm64.tar.gz，或解开的目录；程序放进
+#   Contents/Helpers/luoke-engine、许可放 Contents/Resources/licenses/luoke-engine，版本写进 Info.plist 的 LuokeEngineVersion；
+#   版本从包名读，解开的目录要另给 LUOKE_ENGINE_VERSION；没设不带）
 # 自带 Python 和 luoke_core 的放法与 tools/package_python_app.py 一致（Resources/python，包装进 site-packages，预编译）。
 set -eu
 set -o pipefail     # 下面 `swift build | tail`：编译失败也要停下（10-23 发现：之前取的是 tail 的退出码，编不过照样打包，用的是 .build 里旧的二进制）
@@ -14,12 +18,18 @@ here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/.." && pwd)
 out=${1:-"$here/build.noindex"}
 case "$out" in /*) ;; *) out="$(pwd)/$out" ;; esac     # 相对路径按调用时的目录算，别跟着下面的 cd 跑偏
-# 默认是开发版的身份（10-23 定）：bundle id ai.luoke.core.dev、名字「螺壳（开发）」、数据在 luoke-core-dev。
+# 默认是开发版的身份（10-23 定）：bundle id ai.luoke.core.dev、名字「螺壳（开发）」、数据和正式版同一份（luoke-core）。
 # 开发版是 ad-hoc 签名、没有开发者团队，系统对它的授权记录（例如 App Management 的拒绝）会按 bundle id 存下来；
 # 和正式版共用 ai.luoke.core 时，记录落到了正式版头上（10-22 开发机上升级被挡、报"已损坏"）。
 # 正式版由 tools/release.py 传 LUOKE_BUNDLE_ID=ai.luoke.core（2026-10-13 定，发布后不改）；实验室构建传 ai.luoke.core.lab
 bundle_id=${LUOKE_BUNDLE_ID:-ai.luoke.core.dev}
-case "$bundle_id" in *.dev) name="螺壳（开发）" ;; *) name="螺壳" ;; esac
+# 开发实例 ai.luoke.core.<名字>.lab（tools/dev_app.sh，docs/dev-instance.md）叫「螺壳（<名字>）」，和 HubProcess.swift 的 AppInfo.appName 一致
+case "$bundle_id" in
+  *.dev) name="螺壳（开发）" ;;
+  ai.luoke.core.lab) name="螺壳" ;;
+  ai.luoke.core.*.lab) inst=${bundle_id#ai.luoke.core.}; name="螺壳（${inst%.lab}）" ;;
+  *) name="螺壳" ;;
+esac
 version=$(/usr/bin/python3 -c "import sys; sys.path.insert(0, '$root'); import luoke_core; print(luoke_core.__version__)")
 # Finder「显示简介」看到的版本（CFBundleShortVersionString）写发布号（beta1、internal-1027；10-27），没有发布清单的开发版写主控版本号；
 # 主控版本号放 CFBundleVersion，程序里读它（HubProcess.version）
@@ -105,7 +115,9 @@ if [ -n "$agent_src" ]; then
   # 本体用 python3 -B -E -s -m luoke_agent serve 起它（AgentCore.swift），工作目录就是这里
   dst="$app/Contents/Resources/agent"
   mkdir -p "$dst"
-  rsync -a --prune-empty-dirs --exclude='__pycache__/' --include='*/' --include='*.py' --include='*.html' --exclude='*' \
+  # 提示词文件（luoke_agent/prompts/ 下的 .txt、.json，顶层 ADR 0019）跟着包走：漏了它们，agent 的模型任务就没有提示词
+  rsync -a --prune-empty-dirs --exclude='__pycache__/' --include='*/' --include='*.py' --include='*.html' \
+    --include='prompts/*.txt' --include='prompts/*.json' --exclude='*' \
     "$agent_src/luoke_agent" "$agent_src/vendor" "$dst/"
   cp "$agent_src/vendor/luoke_mem.VERSION" "$dst/vendor/"
   "$app/Contents/Resources/python/bin/python3" -B -m compileall -q -j 0 "$dst" >/dev/null
@@ -155,13 +167,26 @@ fi
 # Resources、Frameworks 现在放；Helpers 里的程序在最后签名时才放（--deep 会把它们重签，丢掉 root 那一步和扫描靠着认它们的标识）。
 # Helpers、Frameworks 里已经有同名的就停，不盖掉别人的
 scan_out=""
-if [ -n "${LUOKE_SCAN_SRC:-}" ]; then
+if [ -n "${LUOKE_SCAN_PKG:-}" ]; then
+  # 扫描 release 里打好的：和 package_app.py 打出的 luoke-scan/ 一样的放法，下面照样收
+  if [ -f "$LUOKE_SCAN_PKG.sha256" ]; then
+    want=$(awk '{print $1}' "$LUOKE_SCAN_PKG.sha256")
+    have=$(shasum -a 256 "$LUOKE_SCAN_PKG" | awk '{print $1}')
+    [ "$want" = "$have" ] || { echo "扫描的包和它的 .sha256 对不上：$LUOKE_SCAN_PKG" >&2; exit 1; }
+  fi
+  scan_out=$(mktemp -d)
+  tar -xzf "$LUOKE_SCAN_PKG" -C "$scan_out"
+  [ -f "$scan_out/luoke-scan/Helpers/luoke-scan" ] || { echo "扫描的包里没有 luoke-scan/Helpers/luoke-scan：$LUOKE_SCAN_PKG" >&2; exit 1; }
+  LUOKE_SCAN_SRC=$LUOKE_SCAN_PKG
+elif [ -n "${LUOKE_SCAN_SRC:-}" ]; then
   [ -f "$LUOKE_SCAN_SRC/scripts/package_app.py" ] || { echo "LUOKE_SCAN_SRC（${LUOKE_SCAN_SRC}）里没有 scripts/package_app.py：这个提交还不能打进螺壳" >&2; exit 1; }
   scan_out=$(mktemp -d)
   if ! /usr/bin/python3 -I "$LUOKE_SCAN_SRC/scripts/package_app.py" --out "$scan_out" --tools-from "${LUOKE_SCAN_TOOLS:-/opt/homebrew}" > "$scan_out/build.log" 2>&1; then
     tail -20 "$scan_out/build.log" >&2
     echo "螺壳扫描没编成，或者没核对过（${LUOKE_SCAN_SRC}）" >&2; exit 1
   fi
+fi
+if [ -n "$scan_out" ]; then
   scan="$scan_out/luoke-scan"
   for f in "$scan"/Helpers/* "$scan"/Frameworks/*; do
     rel=${f#"$scan"/}
@@ -176,9 +201,45 @@ if [ -n "${LUOKE_SCAN_SRC:-}" ]; then
   export LUOKE_SCAN_VERSION
 fi
 
+# 螺壳引擎：一个可执行文件（着色器库嵌在里面），配方要的是这一版时主控直接用它，不下载引擎包（hub.py 的 bundled_engine）
+engine_dir=""
+engine_tmp=""
+if [ -n "${LUOKE_ENGINE_PKG:-}" ]; then
+  if [ -d "$LUOKE_ENGINE_PKG" ]; then
+    engine_dir=$LUOKE_ENGINE_PKG
+    [ -n "${LUOKE_ENGINE_VERSION:-}" ] || { echo "LUOKE_ENGINE_PKG 是目录时要给 LUOKE_ENGINE_VERSION" >&2; exit 1; }
+  else
+    case "$(basename "$LUOKE_ENGINE_PKG")" in
+      luoke-engine-*-macos-arm64.tar.gz) ;;
+      *) echo "LUOKE_ENGINE_PKG 要是 luoke-engine-<版本>-macos-arm64.tar.gz：$LUOKE_ENGINE_PKG" >&2; exit 1 ;;
+    esac
+    if [ -f "$LUOKE_ENGINE_PKG.sha256" ]; then
+      want=$(awk '{print $1}' "$LUOKE_ENGINE_PKG.sha256")
+      have=$(shasum -a 256 "$LUOKE_ENGINE_PKG" | awk '{print $1}')
+      [ "$want" = "$have" ] || { echo "螺壳引擎的包和它的 .sha256 对不上：$LUOKE_ENGINE_PKG" >&2; exit 1; }
+    fi
+    [ -n "${LUOKE_ENGINE_VERSION:-}" ] || { LUOKE_ENGINE_VERSION=$(basename "$LUOKE_ENGINE_PKG"); LUOKE_ENGINE_VERSION=${LUOKE_ENGINE_VERSION#luoke-engine-}; LUOKE_ENGINE_VERSION=${LUOKE_ENGINE_VERSION%-macos-arm64.tar.gz}; }
+    engine_tmp=$(mktemp -d)
+    engine_dir=$engine_tmp
+    tar -xzf "$LUOKE_ENGINE_PKG" -C "$engine_dir"
+    [ -f "$engine_dir/luoke-engine" ] || { inner=$(find "$engine_dir" -maxdepth 2 -name luoke-engine -type f | head -1); [ -n "$inner" ] && engine_dir=$(dirname "$inner"); }
+  fi
+  [ -f "$engine_dir/luoke-engine" ] && [ ! -L "$engine_dir/luoke-engine" ] || { echo "螺壳引擎的包里没有 luoke-engine：$LUOKE_ENGINE_PKG" >&2; exit 1; }
+  [ ! -e "$app/Contents/Helpers/luoke-engine" ] || { echo "螺壳.app 里已经有 Contents/Helpers/luoke-engine" >&2; exit 1; }
+  mkdir -p "$app/Contents/Resources/licenses/luoke-engine"
+  for f in LICENSE NOTICE THIRD-PARTY-PACKAGES.txt THIRD-PARTY-LICENSES.txt; do
+    [ -f "$engine_dir/$f" ] || { echo "螺壳引擎的包里少了 $f" >&2; exit 1; }
+    cp "$engine_dir/$f" "$app/Contents/Resources/licenses/luoke-engine/$f"
+  done
+  export LUOKE_ENGINE_VERSION
+fi
+
 # 应用图标：app/AppIcon.icns（或 LUOKE_ICON_FILE 指的 .icns）有就打进去（顶层 ADR 0008 修订：图标由 luoke-community 出稿、定）
 icon=${LUOKE_ICON_FILE:-$here/AppIcon.icns}
 if [ -f "$icon" ]; then cp "$icon" "$app/Contents/Resources/AppIcon.icns"; has_icon=1; else has_icon=0; fi
+# 最低 macOS 只在 tools/minos_check.py 的 LUOKE_MIN_MACOS 定（发布时 release.py 照它查）
+LUOKE_MIN_MACOS=$(/usr/bin/python3 -I -c 'import sys; sys.path.insert(0, sys.argv[1]); import minos_check; print(minos_check.LUOKE_MIN_MACOS)' "$root/tools") || exit 1
+export LUOKE_MIN_MACOS
 /usr/bin/python3 - "$app/Contents/Info.plist" "$bundle_id" "$name" "$version" "$has_icon" "$shown" <<'PY'
 import os, plistlib, sys
 dev = sys.argv[2].endswith(".dev")
@@ -187,7 +248,7 @@ plist = {
     "CFBundleDevelopmentRegion": "zh_CN", "CFBundleDisplayName": sys.argv[3], "CFBundleExecutable": "LuokeCore",
     "CFBundleIdentifier": sys.argv[2], "CFBundleInfoDictionaryVersion": "6.0", "CFBundleName": sys.argv[3],
     "CFBundlePackageType": "APPL", "CFBundleShortVersionString": sys.argv[6], "CFBundleVersion": sys.argv[4],
-    "LSMinimumSystemVersion": "14.0", "LSUIElement": True, "NSHighResolutionCapable": True,
+    "LSMinimumSystemVersion": os.environ["LUOKE_MIN_MACOS"], "LSUIElement": True, "NSHighResolutionCapable": True,
     "NSPrincipalClass": "NSApplication", "LuokeAccessory": "luoke-core", "LuokeContract": 1,
     # luoke://memory：各工具用它打开记忆界面（主控没在跑时系统会拉起主控）
     "CFBundleURLTypes": [{"CFBundleURLName": "ai.luoke.core.memory", "CFBundleURLSchemes": ["luoke"]}],
@@ -203,6 +264,9 @@ if os.environ.get("LUOKE_SEARCH_SRC"):
 if os.environ.get("LUOKE_SEARCH_VERSION"):
     # 和扫描一样：本体起 Helpers 里的 luoke-search 时和它签名里的版本比（螺壳的签名盖住这里）
     plist["LuokeSearchVersion"] = os.environ["LUOKE_SEARCH_VERSION"]
+if os.environ.get("LUOKE_ENGINE_VERSION"):
+    # 打进来的螺壳引擎是哪一版：本体交给主控，配方要的正是这一版才用它（Installer.swift 的 bundledEngine）
+    plist["LuokeEngineVersion"] = os.environ["LUOKE_ENGINE_VERSION"]
 if os.environ.get("LUOKE_SCAN_VERSION"):
     # 打进来的扫描是哪一版：本体起 Helpers 里的 luoke-scan 时和它签名里的版本比，换成旧版的签名程序起不来（螺壳的签名盖住这里）
     plist["LuokeScanVersion"] = os.environ["LUOKE_SCAN_VERSION"]
@@ -234,6 +298,16 @@ if [ -n "$scan_out" ]; then
   done
   rm -rf "$scan_out"
   echo "带上螺壳扫描 ${LUOKE_SCAN_VERSION}（${LUOKE_SCAN_SRC}）"
+fi
+if [ -n "$engine_dir" ]; then
+  mkdir -p "$app/Contents/Helpers"
+  cp "$engine_dir/luoke-engine" "$app/Contents/Helpers/luoke-engine"
+  chmod 755 "$app/Contents/Helpers/luoke-engine"
+  # 标识不是 ai.luoke.engine 就临时重签（swift 编出的程序带链接器的临时签名，标识是 luoke-engine）；正式签名由出版流程重签
+  [ "$(codesign -dv "$app/Contents/Helpers/luoke-engine" 2>&1 | sed -n 's/^Identifier=//p')" = ai.luoke.engine ] || codesign --force --sign - --identifier ai.luoke.engine "$app/Contents/Helpers/luoke-engine"
+  codesign --force --sign - "$app"          # 不带 --deep：引擎自己的签名留着
+  [ -z "$engine_tmp" ] || rm -rf "$engine_tmp"
+  echo "带上螺壳引擎 ${LUOKE_ENGINE_VERSION}（${LUOKE_ENGINE_PKG}）"
 fi
 codesign --verify --deep --strict "$app" && echo "已打包并 ad-hoc 签名：${app}（bundle id ${bundle_id}）"
 

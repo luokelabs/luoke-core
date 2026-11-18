@@ -41,11 +41,11 @@ enum SearchHelper: BundledApp {
 
     private static var environment: [String: String] {
         var env = ["PATH": "/usr/bin:/bin", "HOME": NSHomeDirectory()]
-        if developmentBuild {
+        if !AppInfo.usesRealData {
             // 不在环境目录下：agent 和卸载只认和编号绑在一起的几个位置（accessories.py 的 _own_data 改清单改到这里）
             env["LUOKE_SEARCH_HOME"] = NSHomeDirectory() + "/Library/Application Support/luoke-search"
-            env["LUOKE_HUB_SOCKET"] = AppInfo.socketPath
         }
+        if developmentBuild { env["LUOKE_HUB_SOCKET"] = AppInfo.socketPath }
         if let off = BundledApps.offValue(accessory) { env["LUOKE_PERMISSIONS_OFF"] = off }
         return env
     }
@@ -56,7 +56,11 @@ enum SearchHelper: BundledApp {
         p.wanted = wanted
         p.check = { HostedTool.check(accessory, pid: $0) }
         p.access = .luoke           // 读用户的文件要用螺壳的授权（完全磁盘访问、文件夹），不 disclaim（Spawn.swift）
-        p.onHostMessage = { m, round in if m["up"] != nil { gate.up(from: round) } else { play(m) } }
+        p.onHostMessage = { m, round in
+            if m["up"] != nil { gate.up(from: round) }
+            else if m["pick_folder"] as? Bool == true { SearchFolderPick.show() }      // 搜索页的「添加」（SearchFolderPick.swift）
+            else { play(m) }
+        }
         p.onExit = { token.clear() }              // 主线程上，总在下一个进程起之前（HelperProcess.launch 要等 process 为空）
         p.onHostRequest = { m, round in
             guard m["method"] as? String == "hello" else { return HelperProcess.answer(m) }

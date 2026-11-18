@@ -5,7 +5,7 @@
   不改用户的文件和设置；不进评测和支持台账，质量由用户自己负责。
 - 让路：请求算"用户在等"，排在后台前面，打字照旧最优先（打分是单独的进程）。引擎一次只留一个生成模型：要用户的模型就先打断后台、
   等手上用底座的请求做完、卸掉底座再加载；放不下答 507。用户模型闲了 USER_MODEL_IDLE_SECS 就卸掉，换回底座。
-- 安全（ADR 0013 保留的）：只听本机；Host 只认 127.0.0.1 / localhost；带 Origin 的（网页）一律拒绝；请求体有上限；
+- 安全（ADR 0013 保留的）：只听本机；Host 只认 127.0.0.1 / localhost；网页发的（带 Origin，或 Sec-Fetch-Site 不是 none）一律拒绝；请求体有上限；
   请求文字不落盘、不进日志（日志只记模型、token 数、耗时、结束原因）。
 """
 from __future__ import annotations
@@ -23,9 +23,10 @@ import threading
 import time
 from typing import Callable, Optional
 
+from .engine import engine_package
+
 DEFAULT_PORT = 17860            # 避开邮件助手页面的 8765、oMLX 的 8000、Ollama 的 11434、LM Studio 的 1234
 PORT_TRIES = 20                 # 默认的被占了，往后找空的
-MAX_BODY = 32 << 20
 USER_MODEL_IDLE_SECS = 300
 USER_PREFIX = "user/"
 REGISTRY = "user-models.json"
@@ -176,7 +177,7 @@ def _write_key(p: str, k: str) -> None:
 
 def load_key(env_dir: str, rotate: bool = False) -> str:
     """端点的密钥。第一次用时生成一把；用户可以自己设（set_key，任意字符串，例如沿用自己 oMLX 那把，工具的配置就不用改），
-    也可以设成空字符串：空就不校验密钥（10-19 定）。挡网页攻击的是 Host 校验和拒绝 Origin，那两道照旧。"""
+    也可以设成空字符串：空就不校验密钥（10-19 定）。挡网页攻击的是 Host 校验和拒绝网页发的请求，那两道照旧。"""
     p = os.path.join(env_dir, KEYFILE)
     if not rotate:
         try:
@@ -213,23 +214,32 @@ def make_handler(hub, key_ref: dict):
         def log_message(self, fmt, *args):
             pass                             # 不记请求行（路径不含内容，但也没必要）；元数据由 hub.endpoint_chat 记
 
-        def _json(self, code: int, obj: dict) -> None:
+        def _json(self, code: int, obj: dict, close: bool = False) -> None:
             body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
             self.send_response(code)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
+            self.send_header("X-Content-Type-Options", "nosniff")
+            if close:
+                self.send_header("Connection", "close")
+                self.close_connection = True
             self.end_headers()
             self.wfile.write(body)
 
         def _err(self, code: int, kind: str, msg: str) -> None:
-            self._json(code, {"error": {"type": kind, "message": msg}})
+            # 出错一律关连接：被拒的请求体没读，HTTP/1.1 下剩下的字节会被当成下一个请求，
+            # 网页把一个完整的请求写进请求体就能绕过 _guard（夹带的那个不带 Origin、Sec-Fetch-Site）
+            self._json(code, {"error": {"type": kind, "message": msg}}, close=True)
 
         def _guard(self) -> bool:
             host = (self.headers.get("Host") or "").split(":")[0].strip("[]")
             if host not in ("127.0.0.1", "localhost"):
                 self._err(403, "forbidden", "只认 127.0.0.1 / localhost")       # 防 DNS rebinding
                 return False
-            if self.headers.get("Origin"):
+            # 网页发的一律拒绝：带 Origin 的（网页里的 fetch、表单）；不带 Origin 的跨站 GET（img、script）Host 照样是 127.0.0.1，
+            # 浏览器给它们带 Sec-Fetch-Site（网页改不了这个头），密钥设成空时就只靠这一道挡。只看 Sec-Fetch-Site：
+            # Node 的 fetch 也带 Sec-Fetch-Mode（pi 这类工具），不能拿它认浏览器；地址栏自己打开的是 "none"，放行
+            if self.headers.get("Origin") or self.headers.get("Sec-Fetch-Site", "none") != "none":
                 self._err(403, "forbidden", "不接受网页里发来的请求")
                 return False
             auth = self.headers.get("Authorization") or ""
@@ -252,8 +262,11 @@ def make_handler(hub, key_ref: dict):
             if self.path.rstrip("/") != "/v1/chat/completions":
                 return self._err(404, "not_found", "没有这个接口（现在只有 /v1/chat/completions 和 /v1/models）")
             n = int(self.headers.get("Content-Length") or 0)
-            if n <= 0 or n > MAX_BODY:
-                return self._err(413, "too_large", "请求体为空或太大")
+            limit = engine_package(hub.recipe.engine["version"])["max_body"]     # 原样转给引擎：上限照引擎的，不让它读进来再被引擎拒
+            if n <= 0:
+                return self._err(400, "invalid_request", "请求体为空")
+            if n > limit:
+                return self._err(413, "too_large", f"请求体超过 {limit >> 20} MB")
             try:
                 body = json.loads(self.rfile.read(n))
             except ValueError:

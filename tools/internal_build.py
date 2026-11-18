@@ -8,7 +8,7 @@
         [--skip-remote]         只评本机那一档（排练用）
         [--no-publish]          不传 GitHub
     本机版（--tag local-MMDD-HHMM --prev <开发机上那版>）：试用期里修好的随时换到开发机上（2026-10-17 定）。
-        只评本机那一档里改过的任务，不上传；装好后主控认本机放行（tools/local_allow.py），设置里标"本机版"
+        只评本机那一档里改过的任务，不上传；装好后设置里标"本机版"
 
 步骤：
   freeze    luoke-core 的工作区必须正好在钉住的提交上、没有未提交的改动；三个配件在 build.noindex/src/<repo>（持久克隆）里 checkout 到钉住的提交
@@ -93,6 +93,10 @@ SCAN_TOOLS = os.environ.get("LUOKE_SCAN_TOOLS", "/opt/homebrew")        # 扫描
 # tag，11-05 审查）；都在出版机上按那个提交现编（release 上的 tar 包不用），打进主控 .app（0.3.0 起，见 BUNDLED）
 SCAN_RELEASES = f"{GITHUB_ORG}/luoke-scan{REPO_SUFFIX}"
 SCAN_FOLDER = "luoke-scan"
+# 螺壳引擎：配方的引擎版本是 luoke-engine-<版本> 时，按配方钉的提交（engine.commit，要正好是 tag v<版本>）冻结它的仓库、
+# 在出版机上现编（release.py build 的 --repo luoke-engine=…），打进主控 .app。release 上的包不用：证明不了是谁从哪个提交编的
+ENGINE_REPO = "luoke-engine"
+FROM_GITHUB = OPTIONAL + [ENGINE_REPO]     # 出版机上没有 TOP/<repo> 时直接从 GitHub 取的
 LUOKE_LABS = {"name": public_sync.EXPORT_NAME, "email": public_sync.EXPORT_EMAIL}      # luoke-releases 上的提交用公开仓库的身份
 CLAMAV_SRC = os.environ.get("LUOKE_CLAMAV_SRC", os.path.join(TOP, "third-party-src", "clamav"))   # 出版机上留着的 ClamAV 源码包和配方
 
@@ -149,6 +153,7 @@ class Timeline:
         self.data.pop("failed", None)       # 续跑：上一次停在哪儿不再算数，这一次停了会重新记
         self.data.pop("dropped", None)      # 没带的新配件也一样：续跑从钉版重来，这次还不带会重新记
         self.data.pop("kept", None)         # 沿用上一版的也一样
+        self.data.pop("unevaluated_engine", None)       # 引擎没评测的那一句：这一次 --no-eval 时重新算
         self.data.setdefault("runs", []).append(time.time())
         self.save()
         threading.Thread(target=self._sampler, daemon=True).start()
@@ -303,8 +308,8 @@ def freeze_one(repo: str, pin: str) -> str:
         if os.path.isdir(dst):
             shutil.rmtree(dst)     # 10-15 用 git archive 解出来的旧冻结副本，没有 .git，换成持久克隆
         top = os.path.join(TOP, repo)
-        run(["git", "clone", "-q", top if os.path.isdir(top) or repo not in OPTIONAL else remote_url(repo), dst], quiet=True)
-    elif repo in OPTIONAL and not os.path.isdir(os.path.join(TOP, repo)):
+        run(["git", "clone", "-q", top if os.path.isdir(top) or repo not in FROM_GITHUB else remote_url(repo), dst], quiet=True)
+    elif repo in FROM_GITHUB and not os.path.isdir(os.path.join(TOP, repo)):
         git(dst, "remote", "set-url", "origin", remote_url(repo))     # 改名以前从旧地址克隆的：旧地址以后是公开仓库
     git(dst, "fetch", "-q", "origin")
     if git(dst, "cat-file", "-t", pin, check=False) != "commit":
@@ -637,15 +642,24 @@ def check_bundled(repo: str, tag: str, pins: dict, src: dict, prev_pins: dict, o
     return built
 
 
-def note_unverified_search(tag: str, src: dict) -> None:
-    """配方阶段放过的（release.check_bundled_evidence）写进流程报告和发布说明：这一版的搜索只能按字词搜，不能只留在日志里。"""
-    search = src.get("luoke-search")
-    bad = release.bundled_unverified(search, Recipe.load(os.path.join(ROOT, "recipes", f"{tag}.json")).verified) if search else None
-    if bad:
-        note = f"luoke-search：{bad} 没有评测证据，这一版主控不给它算向量，只能按字词搜（看 luoke-search.embed 哪几档关着或没评成）"
-        TIMELINE.data.setdefault("kept", {})["luoke-search.embed"] = note
-        TIMELINE.save()
-        log(note)
+def note_unverified_bundled(tag: str, src: dict) -> None:
+    """配方阶段放过的（release.evidence_gate：打进主控的搜索、扫描、邮件助手、记忆这一版没有评测证据，内部版照出）写进流程报告和发布说明，
+    不能只留在日志里。写的是这一版实际怎样（release.unverified_effect）：一个版本的证据都没有的，任务全关；
+    有别的版本的证据的，任务照台账开着，但这一版没评测过。"""
+    verified = Recipe.load(os.path.join(ROOT, "recipes", f"{tag}.json")).verified
+    for repo, what in (("luoke-search", "luoke-search.embed"), ("luoke-scan", "luoke-scan 的任务"),
+                       ("luoke-mail", "luoke-mail 的任务"), ("luoke-mem", "luoke-mem 的任务")):
+        path = src.get(repo)
+        try:
+            bad = release.bundled_unverified(path, verified) if path else None
+            effect = release.unverified_effect(path, verified) if bad else ""
+        except (OSError, ValueError, KeyError):
+            bad = None
+        if bad:
+            note = f"{repo}：{bad} 这一版没有评测证据，{effect}（看 {what} 哪几档关着或没评成）"
+            TIMELINE.data.setdefault("kept", {})[f"{repo}.evidence"] = note
+            TIMELINE.save()
+            log(note)
 
 
 def app_for(repo: str, tag: str, pins: dict, src: dict, prev_pins: dict, out: str, own: Optional[dict], apps: dict) -> None:
@@ -690,20 +704,52 @@ def app_version(app: str) -> Optional[str]:
 
 # ---- 评测：沿用 + 分机器跑 -------------------------------------------------------------------------------------
 
-def unchanged_since(src: str, since: str, pin: str) -> bool:
-    """配件从上次评测时的提交到钉住的提交，除文档外没改动。since 可能是短号。"""
+def unchanged_since(src: str, since: str, pin: str, paths: Optional[list] = None) -> bool:
+    """配件从上次评测时的提交到钉住的提交，除文档外没改动；给了 paths 就只看这些路径（列了的 .md 也看）。since 可能是短号。
+    paths 得是非空的字符串列表，每一项在钉住的提交里都在：`git diff --quiet` 对两个提交里都没有的路径照样返回 0，
+    写错一个路径、或者配件把目录挪了，会一直被当成「没变」。不合就退回看整个仓库。"""
     if not since:
         return False
-    r = subprocess.run(["git", "-C", src, "diff", "--quiet", since, pin, "--", ".", ":(exclude)docs", ":(exclude)*.md"], capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if paths is not None and not paths_hold(src, pin, paths):
+        log(f"评测表的 paths 在 {os.path.basename(src)} {str(pin)[:7]} 里对不上（{paths}），这一项照整个仓库看")
+        paths = None
+    spec = list(paths) if paths else [".", ":(exclude)docs", ":(exclude)*.md"]
+    r = subprocess.run(["git", "-C", src, "diff", "--quiet", since, pin, "--", *spec],
+                       capture_output=True, text=True, encoding="utf-8", errors="replace")
     return r.returncode == 0
+
+
+def paths_hold(src: str, pin: str, paths) -> bool:
+    """paths 是非空的字符串列表，每一项（文件或目录）在钉住的提交里都在。"""
+    if not isinstance(paths, list) or not paths or not all(isinstance(x, str) and x.strip("/") for x in paths):
+        return False
+    for x in paths:
+        r = subprocess.run(["git", "-C", src, "cat-file", "-e", f"{pin}:{x.rstrip('/')}"], capture_output=True)
+        if r.returncode != 0:
+            return False
+    return True
+
+
+def eval_paths(spec: dict) -> Optional[list]:
+    """评测表这一条写了 paths（评测实际看的配件路径，配件提、主控收进评测表）：沿用时只看这些路径加评测程序和题集本身。
+    没写就是 None，照旧看整个配件仓库（文档除外）；写得不成样子（不是非空的字符串列表）也当没写。
+    漏写了路径会沿用过时的结果，所以只认写明的，不猜。"""
+    paths = spec.get("paths")
+    if not isinstance(paths, list) or not paths or not all(isinstance(x, str) and x.strip("/") for x in paths):
+        return None
+    out = list(paths)
+    for x in list(spec.get("command") or [])[1:] + [spec.get("evalset") or ""]:
+        if x and not x.startswith(("/", "{", "-")) and "/" in x and "{" not in x:
+            out.append(x)
+    return sorted(set(out))
 
 
 def reusable(old: dict, spec: dict, src: dict, pins: dict, recipe, ignore_hub: bool = False) -> bool:
     """上一版的这条证据能不能沿用（审查 2026-10-17：之前只看配件自己的 diff 和配方里的引擎版本字符串）。全部满足才沿用：
-    配件自己没改、主控代码没改（luoke_core/）、实际跑的引擎是配方的版本、评测表这一条没改、题集和语料的哈希没变、依赖的配件没改。
+    配件自己没改（评测表这一条写了 paths 的只看这些路径）、主控代码没改（luoke_core/）、实际跑的引擎是配方的版本、评测表这一条没改、题集和语料的哈希没变、依赖的配件没改。
     缺任何一个字段（旧版证据）就不沿用。"""
     acc = spec["accessory"]
-    if not unchanged_since(src[acc], old.get("accessory_commit"), pins[acc]):
+    if not unchanged_since(src[acc], old.get("accessory_commit"), pins[acc], eval_paths(spec)):
         return False
     hub = old.get("hub_commit")
     if ignore_hub:
@@ -736,7 +782,9 @@ def reusable(old: dict, spec: dict, src: dict, pins: dict, recipe, ignore_hub: b
 
 # 金丝雀挑哪条（ADR 0008 修订 2026-10-23，定"挑长提示的"）：按这个顺序取这一档开着的第一条。topics 一次喂整批材料，
 # 走得到截断、内存重试这些短任务走不到的分支；thread 也是长的；都没有再取别的
-CANARY_ORDER = ["luoke-mem.topics", "luoke-mail.thread", "luoke-mail.triage", "luoke-mail.cleanup"]
+# 扫描的排在最后：记忆、邮件自己改了（它们的格子本来就要重评，挑不出金丝雀）时，同一档里别的配件没变的格子
+# 还能靠扫描的这一条核，不用整档全评。
+CANARY_ORDER = ["luoke-mem.topics", "luoke-mail.thread", "luoke-mail.triage", "luoke-mail.cleanup", "luoke-scan.identify"]
 FULL_EVAL_DAYS = 7          # 每周至少全评一次（金丝雀的保底之二）
 
 
@@ -850,11 +898,12 @@ def canary_matches(tag: str, tier: str, task: str, old: dict) -> tuple:
     return True, "原始答复和上一版逐字节一样"
 
 
-VOLATILE = re.compile(r"(sec|seconds|_ms$|^ms$|time|latency|wall|elapsed|date|duration|label|release|hub|sock|path|file|machine|host|^base_url$|^python$)", re.I)
+VOLATILE = re.compile(r"(sec|seconds|_ms$|^ms$|time|latency|wall|elapsed|date|duration|label|release|hub|sock|path|file|machine|host|^base_url$|^python$|^version$)", re.I)
 
 
 def strip_volatile(x):
-    """比对前去掉每次都会变、和模型答复无关的字段（用时、日期、标签、路径）"""
+    """比对前去掉每次都会变、和模型答复无关的字段（用时、日期、标签、路径、配件自己的版本号：
+    能走到金丝雀这一步的格子，配件评测读的文件已经核过没变，版本号只是跟着别处的改动升的）"""
     if isinstance(x, dict):
         return {k: strip_volatile(v) for k, v in x.items() if not VOLATILE.search(str(k))}
     if isinstance(x, list):
@@ -942,7 +991,7 @@ def copy_reused(tag: str, prev: str, reused: list, canary: Optional[str] = None)
     ev = os.path.join(ROOT, "releases", tag, "evidence")
     os.makedirs(ev, exist_ok=True)
     for tier, old in reused:
-        d = {k: v for k, v in old.items() if not k.startswith("_") and k not in ("tiers", "params", "model")}
+        d = {k: v for k, v in old.items() if not k.startswith("_") and k not in ("tiers", "params", "model", "timing")}   # 用时是评的那一版的，这一版没评
         d["reused_from"] = prev
         d["release"] = tag
         if canary:
@@ -1161,9 +1210,9 @@ def merge_remote(tag: str, tier: str) -> None:
         if not b.endswith("." + tier):
             b += "." + tier
         shutil.copyfile(p, os.path.join(ev, b + ".json"))
-    ne = os.path.join(tmp, f"not-evaluated-{tier}.jsonl")      # 这一档没评成的格子（release.py 记的）
-    if os.path.exists(ne):
-        shutil.copyfile(ne, os.path.join(ev, f"not-evaluated-{tier}.jsonl"))
+    for name in (f"not-evaluated-{tier}.jsonl", f"timing-{tier}.jsonl"):      # 这一档没评成的格子、每格的用时（release.py 记的）
+        if os.path.exists(os.path.join(tmp, name)):
+            shutil.copyfile(os.path.join(tmp, name), os.path.join(ev, name))
     raw_src = os.path.join(tmp, "raw")
     if os.path.isdir(raw_src):
         raw_dst = os.path.join(ev, "raw", tier)
@@ -1314,6 +1363,101 @@ def engine_zip_ok(zip_path: str) -> bool:
     return tops == {"oMLX.app"}
 
 
+def template_recipe(template: str) -> Recipe:
+    with open(template, encoding="utf-8") as f:
+        return Recipe(json.load(f))
+
+
+def freeze_engine(template: str) -> str:
+    """配方的引擎是螺壳引擎时：引擎仓库的持久克隆 checkout 到配方钉的提交（engine.commit），核 tag v<版本> 正好在这个提交上，
+    返回冻结的源码（release.py build 的 --repo luoke-engine=…，在那里现编、核版本）。配方是 oMLX 的返回空串。"""
+    recipe = template_recipe(template)
+    version = release.bundled_engine_version(recipe)
+    if not version:
+        return ""
+    commit = release.bundled_engine_commit(recipe)
+    src = freeze_one(ENGINE_REPO, commit)
+    git(src, "fetch", "-q", "--tags", "origin")
+    tagged = git(src, "rev-parse", "-q", "--verify", f"refs/tags/v{version}^{{commit}}", check=False)
+    if tagged != commit:
+        die(f"螺壳引擎：配方钉的 {commit[:7]} 不是 tag v{version}（" + (f"它在 {tagged[:7]}" if tagged else "没有这个 tag") + "）")
+    log(f"螺壳引擎 {version}：冻结在 {commit[:7]}（tag v{version}）")
+    return src
+
+
+def engine_label(recipe: Optional[Recipe]) -> str:
+    """配方的引擎写成一句：螺壳引擎带上钉的提交（同一个版本号换了提交也算换了引擎）。"""
+    if recipe is None:
+        return ""
+    v = str(recipe.engine.get("version") or "")
+    commit = str(recipe.engine.get("commit") or "")
+    if release.bundled_engine_version(recipe):
+        return f"螺壳引擎 {release.bundled_engine_version(recipe)}" + (f"（{commit[:7]}）" if commit else "")
+    return v.replace("omlx-", "oMLX ") or "?"
+
+
+def release_recipe(tag: str) -> Optional[Recipe]:
+    p = os.path.join(ROOT, "recipes", f"{tag}.json")
+    try:
+        with open(p, encoding="utf-8") as f:
+            return Recipe(json.load(f))
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def check_engine_eval(tag: str, template: str, no_eval: bool) -> None:
+    """配方的引擎是螺壳引擎时评测还跑不了（eval 阶段要 oMLX 的 .app）：只出不评测的内部版（--no-eval）；beta、候选版、正式版不出。"""
+    version = release.bundled_engine_version(template_recipe(template))
+    if version and not no_eval:
+        die(f"配方的引擎是螺壳引擎 {version}：评测还不支持它，"
+            + ("内部版要带 --no-eval（发布说明里写明引擎没评测）" if no_eval_allowed(tag) else "beta、候选版和正式版不出"))
+
+
+def unevaluated_engine(template: str, src_tag: str) -> str:
+    """--no-eval 沿用 src_tag 的证据时，这一版的引擎和 src_tag 的不一样：返回写进流程报告和发布说明的一句；一样是空串。"""
+    now = engine_label(template_recipe(template))
+    was = engine_label(release_recipe(src_tag))
+    if now == was:
+        return ""
+    return f"引擎换成了 {now}，没评测：评测结果和开关沿用 {src_tag}（引擎 {was or '不明'}）"
+
+
+KEEP_INTERNAL_COPIES = 3     # build.noindex/release/ 下留几份内部版的工作副本：每份 3 GB 多，以前一份都不删，出版机的盘会被占满
+INTERNAL_TAG = re.compile(r"internal-\d{4}(-\d+)?")
+
+
+def prune_release_copies(current: str, keep_also=(), keep: int = KEEP_INTERNAL_COPIES, base: Optional[str] = None) -> list:
+    """出完一版后删旧的内部版工作副本（build.noindex/release/internal-MMDD[-n]），按目录时间留最近 keep 份。
+    这一版、keep_also 里的（差异对比、证据沿用、下一版会挑的上一版：引擎包和配件 .app 从那里拷）总是留着；
+    beta*、rc、local-* 这些不动。删之前先把里面的 .app 从 LaunchServices 注销。删不掉只记一笔，不让这一版失败。返回删掉的。"""
+    base = base or os.path.join(ROOT, "build.noindex", "release")
+    try:
+        names = [n for n in os.listdir(base) if INTERNAL_TAG.fullmatch(n)
+                 and os.path.isdir(os.path.join(base, n)) and not os.path.islink(os.path.join(base, n))]
+        names.sort(key=lambda n: (os.path.getmtime(os.path.join(base, n)), n), reverse=True)
+    except OSError as e:
+        log(f"没整理旧的工作副本：{e}")
+        return []
+    protect = {current, *(k for k in keep_also if k)}
+    removed = []
+    for n in names[keep:]:
+        if n in protect:
+            continue
+        d = os.path.join(base, n)
+        try:
+            for root, dirs, _ in os.walk(d):
+                for app in [x for x in dirs if x.endswith(".app")]:
+                    lsapps._ls("-u", os.path.join(root, app))
+                dirs[:] = [x for x in dirs if not x.endswith(".app")]
+            shutil.rmtree(d)
+            removed.append(n)
+        except OSError as e:
+            log(f"旧的工作副本 {n} 没删成：{e}")
+    if removed:
+        log(f"删掉旧的内部版工作副本（只留最近 {keep} 份）：" + "、".join(removed))
+    return removed
+
+
 def copy_engine(tag: str, prev: str, template: str) -> bool:
     with open(template, encoding="utf-8") as f:
         want = json.load(f)["engine"]["version"]
@@ -1455,7 +1599,8 @@ def publish(tag: str, pins: dict, apps: dict, reused: list, to_run: dict, note: 
     assets.append(os.path.join(out, "release.json"))
     # 对外的名字（luoke-top 10-26）：螺壳写发布号（0.1.0.dev1 这种主控版本号对测试者没意义），应用写清单里的名字
     versions = "、".join(f"{item.get('name') or name} {item.get('version')}" for name, item in manifest["items"].items() if item.get("kind") == "accessory")
-    engine = str(manifest["items"].get("engine", {}).get("version", "?")).replace("omlx-", "oMLX ")
+    engine = str(manifest["items"].get("engine", {}).get("version", "")).replace("omlx-", "oMLX ") \
+        or engine_label(release_recipe(tag)) or "?"         # 螺壳引擎打进主控、清单里没有引擎包：照这一版的配方写
     notes = ([f"封闭测试版 {tag}。", ""] if beta else [f"团队内部用，测试者请装 beta。", ""]) + [
              f"{'测试版' if beta else '内部版'} {tag}（{time.strftime('%Y-%m-%d %H:%M')}）：螺壳 {tag}，{versions}，引擎 {engine}。",
              "钉住的提交：" + "、".join(f"{k} {v[:7]}" for k, v in sorted(pins.items())), "",
@@ -1520,8 +1665,7 @@ def main() -> None:
     if a.url_base:
         a.no_publish = True
     if local:
-        # 本机版（2026-10-17：试用期里修好的随时换到开发机上）：只在本机这一档评改过的任务，不上传；
-        # 主控认本机放行（local-verified.json），设置里标"本机版"
+        # 本机版（2026-10-17：试用期里修好的随时换到开发机上）：只在本机这一档评改过的任务，不上传；设置里标"本机版"
         if not re.fullmatch(r"local-\d{4}-\d{4}", a.tag):
             die(f"{a.tag}：本机版的标签是 local-MMDD-HHMM")
         if not a.prev:
@@ -1534,6 +1678,7 @@ def main() -> None:
         die(f"{lab_config.PATH} 里没有 {'、'.join(t for t in tiers if t != '128' and t not in MACHINES)} 档的机器：只有 128 档在本机评")
     if a.no_eval and not no_eval_allowed(a.tag):
         die(f"{a.tag}：--no-eval 只给内部版（internal-MMDD[-N]），beta 和候选版一律全评")
+    check_engine_eval(a.tag, a.template, a.no_eval)
     log(f"=== 内部版 {a.tag}：步骤 {','.join(steps)}，档 {','.join(tiers)}" + ("，不评测（--no-eval）" if a.no_eval else ""))
     IN_VM = vm_build.enabled(a.tag)
     if IN_VM:
@@ -1620,6 +1765,14 @@ def main() -> None:
     save_state()
     log("评测计划：重跑 " + ("；".join(f"{t} GB 档 {','.join(v)}" for t, v in sorted(to_run.items(), key=lambda x: int(x[0]))) or "无") + f"；沿用 {len(reused)} 条"
         + ("；挪到发布后（关着、这一版开不了）：" + "、".join(f"{t} GB 档 {task}" for t, task in deferred) if deferred else ""))
+    if a.no_eval:
+        # 引擎换了没评：写进流程报告（timeline.json）和发布说明
+        engine_note = unevaluated_engine(a.template, reuse_from)
+        state["unevaluated_engine"] = engine_note
+        TIMELINE.data["unevaluated_engine"] = engine_note
+        TIMELINE.save()
+        if engine_note:
+            log(engine_note)
     if "eval" in steps and a.no_eval:
         n, bumps = reuse_all(a.tag, reuse_from, src)
         state["no_eval_versions"] = bumps
@@ -1685,8 +1838,14 @@ def main() -> None:
     if "recipe" in steps:
         with ph("recipe"):
             release_py(a.tag, "recipe", bundled, tiers_arg, prev, a.template)
-            note_unverified_search(a.tag, src)
-    if "engine" in steps and not copy_engine(a.tag, reuse_from, a.template) and not copy_engine(a.tag, prev, a.template):
+            note_unverified_bundled(a.tag, src)
+    engine_src = freeze_engine(a.template) if "build" in steps else ""
+    bundled_engine = bool(release.bundled_engine_version(template_recipe(a.template)))
+    if "engine" in steps and bundled_engine:
+        # 螺壳引擎打进主控、跟着主控签名公证：engine 阶段只清掉以前的引擎包记录，不用等钥匙串
+        with ph("engine"):
+            release_py(a.tag, "engine", [], tiers_arg, prev, a.template)
+    elif "engine" in steps and not copy_engine(a.tag, reuse_from, a.template) and not copy_engine(a.tag, prev, a.template):
         with ph("keychain wait"):
             wait_for_keychain()        # 引擎包换版本才重打，要公证
         with ph("engine"):
@@ -1728,10 +1887,12 @@ def main() -> None:
         with open(steps_path, "w", encoding="utf-8") as f:
             json.dump(done, f, ensure_ascii=False, indent=1)
 
+    build_extra = ["--repo", f"{ENGINE_REPO}={engine_src}"] if engine_src else []      # 螺壳引擎按配方钉的提交现编
+
     def build_core():
         check_core(pins["luoke-core"])
         try:
-            release_py(a.tag, "build", common, tiers_arg, prev, a.template)
+            release_py(a.tag, "build", common + build_extra, tiers_arg, prev, a.template)
         except SystemExit:
             # 带上主窗口编不过（钉住的 luoke-agent 和这一版主控对不上）：内部版不带主窗口照旧出（agent 可缺，11-03）。
             # beta 不这样：不带主窗口的 beta 2 不出（luoke-core#68，赶不上就推迟）
@@ -1741,7 +1902,7 @@ def main() -> None:
             optional("luoke-agent", "带上主窗口的主控编不过，原因见上面", pins, src)
             i = common.index(spec)
             del common[i - 1:i + 1]
-            release_py(a.tag, "build", common, tiers_arg, prev, a.template)
+            release_py(a.tag, "build", common + build_extra, tiers_arg, prev, a.template)
 
     if "build" in steps:
         step("build", build_core)
@@ -1759,8 +1920,17 @@ def main() -> None:
         ne_note = ("这一版没评成（沿用上一版的开关）：" + "；".join(f"{t} {g} GB（{why}）" for (t, g), why in sorted(ne.items())) + "。") if ne else ""
         if a.no_eval:
             ne_note = no_eval_note(reuse_from, state.get("no_eval_versions") or {}) + ne_note
+            if state.get("unevaluated_engine"):
+                ne_note = state["unevaluated_engine"] + "。" + ne_note
         step("publish", lambda: (check_core(pins["luoke-core"]),
                                  publish(a.tag, pins, apps, reused, to_run, ("这一版档位变了：" + "；".join(flips) + "。" if flips else "") + ne_note + deviation_note)))
+        if INTERNAL_TAG.fullmatch(a.tag):
+            # 发出去了再删旧的工作副本；下一版默认拿来比、沿用的那版（release.previous_release）也留着
+            try:
+                nxt = release.previous_release("", None)
+            except OSError:
+                nxt = None
+            prune_release_copies(a.tag, (prev, reuse_from, nxt))
     if "publish" in steps and a.url_base:
         # 测试托管的候选版不上传：上传前的那几项照样查（公证票据、包里不该有的东西），过了守护进程才挂出去
         step("check", lambda: (checked_assets(a.tag), clamav_plan(a.tag, apps)))

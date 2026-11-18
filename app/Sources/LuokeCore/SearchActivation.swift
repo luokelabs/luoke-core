@@ -313,12 +313,12 @@ struct SearchActivationView: View {
         switch model.phase {
         case .refused:
             Text("没有要到权限，搜索没有开启。macOS 不会再问拒绝过的项：在 系统设置 › 隐私与安全性 里允许螺壳，再点「再试一次」。")
-                .font(.system(size: 13)).foregroundStyle(Color.lkDanger).fixedSize(horizontal: false, vertical: true)
+                .font(.system(size: 13)).foregroundStyle(Color.lkDangerText).fixedSize(horizontal: false, vertical: true)
         case .partly:
             Text("已开启。\(model.deniedTitles.joined(separator: "、"))没允许，这部分搜不到。要搜的话，在 系统设置 › 隐私与安全性 里允许螺壳，再跟螺壳说一声。")
                 .font(.system(size: 13)).fixedSize(horizontal: false, vertical: true)
         case .failed(let why):
-            Text("没能开启：\(why)").font(.system(size: 13)).foregroundStyle(Color.lkDanger).fixedSize(horizontal: false, vertical: true)
+            Text("没能开启：\(why)").font(.system(size: 13)).foregroundStyle(Color.lkDangerText).fixedSize(horizontal: false, vertical: true)
         default: EmptyView()
         }
     }

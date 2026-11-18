@@ -39,7 +39,7 @@ struct EndpointView: View {
                 }
             }
         }
-        if let error { Text(error).font(.system(size: 12)).foregroundStyle(Color.lkDanger).padding(.top, 6) }
+        if let error { Text(error).font(.system(size: 12)).foregroundStyle(Color.lkDangerText).padding(.top, 6) }
         Color.clear.frame(height: 0).onAppear { if !FirstRunModel.previewing { reload() } }   // 截图时不去问螺壳进程
     }
 

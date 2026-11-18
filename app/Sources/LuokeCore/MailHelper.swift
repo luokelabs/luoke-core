@@ -27,15 +27,9 @@ enum MailHelper: BundledApp {
                                     type: "bundled", app: Bundle.main.bundleURL, version: o["version"] as? String ?? "", bundled: true)
     }
 
-    /// 装好的那份螺壳（和主控 accessories._is_installed_hub 同一个判断）用真实的 ~/.luoke-mail，别的副本用自己的数据目录，
-    /// 主控的空闲任务和卸载命令也是这么算的：两边不一致，删的就不是这里用的那份
-    private static var installedCopy: Bool {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let me = Bundle.main.bundleURL.resolvingSymlinksInPath().path
-        return ["/Applications", home + "/Applications"].contains { dir in
-            ["螺壳.app", "螺壳主控.app"].contains { URL(fileURLWithPath: dir + "/" + $0).resolvingSymlinksInPath().path == me }
-        }
-    }
+    /// 用真实的 ~/.luoke-mail：正式版、开发版、开发实例都是（AppInfo.usesRealData；和主控 accessories.uses_real_data 同一个判断），
+    /// 普通的实验室构建用自己的数据目录。主控的空闲任务和卸载命令也是这么算的：两边不一致，删的就不是这里用的那份
+    private static var installedCopy: Bool { AppInfo.usesRealData }
 
     /// 它自己的日志：起来以后说的话都进这里（luoke_mail 的 log_to_file），logs/mail.log 只有起来之前的
     static var serviceLog: URL {

@@ -6,6 +6,7 @@ import json
 import os
 import platform
 import plistlib
+import re
 import shutil
 import signal
 import subprocess
@@ -135,7 +136,7 @@ def bundled_helpers(app: Optional[str] = None) -> list:
         except (OSError, ValueError):
             continue
         if m.get("contract") == 1 and m.get("accessory") == name and m.get("bundle_id") and _macos_at_least(m.get("min_macos")):
-            out.append(dict(m if _is_installed_hub(app) else _own_data(m), _app=app, _bundled=True, _helper=True))
+            out.append(dict(m if uses_real_data(app) else _own_data(m), _app=app, _bundled=True, _helper=True))
     return out
 
 
@@ -178,6 +179,20 @@ def _own_data(m: dict) -> dict:
     if m.get("data_env"):
         out["_env"] = {m["data_env"]: os.path.expanduser(home)}
     return out
+
+
+def uses_real_data(app: Optional[str]) -> bool:
+    """这份螺壳里带的程序用不用真实的数据目录（~/.luoke-mail 之类）：正式版、开发版（ai.luoke.core.dev）、开发实例
+    （ai.luoke.core.<名字>.lab）都用；普通的实验室构建（ai.luoke.core.lab）用 ~/Library/Application Support/<编号>。
+    和本体的 AppInfo.usesRealData 同一个判断，两边不一致，删的就不是程序用的那份"""
+    if _is_installed_hub(app):
+        return True
+    try:
+        with open(os.path.join(app or "", "Contents", "Info.plist"), "rb") as f:
+            bid = str(plistlib.load(f).get("CFBundleIdentifier") or "")
+    except (OSError, ValueError, plistlib.InvalidFileException):
+        return False
+    return bid.endswith(".dev") or bool(re.fullmatch(r"ai\.luoke\.core\.[a-z0-9][a-z0-9-]*\.lab", bid))
 
 
 def _is_installed_hub(app: Optional[str]) -> bool:

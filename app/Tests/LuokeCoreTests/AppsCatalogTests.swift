@@ -73,7 +73,7 @@ final class AppsCatalogTests: XCTestCase {
 
     func testMinTier() {
         XCTAssertEqual(AppsModel.minTier("x-big", recipe: recipe), "128")
-        XCTAssertNil(AppsModel.minTier("x-unverified", recipe: recipe), "没有认过的版本：任务不算开着")
+        XCTAssertEqual(AppsModel.minTier("x-unverified", recipe: recipe), "16", "配件版本不看：verified 里没有它，任务照样开着")
         XCTAssertNil(AppsModel.minTier("x-none", recipe: recipe), "配方里没有它的任务")
         XCTAssertNil(AppsModel.minTier("x-ime", recipe: nil))
     }

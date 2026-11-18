@@ -1,5 +1,5 @@
 {
- "_说明": "发布脚本（tools/release.py）的评测表：每个任务用哪个配件自带的评测程序、怎么读结果、底线和容差（V1 §7）。只在实验室用，不进配方。命令里的占位：{hub} 实验室实例的 socket，{label} 这次的标签，{repo} 配件仓库（评测程序的工作目录），{core} 主控仓库，{ime_corpus} 输入法语料，{raw} 这次发布的 evidence/raw 目录（评测程序把逐条结果直接写到这里）。",
+ "_说明": "发布脚本（tools/release.py）的评测表：每个任务用哪个配件自带的评测程序、怎么读结果、底线和容差（V1 §7）。只在实验室用，不进配方。命令里的占位：{hub} 实验室实例的 socket，{label} 这次的标签，{repo} 配件仓库（评测程序的工作目录），{core} 主控仓库，{ime_corpus} 输入法语料，{raw} 这次发布的 evidence/raw 目录（评测程序把逐条结果直接写到这里）。paths（可选，2026-11-09 应 luoke-ime 加）：评测实际看的配件路径；写了就只在这些路径（加评测程序和题集本身）变了时重跑，没变就沿用上一版的结果，没写照旧看整个配件仓库（文档除外）。路径由配件提，漏写会沿用过时的结果；每一项都得在钉住的提交里（写错了、挪走了就照整个仓库看），列在里面的 .md 也算。",
  "luoke-mail.triage": {
   "accessory": "luoke-mail",
   "repo": "../luoke-mail",
@@ -31,6 +31,7 @@
  "luoke-ime.rerank": {
   "accessory": "luoke-ime",
   "repo": "../luoke-ime",
+  "paths": ["engines/xiaohe/", "engines/personal/", "scripts/evidence.py", "licenses/rime-ice/UPSTREAM", "scripts/build-librime.sh"],
   "version": {
    "manifest": "Resources/App/luoke-accessory.json"
   },
@@ -176,6 +177,7 @@
  "luoke-ime.predict": {
   "accessory": "luoke-ime",
   "repo": "../luoke-ime",
+  "paths": ["engines/personal/", "scripts/evidence.py"],
   "version": {
    "manifest": "Resources/App/luoke-accessory.json"
   },
@@ -202,6 +204,7 @@
  "luoke-ime.transcribe": {
   "accessory": "luoke-ime",
   "repo": "../luoke-ime",
+  "paths": ["evals/transcribe/", "scripts/evidence.py"],
   "version": {
    "manifest": "Resources/App/luoke-accessory.json"
   },
@@ -227,6 +230,7 @@
  "luoke-ime.tidy": {
   "accessory": "luoke-ime",
   "repo": "../luoke-ime",
+  "paths": ["engines/voice/tidy_prompt.txt", "engines/voice/tidy_examples.json", "evals/tidy/", "scripts/evidence.py"],
   "version": {
    "manifest": "Resources/App/luoke-accessory.json"
   },
@@ -383,6 +387,7 @@
  "luoke-scan.explain": {
   "accessory": "luoke-scan",
   "repo": "../luoke-scan",
+  "paths": ["prompts/", "bench/prompts.py"],
   "version": {
    "manifest": "packaging/luoke-accessory.json"
   },
@@ -413,6 +418,7 @@
  "luoke-scan.identify": {
   "accessory": "luoke-scan",
   "repo": "../luoke-scan",
+  "paths": ["prompts/", "bench/prompts.py"],
   "version": {
    "manifest": "packaging/luoke-accessory.json"
   },
@@ -443,6 +449,7 @@
  "luoke-scan.skills": {
   "accessory": "luoke-scan",
   "repo": "../luoke-scan",
+  "paths": ["prompts/", "bench/prompts.py"],
   "version": {
    "manifest": "packaging/luoke-accessory.json"
   },

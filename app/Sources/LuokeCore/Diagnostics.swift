@@ -34,7 +34,7 @@ enum Diagnostics {
         if let st = model.status {
             lines.append("硬件档：\(st.tier)  底座：\(st.base ?? "—")  已加载：\(st.loaded ?? "—")")
             lines.append("引擎：alive=\(st.engineAlive) ready=\(st.engineReady)  熔断：\(st.breaker ?? "无")  冒烟：\(st.smokeOK.map { $0 ? "通过" : "未通过" } ?? "没做")")
-            lines.append("后台：\(st.backgroundState) \(st.backgroundReasons)  功耗档：\(st.powerMode)  用电池也运行：\(st.backgroundOnBattery)")
+            lines.append("后台：\(st.backgroundState) \(st.backgroundReasons)  功耗档：\(st.powerMode)  用电池时：\(st.batteryMode)")
             lines.append("打分进程：\(st.scorers)")
         } else {
             lines.append("螺壳没连上：\(model.hubError ?? "")")

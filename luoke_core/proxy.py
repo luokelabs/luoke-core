@@ -97,4 +97,4 @@ def error_body(code: str, message: str, retry_after: Optional[float] = None, **e
 
 
 STATUS = {"invalid_request": 400, "forbidden": 403, "unknown_accessory": 403, "undeclared": 403, "task_unavailable": 404, "unsupported": 404,
-          "input_too_long": 413, "session_lost": 409, "superseded": 409, "busy": 503, "paused": 503, "not_ready": 503, "needs_user": 503, "engine_failed": 503}
+          "core_too_old": 403, "input_too_long": 413, "session_lost": 409, "superseded": 409, "busy": 503, "paused": 503, "not_ready": 503, "needs_user": 503, "engine_failed": 503}

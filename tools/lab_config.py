@@ -5,7 +5,7 @@
 
   {"machines": {"16": {"host": ..., "core": ..., "models": ..., "engine_app": ..., "repos": {...}, "corpus": ...}, "32": {...}},
    "release": {"issue": "<owner>/<repo>#<n>", "allowed": ["<GitHub 账号>"], "owner": "<GitHub 账号>",
-               "rc_senders": ["<只能发候选版的账号>"], "rc_url_base": "http://<局域网 IP>:<端口>", "rc_serve_dir": "<那个地址对应的本机目录>"}}
+               "rc_senders": ["<只能发候选版的账号>"], "cut_senders": ["<定时截版的机器账号>"], "rc_url_base": "http://<局域网 IP>:<端口>", "rc_serve_dir": "<那个地址对应的本机目录>"}}
 """
 import json
 import os

@@ -1,6 +1,8 @@
-"""引擎监管（V1 §5）：oMLX 子进程按启动清单起、按 PID 核对、加载/卸载底座、流式转发一条生成请求。
+"""引擎监管（V1 §5）：引擎子进程按启动清单起、按 PID 核对、加载/卸载底座、流式转发一条生成请求。
 
-oMLX 一行不改：只传命令行参数和环境变量。主控和它之间只有 127.0.0.1 上的随机端口加随机 API key。
+引擎包有两种（顶层 ADR 0020：oMLX 换成螺壳引擎，先进内部版），配方 engine.version 的前缀说是哪一种（engine_package）：
+oMLX 一行不改，只传命令行参数和环境变量；螺壳引擎照它仓库的 docs/contract.md，认同一套 serve 参数。
+主控和引擎之间只有 127.0.0.1 上的随机端口加随机 API key。
 """
 from __future__ import annotations
 
@@ -21,6 +23,11 @@ from . import procs, spawn
 UNLOAD_POLL_SECS = 0.2
 
 
+def engine_settings(key: str) -> dict:
+    """主控每次起引擎前写的 settings.json：只有密钥和关掉的 CORS，别的都用 oMLX 的默认值和命令行。"""
+    return {"auth": {"api_key": key}, "server": {"cors_origins": []}}
+
+
 class EngineError(RuntimeError):
     pass
 
@@ -33,10 +40,43 @@ def _free_port() -> int:
     return p
 
 
+# 引擎包的两种写法：配方 engine.version 的前缀 → 包名、bundle id（下载的包名字不对时按它认）、给人看的名字。
+# 没有前缀的版本当 oMLX（早期配方就是这样比的）
+PACKAGES = (
+    # max_body：引擎收的请求体上限，本机端点原样转发，先在主控处按它拒（core-private#208；螺壳引擎 Routes.swift 的 maxBodyBytes）
+    ("luoke-engine-", {"app": "LuokeEngine.app", "bundle_id": "ai.luoke.engine", "name": "螺壳引擎", "max_body": 8 << 20}),
+    ("omlx-", {"app": "oMLX.app", "bundle_id": "app.omlx", "name": "oMLX", "max_body": 32 << 20}),
+)
+
+
+def engine_package(version: str) -> dict:
+    """配方的引擎版本（"omlx-0.7.2"、"luoke-engine-0.1.0"）→ {"app", "bundle_id", "name", "max_body", "version"}，version 是去掉前缀的、
+    和包里 Info.plist 的 CFBundleShortVersionString 比的那一段。"""
+    for prefix, pkg in PACKAGES:
+        if version.startswith(prefix):
+            return dict(pkg, version=version[len(prefix):])
+    return dict(PACKAGES[1][1], version=version)
+
+
+def is_engine_version(name: str) -> bool:
+    """engines/ 下的目录名是不是某个引擎版本（清旧引擎时只删这些）"""
+    return any(name.startswith(prefix) for prefix, _ in PACKAGES)
+
+
+def native_engine(app: str) -> Optional[str]:
+    """引擎包是螺壳引擎（luoke-engine，一个可执行文件，不带 Python）时返回它的路径；是 oMLX 的包返回 None。
+    螺壳引擎认现在这套 serve 参数（--no-cache、--no-hf-cache、--log-level 认下来不起作用），密钥同样从 settings.json 读；
+    三个工作进程是它的子命令（scorer.py）。app 本身就是那个可执行文件时（打进螺壳.app 的 Contents/Helpers/luoke-engine）就是它。"""
+    if os.path.basename(app) == "luoke-engine" and os.path.isfile(app):
+        return app
+    path = os.path.join(app, "Contents", "MacOS", "luoke-engine")
+    return path if os.path.exists(path) else None
+
+
 class Engine:
     def __init__(self, app: str, base_path: str, model_dir: str, guard_gb: float, log_level: str = "warning",
                  log: Optional[Callable[[str], None]] = None):
-        self.cli = os.path.join(app, "Contents/MacOS/omlx-cli")
+        self.cli = native_engine(app) or os.path.join(app, "Contents/MacOS/omlx-cli")
         self.base_path = base_path
         self.model_dir = model_dir
         self.guard_gb = guard_gb
@@ -70,10 +110,12 @@ class Engine:
             if os.path.exists(sp):
                 os.remove(sp)
         # 密钥不进命令行，也不进环境变量（同账户的程序用 ps 就能读到这两处，再拿它借 oMLX 的 /v1/web/fetch 连外网，luoke-core#35）：
-        # 写进只有本账户能读的 settings.json，oMLX 从这里读 auth.api_key，之后自己存回去也不改权限（_save_data 用 0600）
+        # 写进只有本账户能读的 settings.json，oMLX 从这里读 auth.api_key，之后自己存回去也不改权限（_save_data 用 0600）。
+        # cors_origins 清空：oMLX 默认是 "*"，网页能读它的答复（/health 不要密钥）；清空后不给 CORS 头、预检一律拒绝。
+        # 主控连引擎不经浏览器，用不上 CORS
         fd = os.open(os.path.join(self.base_path, "settings.json"), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w") as f:
-            json.dump({"auth": {"api_key": self.key}}, f)
+            json.dump(engine_settings(self.key), f)
         self._reap_orphan()
         cmd = [self.cli, "serve", "--base-path", self.base_path, "--model-dir", self.model_dir,
                "--host", "127.0.0.1", "--port", str(self.port),
@@ -90,7 +132,7 @@ class Engine:
         ids: list = []
         while time.time() - t0 < timeout:
             if self.proc.poll() is not None:
-                raise EngineError(f"oMLX 没起来（退出码 {self.proc.returncode}），看 {logf.name}")
+                raise EngineError(f"引擎没起来（退出码 {self.proc.returncode}），看 {logf.name}")
             try:
                 ids = self.models()
                 # 模型发现比服务就绪晚：大模型要再等它出现
@@ -108,7 +150,7 @@ class Engine:
                 pass
             time.sleep(0.5)
         self.stop()      # 进程还在、却一直没就绪：停掉，"没在运行"才有人重启（主控的 _check_engine），不会卡在"正在启动"
-        raise EngineError("oMLX 启动超时")
+        raise EngineError("引擎启动超时")
 
     def stop(self) -> None:
         self.extras.clear()

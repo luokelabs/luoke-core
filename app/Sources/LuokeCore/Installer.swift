@@ -103,12 +103,10 @@ enum Manifests {
         }
         return out
     }
-    /// 任务在这一档开着（同主控 Recipe.task_open）：配件在 verified 里有认的版本，任务的 tiers 没把这一档排除。
+    /// 任务在这一档开着（同主控 Recipe.task_open）：配方里有，任务的 tiers 没把这一档排除；配件的版本不看。
     /// 没写 tiers 就是每档都行；空的就是哪一档都没开（支持台账的写法，同 expectations 里 typing 的读法）
     static func taskOpen(_ task: String, tier: String, recipe r: [String: Any]) -> Bool {
-        guard let t = (r["tasks"] as? [String: Any])?[task] as? [String: Any], let acc = t["accessory"] as? String,
-              let versions = ((r["verified"] as? [String: Any])?[acc] as? [String: Any])?["versions"] as? [Any], !versions.isEmpty
-        else { return false }
+        guard let t = (r["tasks"] as? [String: Any])?[task] as? [String: Any] else { return false }
         if let tiers = t["tiers"] as? [String] { return tiers.contains(tier) }
         return true
     }
@@ -135,21 +133,38 @@ enum Manifests {
         return SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined()
     }
     static func engineVersion() -> String { ((recipe()?["engine"] as? [String: Any])?["version"] as? String) ?? "" }
-    /// 引擎在不在：按清单装的那份（<env>/engines/<版本>/oMLX.app），或配方 engine.app 指的那份——后者要 Info.plist 的版本和配方一致
+    /// 引擎包是哪一种：配方引擎版本的前缀说（和主控 engine.py 的 PACKAGES 同一张表）→ 包名、给人看的名字、去掉前缀的版本
+    static func enginePackage(_ v: String = engineVersion()) -> (app: String, name: String, version: String) {
+        if v.hasPrefix("luoke-engine-") { return ("LuokeEngine.app", "螺壳引擎", String(v.dropFirst(13))) }
+        return ("oMLX.app", "oMLX", v.hasPrefix("omlx-") ? String(v.dropFirst(5)) : v)
+    }
+    /// 打进螺壳.app 的螺壳引擎（Contents/Helpers/luoke-engine）和它的版本（build_app.sh 写进 Info.plist 的 LuokeEngineVersion）；没打进来是 nil
+    static func bundledEngine(app: URL = Bundle.main.bundleURL, info: [String: Any]? = Bundle.main.infoDictionary) -> (path: String, version: String)? {
+        let p = app.appendingPathComponent("Contents/Helpers/luoke-engine").path
+        guard let v = info?["LuokeEngineVersion"] as? String, !v.isEmpty, FileManager.default.isExecutableFile(atPath: p) else { return nil }
+        return (p, v)
+    }
+    /// 配方要的正是打进来的那一版引擎：不要引擎包、不用下载（和主控 hub.py 的 bundled_engine 同一规则）
+    static func bundledEngineMatches(_ v: String = engineVersion(), bundled: (path: String, version: String)? = bundledEngine()) -> Bool {
+        guard let b = bundled else { return false }
+        return v == "luoke-engine-" + b.version
+    }
+    /// 引擎在不在：打进螺壳的那一版正是配方要的；或者按清单装的那份（<env>/engines/<版本>/<包名>），或配方 engine.app 指的那份——后者要 Info.plist 的版本和配方一致
     /// （"omlx-0.7.0" ↔ "0.7.0"；和主控 hub.py 的 recipe_engine_app 同一规则，用户自己装的别的版本不算）
     static func engineInstalled() -> Bool { engineProblem() == nil }
 
     /// 引擎为什么不算在：nil = 在；否则一句话分清"没装"和"版本不对"（luokelabs/luoke-core#1 要求分开说）。
     static func engineProblem() -> String? {
-        let installed = AppInfo.envDir.appendingPathComponent("engines/\(engineVersion())/oMLX.app/Contents").path
+        if bundledEngineMatches() { return nil }
+        let pkg = enginePackage()
+        let installed = AppInfo.envDir.appendingPathComponent("engines/\(engineVersion())/\(pkg.app)/Contents").path
         if FileManager.default.fileExists(atPath: installed) { return nil }
-        let v = engineVersion()
-        let want = v.hasPrefix("omlx-") ? String(v.dropFirst(5)) : v
+        let want = pkg.version
         // 发布版只用清单里的引擎包，不用本机另装的 oMLX（和主控 hub.py 的 recipe_engine_app 同一规则，审查 2026-10-17）
         if hasRelease && !AppInfo.isLab { return "引擎包还没装（要下载 \(Diagnostics.humanSize(itemSize("engine")))）" }
         guard let app = (recipe()?["engine"] as? [String: Any])?["app"] as? String, !app.isEmpty else { return "配方没有指定引擎位置" }
         guard let info = NSDictionary(contentsOfFile: app + "/Contents/Info.plist"),
-              let have = info["CFBundleShortVersionString"] as? String else { return "没装引擎：\(app) 不存在（要 oMLX \(want)）" }
+              let have = info["CFBundleShortVersionString"] as? String else { return "没装引擎：\(app) 不存在（要 \(pkg.name) \(want)）" }
         return have == want ? nil : "引擎版本不对：\(app) 是 \(have)，配方要 \(want)"
     }
 

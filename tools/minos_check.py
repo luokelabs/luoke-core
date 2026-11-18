@@ -5,8 +5,11 @@
 输入法自带的引擎都中过招。所以发布脚本对清单里每一项（主控、引擎包、各配件）都查一遍：任何一个 Mach-O 的 minos 高于
 该项声称的最低 macOS（配件清单的 min_macos，没有就用 Info.plist 的 LSMinimumSystemVersion）就不出清单。
 
+螺壳的最低 macOS 只在这里定（LUOKE_MIN_MACOS）：app/build_app.sh、tools/package_python_app.py 从这里读；发布时另查
+螺壳.app 和里面嵌套的 .app 声称的最低版本都不低于它（floor_problems），声称的和包里实际要的差多少打出来（gap）。
+
 只用标准库：按魔数认 Mach-O（含 fat），读 LC_BUILD_VERSION（platform 1 = macOS）或 LC_VERSION_MIN_MACOSX。
-    python3 tools/minos_check.py <某.app> [--max 14.0]     列出超过的；退出码 1 表示有超过的
+    python3 tools/minos_check.py <某.app> [--max 26.2] [--floor]     列出超过的；--floor 再查声称的不低于 LUOKE_MIN_MACOS；退出码 1 表示有问题
 """
 from __future__ import annotations
 
@@ -25,6 +28,7 @@ FAT_CIGAM = 0xBEBAFECA
 LC_VERSION_MIN_MACOSX = 0x24
 LC_BUILD_VERSION = 0x32
 PLATFORM_MACOS = 1
+LUOKE_MIN_MACOS = "26.2"      # 螺壳和打进它的各组件的最低 macOS：引擎里的 mlx 要 26.2，低于它螺壳本来就装不完
 
 
 def _ver(v: int) -> str:
@@ -160,9 +164,36 @@ def helper_min(app: str, rel: str) -> Optional[str]:
 
 
 def check_app(app: str, max_version: Optional[str] = None) -> tuple:
-    """返回 (声称的最低版本, 超过的列表)。max_version 没给就用 .app 自己声称的；两样都没有就按 14.0（打包脚本的默认）。"""
-    limit = max_version or declared_min(app) or "14.0"
+    """返回 (声称的最低版本, 超过的列表)。max_version 没给就用 .app 自己声称的；两样都没有就按 LUOKE_MIN_MACOS。"""
+    limit = max_version or declared_min(app) or LUOKE_MIN_MACOS
     return limit, [(p, v) for p, v in iter_machos(app) if version_tuple(v) > version_tuple(helper_min(app, p) or limit)]
+
+
+def nested_apps(app: str) -> list:
+    """app 的 Contents 下面嵌套的 .app（相对路径），嵌套里的嵌套也算。"""
+    found = []
+    contents = os.path.join(app, "Contents")
+    for d, dirs, _ in os.walk(contents):
+        for n in [x for x in dirs if x.endswith(".app")]:
+            found.append(os.path.relpath(os.path.join(d, n), app))
+    return sorted(found)
+
+
+def floor_problems(app: str, floor: str = LUOKE_MIN_MACOS) -> list:
+    """app 和它里面嵌套的 .app 声称的最低 macOS 低于 floor（或没写）的：[(相对路径 或 "."，声称的)]。
+    声称得比螺壳低等于说没测过的系统也能用；包里程序实际要的比声称的高另由 check_app 查。"""
+    bad = []
+    for rel in ["."] + nested_apps(app):
+        v = declared_min(os.path.join(app, rel))
+        if not v or version_tuple(v) < version_tuple(floor):
+            bad.append((rel, v))
+    return bad
+
+
+def gap(app: str) -> tuple:
+    """(声称的最低版本, 包里 Mach-O 实际要的最高版本)：两个差多少，出版日志里写出来。"""
+    vs = [v for _, v in iter_machos(app)]
+    return declared_min(app), (max(vs, key=version_tuple) if vs else None)
 
 
 def main(argv: list) -> int:
@@ -171,18 +202,27 @@ def main(argv: list) -> int:
     ap.add_argument("path")
     ap.add_argument("--max", default=None, help="允许的最高 minos（默认取 .app 声称的最低 macOS）")
     ap.add_argument("--list", action="store_true", help="列出全部 Mach-O 和它们的 minos")
+    ap.add_argument("--floor", action="store_true", help=f"再查 .app 和嵌套的 .app 声称的最低 macOS 不低于 {LUOKE_MIN_MACOS}")
     a = ap.parse_args(argv)
     if a.list:
         for p, v in sorted(iter_machos(a.path)):
             print(f"{v:>7}  {p}")
+    rc = 0
     limit, bad = check_app(a.path, a.max)
     if bad:
         print(f"{a.path}：声称最低 macOS {limit}，但这些 Mach-O 要更高的系统：")
         for p, v in sorted(bad):
             print(f"  {v:>7}  {p}")
-        return 1
-    print(f"{a.path}：所有 Mach-O 的 minos 都不高于 {limit}")
-    return 0
+        rc = 1
+    else:
+        print(f"{a.path}：所有 Mach-O 的 minos 都不高于 {limit}")
+    if a.floor:
+        for rel, v in floor_problems(a.path):
+            print(f"  {rel}：声称最低 macOS {v or '没写'}，低于螺壳的 {LUOKE_MIN_MACOS}")
+            rc = 1
+        said, top = gap(a.path)
+        print(f"声称 {said or '没写'}，包里 Mach-O 实际最高要 {top or '—'}")
+    return rc
 
 
 if __name__ == "__main__":

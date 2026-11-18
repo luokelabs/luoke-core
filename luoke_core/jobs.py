@@ -42,7 +42,9 @@ def parse_jobs(manifest: dict) -> list:
         spec = dict(DEFAULTS, **{k: j[k] for k in DEFAULTS if k in j})
         spec.update({"key": f"{manifest['accessory']}.{j['name']}", "accessory": manifest["accessory"], "name": j["name"],
                      "command": list(j["command"]), "exec": exe, "bundle_id": manifest.get("bundle_id"), "_app": manifest.get("_app"),
-                     "_env": manifest.get("_env"), "tool": tool, "first_use": j.get("first_use") is True})
+                     "_env": manifest.get("_env"), "tool": tool, "first_use": j.get("first_use") is True,
+                     # 给人看的名字（可选，11-12 和 luoke-agent 商定：右边栏的任务队列显示；没写就由界面用应用名加任务名）
+                     "title": j["title"].strip()[:40] if isinstance(j.get("title"), str) and j["title"].strip() else None})
         out.append(spec)
     return out
 
@@ -250,6 +252,49 @@ class IdleJobs:
                 self._kill(self.running)
                 self.running.proc.wait()
             self._watch()
+
+    def queue(self, manifests: dict) -> list:
+        """没在跑的空闲任务，按 tick 会先起哪个的顺序（清单的顺序），各带卡在什么条件上（右边栏的任务队列，/status 的 queue）。
+        wait 的 kind：soon 下一个采样就起 / time 间隔没到（at 是最早能起的时间）/ power 等接电源（在用电池、低电量模式）/
+        thermal 等降温 / memory 等内存 / paused 全机后台暂停（别的原因）/ quiet 等你不用 Mac 的时候 / busy 等手上的做完。
+        几个条件都不满足时，报最晚才会解开的那个：间隔 > 后台状态 > 安静 > 手上的。"""
+        out = []
+        running = self.running.spec["key"] if self.running else None
+        records = self.state.get("jobs", {})
+        now = self.now()
+        for m in manifests.values():
+            for spec in parse_jobs(m):
+                key = spec["key"]
+                if key == running:
+                    continue
+                item = {"id": key, "tool": spec["accessory"], "name": spec["name"], "title": spec.get("title")}
+                rec = records.get(key) or {}
+                if key in self.right_now or key in self.soon:
+                    wait: dict = {"kind": "soon"}
+                else:
+                    wait = self._wait(spec, rec, now)
+                item["wait"] = wait
+                out.append(item)
+        return out
+
+    def _wait(self, spec: dict, rec: dict, now: float) -> dict:
+        interval = float(spec["min_interval_minutes"])
+        if rec.get("reason") in INTERRUPTED:
+            interval = min(interval, RETRY_MINUTES)
+        last = rec.get("last_start")
+        if last is not None and now - last < interval * 60:
+            return {"kind": "time", "at": round(last + interval * 60)}
+        state, reasons = self.background_state(bool(spec.get("allow_battery")))
+        if state != "running":
+            for r, kind in (("battery", "power"), ("low_power", "power"), ("thermal", "thermal"), ("memory", "memory")):
+                if r in reasons:
+                    return {"kind": kind}
+            return {"kind": "paused"}
+        if not self.quiet():
+            return {"kind": "quiet"}
+        if self.busy():
+            return {"kind": "busy"}
+        return {"kind": "soon"}
 
     def status(self) -> dict:
         # /status 给任何已验证的配件看：不带 stderr_tail（那是某个工具自己的输出，别的工具不该读到；留在 state.json 给诊断导出）

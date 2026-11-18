@@ -246,7 +246,8 @@ final class FirstRunModel: ObservableObject {
     struct PlanRow { let name: String; let detail: String; let size: String }
 
     private func engineLabel() -> String {
-        Manifests.engineVersion().replacingOccurrences(of: "omlx-", with: "oMLX ")
+        let pkg = Manifests.enginePackage()
+        return "\(pkg.name) \(pkg.version)"
     }
 
     /// 这一档的底座模型（配方 assignment[档].base）；别的都是专用模型（打分、嵌入）
@@ -297,7 +298,11 @@ final class FirstRunModel: ObservableObject {
                 names.append(mem.id); planLabels[mem.id] = p.last
             }
         } else {
-            p.append(PlanRow(name: "推理引擎", detail: "oMLX（开发版：用本机已装的）" + (Manifests.engineProblem().map { "——\($0)" } ?? ""), size: "—"))
+            if Manifests.bundledEngineMatches() {
+                p.append(PlanRow(name: "推理引擎", detail: engineLabel(), size: "已装好"))
+            } else {
+                p.append(PlanRow(name: "推理引擎", detail: Manifests.enginePackage().name + "（开发版：用本机已装的）" + (Manifests.engineProblem().map { "——\($0)" } ?? ""), size: "—"))
+            }
             let base = tier != "128" ? ("Qwen3.5-9B-4bit", "5.8 GB") : ("gemma-4-26b-a4b-it-8bit", "26 GB")
             p.append(PlanRow(name: "底座模型", detail: ModelName.display(base.0), size: base.1))
             if accessories.contains(where: { $0.selected && $0.id == "luoke-ime" }) { p.append(PlanRow(name: "专用模型", detail: ModelName.display("Qwen3.5-0.8B-Base-4bit"), size: "0.5 GB")) }
@@ -425,9 +430,9 @@ final class FirstRunModel: ObservableObject {
     var doneText: String {
         if !failed.isEmpty {
             let names = failed.map { n in Manifests.accessories().first(where: { $0.id == n })?.name ?? n }
-            return "没装上：" + names.joined(separator: "、") + "。可以再打开它的安装器重试。"
+            return "安装失败：" + names.joined(separator: "、") + "。可重新打开对应的安装器重试。"
         }
-        return "螺壳会在菜单栏常驻，应用现在可以用模型了。"
+        return "螺壳将常驻菜单栏，各应用现已可以使用本机模型。"
     }
 
     private func linkFromSource() {
@@ -1016,7 +1021,7 @@ struct FirstRunView: View {
             HStack(spacing: 16) {
                 if let k = LKAsset.image(m.failed.isEmpty ? "k-wow.webp" : "k-peek.webp") { Image(nsImage: k).resizable().scaledToFit().frame(width: 64, height: 64) }
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(m.failed.isEmpty ? "装好了" : "装好了一部分")
+                    Text(m.failed.isEmpty ? "安装完成" : "部分安装完成")
                         .font(.system(size: 20, weight: .semibold))
                     if !doneSub.isEmpty {
                         Text(doneSub).font(.system(size: 14)).foregroundStyle(Color.lkMuted).fixedSize(horizontal: false, vertical: true)
@@ -1032,7 +1037,7 @@ struct FirstRunView: View {
                             if let img = LKAsset.image("app-mail.png") { Image(nsImage: img).resizable().frame(width: 36, height: 36).clipShape(.rect(cornerRadius: 8)) }
                             VStack(alignment: .leading, spacing: 2) {
                                 Text("螺壳邮件助手").font(.system(size: 14, weight: .medium))
-                                Text("点「打开」，第一次要连接邮箱。").font(.system(size: 13)).foregroundStyle(Color.lkMuted)
+                                Text("首次打开时需连接邮箱。").font(.system(size: 13)).foregroundStyle(Color.lkMuted)
                             }
                             Spacer()
                             Button("打开") {
@@ -1048,7 +1053,7 @@ struct FirstRunView: View {
                         if let img = LKAsset.image("app-core.png") { Image(nsImage: img).resizable().frame(width: 36, height: 36).clipShape(.rect(cornerRadius: 8)) }
                         VStack(alignment: .leading, spacing: 2) {
                             Text("螺壳").font(.system(size: 14, weight: .medium))
-                            Text("在菜单栏的海螺图标里。").font(.system(size: 13)).foregroundStyle(Color.lkMuted)
+                            Text("位于菜单栏的海螺图标中。").font(.system(size: 13)).foregroundStyle(Color.lkMuted)
                         }
                         Spacer()
                     }
@@ -1063,7 +1068,7 @@ struct FirstRunView: View {
                         LKAppIcon(accessory: SearchHelper.accessory, size: 36)
                         VStack(alignment: .leading, spacing: 2) {
                             Text("螺壳搜索").font(.system(size: 14, weight: .medium))
-                            Text("按内容找文件和照片。开启时 macOS 会问你让不让读。").font(.system(size: 13)).foregroundStyle(Color.lkMuted)
+                            Text("按内容查找文件和照片。开启时 macOS 会请求访问权限。").font(.system(size: 13)).foregroundStyle(Color.lkMuted)
                         }
                         Spacer()
                         if searchOn { LKBadge(text: "已开启", kind: .success) } else {
@@ -1081,7 +1086,7 @@ struct FirstRunView: View {
                         LKAppIcon(accessory: ScanHelper.accessory, size: 36)
                         VStack(alignment: .leading, spacing: 2) {
                             Text("螺壳扫描").font(.system(size: 14, weight: .medium))
-                            Text("查这台 Mac 的安全和空间。开启时要完全磁盘访问。").font(.system(size: 13))
+                            Text("检查这台 Mac 的安全和存储空间。开启时需要完全磁盘访问权限。").font(.system(size: 13))
                         }
                         Spacer()
                         if scanOn { LKBadge(text: "已开启", kind: .success) } else {
@@ -1108,10 +1113,10 @@ struct FirstRunView: View {
                             Text(r.name).font(.system(size: 14))
                             Spacer()
                             switch r.state {
-                            case "ok": LKBadge(text: "通知已打开", kind: .success)
-                            case "ask": Button("允许它发通知") { m.askNotifications(r) }.buttonStyle(LKSecondaryButton())
+                            case "ok": LKBadge(text: "通知已开启", kind: .success)
+                            case "ask": Button("允许通知") { m.askNotifications(r) }.buttonStyle(LKSecondaryButton())
                             default:
-                                LKBadge(text: "通知被关掉了", kind: .warning)
+                                LKBadge(text: "通知已关闭", kind: .warning)
                                 Button("打开通知设置") { m.openNotificationSettings(r) }.buttonStyle(LKSecondaryButton())
                             }
                         }
@@ -1122,7 +1127,7 @@ struct FirstRunView: View {
             }
 
             if !m.failed.isEmpty {
-                Text(m.doneText).font(.system(size: 13)).foregroundStyle(Color.lkDanger).fixedSize(horizontal: false, vertical: true)
+                Text(m.doneText).font(.system(size: 13)).foregroundStyle(Color.lkDangerText).fixedSize(horizontal: false, vertical: true)
             }
         }
     }
@@ -1136,7 +1141,7 @@ struct FirstRunView: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
                 LKIcon("keyboard")
-                Text(m.inputMethodState == "ready" ? "试试螺壳输入法" : "输入法还差一步：添加到系统").font(.system(size: 14, weight: .medium))
+                Text(m.inputMethodState == "ready" ? "螺壳输入法已添加" : "待完成：将螺壳输入法添加到系统").font(.system(size: 14, weight: .medium))
                 Spacer()
                 if m.inputMethodState == "ready" { LKBadge(text: "已添加", kind: .success) }
                 else if m.inputMethodState == "added_not_selectable" { LKBadge(text: "系统收录中", kind: .secondary) }
@@ -1147,9 +1152,9 @@ struct FirstRunView: View {
                 }
             }
             if m.inputMethodState == "ready" {
-                Text("切换到螺壳，在下面试着打 nihao。").font(.system(size: 13)).foregroundStyle(Color.lkMuted)
+                Text("切换到螺壳后，可在下方输入框中输入 nihao 测试。").font(.system(size: 13)).foregroundStyle(Color.lkMuted)
                 HStack(spacing: 8) {
-                    TextField("在这里打字", text: $m.tryText).textFieldStyle(.roundedBorder).focused($tryFocused)
+                    TextField("在此输入", text: $m.tryText).textFieldStyle(.roundedBorder).focused($tryFocused)
                         .onChange(of: m.refocusTry) {
                             // 切过去以后松开再拿回焦点：文本框重新接输入法，才用得上刚切过去的螺壳
                             tryFocused = false
@@ -1160,16 +1165,16 @@ struct FirstRunView: View {
                 if m.selectFailed && m.reregistered {
                     // 重新登记过还是切不过去：多半是这次登录里系统的输入法服务（imklaunchagent 这类，不归我们结束），再点也没用；
                     // 原因没坐实，文案只说"没认上"（luoke-ime 10-22）。注销时这个窗口也会关，所以不说"页面会自己更新"
-                    LKNote(icon: "log-out", text: "还是切不过去：系统这次没认上螺壳输入法。请注销并重新登录一次（苹果菜单 → 退出登录），回来以后在菜单栏的输入法里选「螺壳」就能用了。", kind: .warning)
+                    LKNote(icon: "log-out", text: "仍无法切换：系统未识别螺壳输入法。请注销并重新登录（苹果菜单 → 退出登录），之后在菜单栏的输入法菜单中选择「螺壳」。", kind: .warning)
                 } else if m.selectFailed || FirstRunModel.otherIMECopies > 0 {
-                    Text(m.selectFailed ? "系统没切过去。多半是这台 Mac 上还登记着别的螺壳输入法副本（例如废纸篓里的旧版），系统绑到了那一份上。点下面的按钮重新登记，再切一次。"
-                                        : "这台 Mac 上还登记着别的螺壳输入法副本（例如废纸篓里的旧版）。切不过去的话，点下面的按钮重新登记。")
-                        .font(.system(size: 13)).foregroundStyle(Color.lkWarning).fixedSize(horizontal: false, vertical: true)
+                    Text(m.selectFailed ? "切换失败。这台 Mac 上可能还登记着其他螺壳输入法副本（例如废纸篓中的旧版本），系统关联到了那一份。请点按下方按钮重新登记，然后再次切换。"
+                                        : "这台 Mac 上还登记着其他螺壳输入法副本（例如废纸篓中的旧版本）。无法切换时，请点按下方按钮重新登记。")
+                        .font(.system(size: 13)).foregroundStyle(Color.lkWarningText).fixedSize(horizontal: false, vertical: true)
                     Button(m.reregistering ? "正在重新登记…" : "重新登记输入法") { m.reregisterInputMethod() }
                         .buttonStyle(LKSecondaryButton()).disabled(m.reregistering)
                 }
             } else if m.inputMethodState == "added_not_selectable" {
-                Text("已经添加了，系统还在收录螺壳输入法，稍等几秒……").font(.system(size: 13)).foregroundStyle(Color.lkMuted)
+                Text("已添加，系统正在收录螺壳输入法，请稍候…").font(.system(size: 13)).foregroundStyle(Color.lkMuted)
             } else {
                 LKFlow(spacing: 4, lineSpacing: 6) {
                     ForEach(Array(["打开键盘设置", "文字输入 · 输入法 · 编辑…", "左下角 +", "简体中文", "螺壳", "添加"].enumerated()), id: \.offset) { i, x in
@@ -1180,12 +1185,14 @@ struct FirstRunView: View {
                         }
                     }
                 }
+                Text("英文系统中分别为 Chinese, Simplified 和 Luoke 螺壳。列表中没有螺壳时，完全退出系统设置（⌘Q）后重新打开。")
+                    .font(.system(size: 12)).foregroundStyle(Color.lkMuted).fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: 12) {
                     Button { m.openKeyboardSettings() } label: { LKLabel("打开键盘设置", icon: "square-arrow-out-up-right") }
                         .buttonStyle(LKSecondaryButton())
-                    Text("添加好了这里会自动更新").font(.system(size: 12)).foregroundStyle(Color.lkMuted)
+                    Text("添加完成后此处自动更新").font(.system(size: 12)).foregroundStyle(Color.lkMuted)
                 }
-                Text("系统会提示输入法能看到输入内容，螺壳输入法不联网。不想记进记忆，在输入法设置的「通用」里关掉「记录输入内容到记忆」。")
+                Text("系统可能提示「输入法能看到你输入的内容」，所有输入法均有此提示。螺壳输入法不联网：输入的文字在本机处理，默认记入本机的螺壳记忆，不交给可读取内容的云服务；如不需要记录，可在输入法设置的「通用」中关闭「记录输入内容到记忆」。")
                     .font(.system(size: 12)).foregroundStyle(Color.lkMuted).fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -1196,9 +1203,9 @@ struct FirstRunView: View {
     /// 图文教程：每步一张系统设置的截图（Resources/ui/guide/step<N>.jpg，简体中文、浅色）配一句话。
     /// 图和句子照输入法自己的添加引导拷过来（luoke-ime AddGuide.swift 的 AddGuideView.tutorial），两边要一致
     static let imeTutorial = [
-        "打开系统设置的「键盘」，在「文字输入」下面找到「输入法」，点右边的「编辑…」。",
-        "在弹出的窗口里，点左下角的「+」。",
-        "左边选「简体中文」，右边选「螺壳」，点「添加」。回到列表里看到螺壳，点「完成」。",
+        "打开系统设置的「键盘」，在「文字输入」下找到「输入法」，点按右侧的「编辑…」。",
+        "在弹出的窗口中，点按左下角的「+」。",
+        "在左侧选择「简体中文」，右侧选择「螺壳」，点按「添加」。确认列表中已有螺壳后，点按「完成」。",
     ]
 
     /// 完成页上点「图文教程」后整页换成教程（输入法还没加上时才有）；加上了 inputMethodState 一变就自动回到完成页
@@ -1232,7 +1239,7 @@ struct FirstRunView: View {
                 if step + 1 < count {
                     Button("下一步") { m.tutorialStep = step + 1 }.buttonStyle(LKSecondaryButton())
                 } else {
-                    Button("看完了") { m.tutorialStep = nil }.buttonStyle(LKSecondaryButton())
+                    Button("完成") { m.tutorialStep = nil }.buttonStyle(LKSecondaryButton())
                 }
             }
         }

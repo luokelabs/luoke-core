@@ -222,6 +222,15 @@ class Job:
         shutil.copy2(path, dst)
         return f"{GJOB}/files/{name}"
 
+    def tree(self, path: str) -> str:
+        """一个目录（编好的螺壳引擎等），原样拷进去（链接照拷成链接，不跟着走）。返回 VM 里的路径。"""
+        name = os.path.basename(path.rstrip("/"))
+        dst = os.path.join(self.job, "files", name)
+        if os.path.exists(dst):
+            raise Stop(f"放进 VM 的文件重名：{name}")
+        shutil.copytree(path, dst, symlinks=True)
+        return f"{GJOB}/files/{name}"
+
     def python_cache(self) -> None:
         """自带 Python 的下载缓存（哈希钉死在 package_python_app.py，VM 里照样核）：拷 .tar.gz，不拷解开的目录。"""
         dst = os.path.join(self.job, "pycache")
@@ -337,6 +346,15 @@ def sdk_report(out: str) -> str:
 
 # ---------- 主控（release.py 的 build 阶段） ----------
 
+def engine_inputs(job: "Job", env: dict) -> dict:
+    """螺壳引擎：release.py 在宿主机上从冻结的源码编好的目录（luoke-engine 和许可文件）放进 VM。返回 VM 里的环境变量。"""
+    if not env.get("LUOKE_ENGINE_PKG"):
+        return {}
+    if not os.path.isdir(env["LUOKE_ENGINE_PKG"]):
+        raise Stop(f"螺壳引擎要是编好的目录：{env['LUOKE_ENGINE_PKG']}")
+    return {"LUOKE_ENGINE_PKG": job.tree(env["LUOKE_ENGINE_PKG"]), "LUOKE_ENGINE_VERSION": env.get("LUOKE_ENGINE_VERSION", "")}
+
+
 def build_app(env: dict, app_out: str, app_name: str) -> dict:
     """app/build_app.sh 在 VM 里跑：env 里的 LUOKE_*（宿主机路径）换成 VM 里的，编好的 <app_name> 拷回 app_out/。
     返回构建记录（镜像、各源码的提交、病毒库、SDK 报告）。"""
@@ -350,6 +368,7 @@ def build_app(env: dict, app_out: str, app_name: str) -> dict:
         g[var] = job.source(repo, env.get(var, ""))
     if env.get("LUOKE_ICON_FILE"):
         g["LUOKE_ICON_FILE"] = job.file(env["LUOKE_ICON_FILE"])
+    g.update(engine_inputs(job, env))
     job.python_cache()
     if env.get("LUOKE_SCAN_SRC"):
         job.virus_db()

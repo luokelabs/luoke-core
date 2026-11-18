@@ -6,6 +6,7 @@ import os
 import plistlib
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -191,6 +192,30 @@ class DispatchTest(unittest.TestCase):
         self.assertEqual(d.admit_background(False, True)[3], "power_cooldown")   # 均衡档：歇 10 s
         self.clock.tick(10)
         self.assertTrue(d.admit_background(False, True)[0])
+
+    def test_battery_modes(self):
+        """用电池时三档（11-12 定）：照常运行、少干活（后台停，配件说电池上也要做的照做）、不运行大模型（后台全停，前台也不用底座）"""
+        d = self.disp(self.tier32)
+        d.memory_ok_since = self.clock() - 3600
+        self.assertEqual(d.battery_mode, "light")                       # 默认：旧的 background_on_battery=False
+        self.assertEqual(self.disp(self.tier32, background_on_battery=True).battery_mode, "normal")
+        d.on_ac = False
+        self.assertEqual(d.background_state(), ("paused", ["battery"]))
+        self.assertEqual(d.background_state(True), ("running", []))
+        self.assertFalse(d.no_large_model())
+        d.battery_mode = "normal"
+        self.assertTrue(d.background_on_battery)
+        self.assertEqual(d.background_state(), ("running", []))
+        d.battery_mode = "no_large_model"
+        self.assertTrue(d.no_large_model())
+        self.assertEqual(d.background_state(), ("paused", ["battery_no_large_model"]))
+        self.assertEqual(d.background_state(True), ("paused", ["battery_no_large_model"]))   # allow_battery 也不行
+        self.assertEqual(d.admit_background(True, True)[3], "battery_no_large_model")
+        d.on_ac = True                                                     # 接上电源一切照常
+        self.assertFalse(d.no_large_model())
+        self.assertEqual(d.background_state(), ("running", []))
+        d.background_on_battery = False
+        self.assertEqual(d.battery_mode, "light")
 
     def test_retry_after_ms_is_precise(self):
         """retry_after 是取整的秒，retry_after_ms 是精确值（2026-10-17 应 digup 加）：短的间歇别白等一整秒。"""
@@ -579,6 +604,30 @@ class AccessoriesTest(unittest.TestCase):
             self.assertEqual(m["capabilities"]["socket"], own + "/run/agent.sock")
             with unittest.mock.patch.object(accessories, "_is_installed_hub", return_value=True):
                 self.assertEqual(accessories.bundled_helpers(hub)[0]["data"], ["~/.luoke-search"])
+
+    def test_dev_builds_and_dev_instances_use_the_real_data(self):
+        """本机开发不另起一套数据：开发版、开发实例里带的程序和正式版一样用真实的数据目录；只有普通的实验室构建（评测、自动化测试）用自己的"""
+        with tempfile.TemporaryDirectory() as d:
+            hub = self._hub_with_helper(d, data=["~/.luoke-search"])
+            for bid, real in (("ai.luoke.core.dev", True), ("ai.luoke.core.agent.lab", True), ("ai.luoke.core.mail-today.lab", True),
+                              ("ai.luoke.core.lab", False), ("ai.luoke.core.Bad.lab", False)):
+                with open(os.path.join(hub, "Contents", "Info.plist"), "wb") as f:
+                    plistlib.dump({"CFBundleIdentifier": bid}, f)
+                self.assertEqual(accessories.uses_real_data(hub), real, bid)
+                self.assertEqual(accessories.bundled_helpers(hub)[0]["data"],
+                                 ["~/.luoke-search"] if real else ["~/Library/Application Support/luoke-search"], bid)
+
+    def test_dev_instance_hub_installs_where_the_release_does(self):
+        """开发实例（实验室构建带 --real-data）：应用装进 ~/Applications、输入法装进 ~/Library/Input Methods，扫的也是这些；普通的实验室实例照旧装在自己的目录"""
+        from luoke_core.hub import Hub
+        d = tempfile.mkdtemp()
+        h = Hub(Recipe.load(RECIPE), d, d, lab=True, accessory_dirs=[], mem_gb=32, smoke=False, real_data=True)
+        self.assertTrue(h.real_data)
+        self.assertEqual(h.apps_dir, os.path.expanduser("~/Applications"))
+        self.assertEqual(h.input_methods_dir, os.path.expanduser("~/Library/Input Methods"))
+        lab = Hub(Recipe.load(RECIPE), d, d, lab=True, accessory_dirs=[], mem_gb=32, smoke=False)
+        self.assertFalse(lab.real_data)
+        self.assertEqual(lab.apps_dir, os.path.join(d, "Applications.noindex"))
 
     def test_helper_the_mac_is_too_old_for_counts_as_not_carried(self):
         with tempfile.TemporaryDirectory() as d:
@@ -1260,6 +1309,18 @@ class Engine071PrepTest(unittest.TestCase):
         self.addCleanup(srv.shutdown)
         return h, os.path.join(sd, "h.sock"), data
 
+    def test_a_second_hub_in_the_same_env_does_not_start(self):
+        """正式版、开发版、开发实例共用环境目录：另一个主控在应答时，这一个退 4，不删它的 socket"""
+        from luoke_core.__main__ import main
+        from luoke_core.hub import hub_answering
+        h, sock, _ = self._disable_hub()
+        self.assertTrue(hub_answering(sock))
+        ino = os.stat(sock).st_ino
+        self.assertEqual(main(["serve", "--recipe", RECIPE, "--model-dir", h.env_dir, "--env", h.env_dir, "--socket", sock]), 4)
+        self.assertEqual(os.stat(sock).st_ino, ino)
+        self.assertTrue(hub_answering(sock))
+        self.assertFalse(hub_answering(sock + ".none"))
+
     def test_disabling_a_helper_stops_it_without_uninstalling(self):
         """「停用」：记下 enabled=false、停空闲任务、放掉它的模型；数据一点不动，日志里没有卸载两个字"""
         from luoke_core.client import HubClient
@@ -1428,7 +1489,7 @@ class HubUnitTest(unittest.TestCase):
         d = tempfile.mkdtemp()
         return Hub(Recipe.load(RECIPE), d, d, lab=True, accessory_dirs=[d], mem_gb=mem_gb, smoke=False)
 
-    def local_allow_hub(self, tag):
+    def trial_hub(self, tag):
         from luoke_core.hub import Hub
         d = tempfile.mkdtemp()
         rel = os.path.join(d, "release.json")
@@ -1438,20 +1499,13 @@ class HubUnitTest(unittest.TestCase):
         h.recipe.verified = {"luoke-core": {"versions": ["0.1.0"]}, "luoke-mail": {"versions": ["0.13.15"]}}
         return h, d
 
-    def write_allow(self, d, entries):
-        p = os.path.join(d, "local-verified.json")
-        with open(p, "w") as f:
-            json.dump({"allowed": entries}, f)
-        st = os.stat(p)
-        os.utime(p, (st.st_atime, st.st_mtime + len(entries) + 1))     # 同一秒里改两次也要让主控重读
-
     def test_hub_only_routes_check_the_peer_process(self):
         """luoke-top 10-20：forbidden 要答 403（之前 STATUS 里没有，落到 500）；只给本体用的接口核对端进程，不只信自报的身份。
         命令行 luoke（主控同一个 Python 跑 -m luoke_core.cli）只在 allow_cli 的接口上算数。"""
         from luoke_core import hub as hubmod
         from luoke_core.proxy import STATUS
         self.assertEqual(STATUS["forbidden"], 403)
-        h, d = self.local_allow_hub("internal-1020")
+        h, d = self.trial_hub("internal-1020")
         h.recipe.verified["luoke-core"] = {"versions": ["0.1.0"]}
         hd = object.__new__(hubmod.Handler)
         hd.hub = h
@@ -1475,6 +1529,34 @@ class HubUnitTest(unittest.TestCase):
             with self.assertRaises(BadRequest):
                 hd.require_hub("luoke-mail/0.13.15", "x")
 
+    def test_orphaned_hub_trusts_no_peer(self):
+        """beta 2 安全审查 M4：本体没了、主控的父进程变成 1 时，之前谁连上来都算本体。同账户的程序先结束本体、
+        赶在主控（--parent-watch）退出前连上来，就能拿 /endpoint 的密钥。现在父进程是 1 时谁都不算；实验室照旧放行"""
+        from luoke_core import hub as hubmod
+        h, d = self.local_allow_hub("internal-1113")
+        h.recipe.verified["luoke-core"] = {"versions": ["0.1.0"]}
+        hd = object.__new__(hubmod.Handler)
+        hd.hub = h
+        peer = {"pid": 4242}
+        hd._peer_pid = lambda: peer["pid"]
+        with unittest.mock.patch.object(hubmod.os, "getppid", lambda: 1), \
+             unittest.mock.patch.object(hubmod.procs, "exe_path", lambda pid: sys.executable), \
+             unittest.mock.patch.object(hubmod.procs, "argv", lambda pid: ["python3", "-m", "luoke_core.cli"]):
+            for pid in (4242, 1, None):                     # 随便哪个进程、自称 launchd、读不到对端
+                peer["pid"] = pid
+                with self.assertRaises(BadRequest) as cm:
+                    hd.require_hub("luoke-core/0.1.0", "x")
+                self.assertEqual(cm.exception.code, "forbidden")
+                with self.assertRaises(BadRequest):
+                    hd.require_hub("luoke-core/0.1.0", "x", allow_cli=True)   # 命令行也不认：主控马上就退出
+            h.lab, h.real_data = True, True                     # 开发实例（--real-data）：本体起的，父进程是 1 时也不认
+            peer["pid"] = 4242
+            with self.assertRaises(BadRequest) as cm:
+                hd.require_hub("luoke-core/0.1.0", "x")
+            self.assertEqual(cm.exception.code, "forbidden")
+            h.lab, h.real_data = True, False
+            hd.require_hub("luoke-core/0.1.0", "x")                            # 普通实验室主控不是本体起的，照旧放行
+
     def test_old_engines_are_removed_after_the_new_one_passes(self):
         """10-27（beta1.1）：换了引擎、新引擎冒烟检查过了，engines/ 里旧版本删掉；开发版、实验室不动，别的东西不碰"""
         from luoke_core import hub as hubmod
@@ -1494,40 +1576,25 @@ class HubUnitTest(unittest.TestCase):
             h.lab, h.release_path = False, None
             self.assertEqual(h.prune_old_engines(), [])
 
-    def test_rolled_back_accessory_keeps_the_verification_it_had(self):
-        """issue #12（10-20"认它当时的验证"）：装着的版本被本版配方认时记下验证记录；换回这个版本后，后来的主控按记录认它，
-        只给当时验证过（硬性条目过了）的任务；没装着的旧版本、没有记录的版本不认。"""
-        h, d = self.local_allow_hub("beta1")
-        app = os.path.join(d, "luoke-mail.app")
-        os.makedirs(os.path.join(app, "Contents", "Resources"))
-        def install(version):
-            with open(os.path.join(app, "Contents", "Resources", "luoke-accessory.json"), "w") as f:
-                json.dump({"contract": 1, "accessory": "luoke-mail", "bundle_id": "ai.luoke.mail", "name": "邮件助手", "version": version,
-                           "type": "app", "entry": ["-m", "x"], "tasks": [], "data": []}, f)
-            h.manifests = h.scan_accessories()
-        h.recipe.verified["luoke-mail"] = {"versions": ["0.13.15"], "tasks": {
-            "luoke-mail.triage": [{"accessory_version": "0.13.15", "hard_ok": True}],
-            "luoke-mail.thread": [{"accessory_version": "0.13.15", "hard_ok": False}]}}
-        install("0.13.15")
-        with open(os.path.join(d, "verified-history.json"), encoding="utf-8") as f:
-            noted = json.load(f)["luoke-mail"]["0.13.15"]["tasks"]
-        # 评测过且过了的（triage）记，评测过没过的（thread）不记；配方里根本没有评测记录的（草稿、每日摘要这类）照本版当时放行的也记（issue #32）
-        unevaluated = sorted(t for t, spec in h.recipe.tasks.items() if spec.get("accessory") == "luoke-mail" and t not in ("luoke-mail.triage", "luoke-mail.thread"))
-        self.assertIn("luoke-mail.draft", unevaluated)
-        self.assertEqual(noted, sorted(["luoke-mail.triage"] + unevaluated))
-        h.recipe.verified["luoke-mail"] = {"versions": ["0.14.0"], "tasks": {}}      # 下一版主控只认 0.14.0
-        install("0.14.0")
-        with self.assertRaises(BadRequest):
-            h.check_accessory("luoke-mail/0.13.15")              # 装着的不是它：不认
-        install("0.13.15")                                        # 换回上一版
-        self.assertEqual(h.check_accessory("luoke-mail/0.13.15", "luoke-mail.triage"), ("luoke-mail", "0.13.15"))
+    def test_any_version_of_a_known_accessory_is_accepted(self):
+        """主控不核配件的版本，配方认得的、装着的配件哪一版都放行，任务也不按版本挑；
+        清单写了 min_core 的，主控比它旧就答 core_too_old。认不得的配件照旧拒绝"""
+        from luoke_core import __version__
+        h, d = self.trial_hub("beta1")
+        h.recipe.verified["luoke-mail"] = {"versions": ["0.13.15"]}
+        for v in ("0.13.15", "0.14.0", "0.19.66"):
+            self.assertEqual(h.check_accessory(f"luoke-mail/{v}", "luoke-mail.triage"), ("luoke-mail", v))
         with self.assertRaises(BadRequest) as cm:
-            h.check_accessory("luoke-mail/0.13.15", "luoke-mail.thread")
-        self.assertEqual(cm.exception.code, "task_unavailable")
-        self.assertEqual(h.check_accessory("luoke-mail/0.13.15", "luoke-mail.draft"), ("luoke-mail", "0.13.15"))   # issue #32
-        install("0.13.14")
-        with self.assertRaises(BadRequest):
-            h.check_accessory("luoke-mail/0.13.14")              # 没有记录：不认
+            h.check_accessory("luoke-new/1.0")
+        self.assertEqual(cm.exception.code, "unknown_accessory")
+        h.manifests = {"ai.luoke.new": {"accessory": "luoke-new", "version": "1.0"}}     # 装着的配件：认得
+        self.assertEqual(h.check_accessory("luoke-new/1.0"), ("luoke-new", "1.0"))
+        h.manifests["ai.luoke.new"]["min_core"] = __version__
+        self.assertEqual(h.check_accessory("luoke-new/1.0")[0], "luoke-new")
+        h.manifests["ai.luoke.new"]["min_core"] = "99.0"
+        with self.assertRaises(BadRequest) as cm:
+            h.check_accessory("luoke-new/1.0")
+        self.assertEqual(cm.exception.code, "core_too_old")
 
     def test_rollback_swaps_the_previous_copy_back(self):
         import plistlib
@@ -1598,44 +1665,14 @@ class HubUnitTest(unittest.TestCase):
             self.assertFalse(any(os.path.exists(p) for p in (cur, same, old)))
             self.assertTrue(os.path.isdir(other))
 
-    def test_local_allow_only_on_internal_hubs(self):
-        """2026-10-17：试用期里项目会话可以在开发机上放行自己的新版配件；beta 和公开发布一点不放松。"""
-        h, d = self.local_allow_hub("internal-1017")
-        with self.assertRaises(BadRequest):
-            h.check_accessory("luoke-mail/0.13.18")
-        self.write_allow(d, [{"accessory": "luoke-mail", "version": "0.13.18", "by": "luoke-mail", "reason": "t"},
-                             {"accessory": "luoke-new", "version": "1.0", "by": "x"},          # 新配件：不放行
-                             {"accessory": "luoke-core", "version": "9", "by": "x"},           # 主控自己：不放行
-                             {"accessory": "luoke-mail", "version": "0.13.15", "by": "x"}])    # 配方里已有：不算放行
-        self.assertEqual(h.check_accessory("luoke-mail/0.13.18"), ("luoke-mail", "0.13.18"))
-        self.assertEqual([e["version"] for e in h.local_allow_list()], ["0.13.18"])
-        with self.assertRaises(BadRequest):
-            h.check_accessory("luoke-new/1.0")
-        with open(os.path.join(d, "logs", "hub.log"), encoding="utf-8") as f:
-            self.assertIn("local allow used: luoke-mail/0.13.18", f.read())
-        self.write_allow(d, [])                       # 撤销立即生效
-        with self.assertRaises(BadRequest):
-            h.check_accessory("luoke-mail/0.13.18")
-        for tag in ("beta1", "v1.0", ""):
-            h, d = self.local_allow_hub(tag)
-            self.write_allow(d, [{"accessory": "luoke-mail", "version": "0.13.18", "by": "luoke-mail"}])
-            with self.assertRaises(BadRequest):
-                h.check_accessory("luoke-mail/0.13.18")
-            self.assertEqual(h.local_allow_list(), [])
-        h, d = self.local_allow_hub("local-1017-2330")
-        self.write_allow(d, [{"accessory": "luoke-mail", "version": "0.13.18", "by": "luoke-mail"}])
-        self.assertEqual(h.check_accessory("luoke-mail/0.13.18")[1], "0.13.18")
-
     def test_downloads_only_for_open_tasks(self):
         """2026-11-03：专用模型只给开着的任务下。配件不在 verified 里（发布评测没跑，例如流水线还没打包的配件），或任务的 tiers
         排除了这一档（空的就是哪一档都没开），就不下，任务状态答 unsupported；换档、菜单栏补下都照这个，
         应用首次运行和升级用的 Manifests.taskOpen 是同一条规则。"""
         r = Recipe.load(RECIPE)
-        for tier in ("16", "32", "128"):                  # 开发配方都认（"*"）、没写 tiers：三档都开
+        for tier in ("16", "32", "128"):                  # 没写 tiers：三档都开
             self.assertTrue(r.task_open("luoke-search.embed", tier))
-        r.verified = {"luoke-core": {"versions": ["0.1.0"]}, "luoke-mail": {"versions": ["0.13.15"]}}
-        self.assertFalse(r.task_open("luoke-search.embed", "32"))
-        r.verified["luoke-search"] = {"versions": ["0.1.0"]}
+        r.verified = {"luoke-core": {"versions": ["0.1.0"]}}                # 配件版本不看：verified 里没有也开
         self.assertTrue(r.task_open("luoke-search.embed", "32"))
         r.tasks["luoke-search.embed"]["tiers"] = ["128"]                    # 支持台账只开了 128
         self.assertEqual([r.task_open("luoke-search.embed", t) for t in ("16", "32", "128")], [False, False, True])
@@ -1645,42 +1682,21 @@ class HubUnitTest(unittest.TestCase):
         self.assertTrue(r.task_open("luoke-search.embed", "32"))
         self.assertFalse(r.task_open("luoke-none.task", "32"))
 
-        h, d = self.local_allow_hub("internal-1103")        # 128 档，配方只认主控和邮件
-        h.manifests = {}                                     # 不看本机装着的配件和起来时记下的验证记录
-        hist = os.path.join(h.env_dir, h.VERIFIED_HISTORY)
-        if os.path.exists(hist):
-            os.remove(hist)
-        self.assertEqual(h.tier_models("128"), ["gemma-4-26b-8bit"])       # 输入法、深度搜索都没认：只下底座
+        h, d = self.trial_hub("internal-1103")        # 128 档
+        h.manifests = {}
+        for t in [t for t, m in h.recipe.assignment["128"].get("special", {}).items()]:
+            h.recipe.tasks[t]["tiers"] = []                  # 台账都没开：只下底座
+        self.assertEqual(h.tier_models("128"), ["gemma-4-26b-8bit"])
         need = h.needed_downloads()
         self.assertIn("gemma-4-26b-8bit", need)
         self.assertNotIn("embeddinggemma-2", need)
         self.assertNotIn("qwen3.5-0.8b-base-4bit", need)
-        self.assertEqual(h.task_status("luoke-search.embed"), {"status": "unsupported", "reason": "配件还没在这一版螺壳里验证过", "combo": None})
-        asked = []
-        h.start_downloads = lambda names=None: asked.extend(names) or {}
-        h.apply_tier("32")                                   # 换档也只下开着的
-        self.assertEqual((asked, h.pending_tier), (["qwen3.5-9b-4bit"], "32"))
-        self.assertNotIn("embeddinggemma-2", h.needed_downloads())      # 换档等着的那一档也一样
-        # 本版配方不认、但装着的版本以前的发布验证过这一项（验证记录，同 check_accessory）：专用模型照下
-        h.manifests = {"ai.luoke.search": {"accessory": "luoke-search", "version": "0.1.0"}}
-        with open(hist, "w") as f:
-            json.dump({"luoke-search": {"0.1.0": {"release": "internal-1102", "tasks": ["luoke-search.embed"], "at": 1}}}, f)
-        self.assertIn("embeddinggemma-2", h.needed_downloads())
-        self.assertNotEqual(h.task_status("luoke-search.embed")["status"], "unsupported")
-        with open(hist, "w") as f:                           # 当时没验证这一项：请求会答 task_unavailable，就不下
-            json.dump({"luoke-search": {"0.1.0": {"release": "internal-1102", "tasks": [], "at": 2}}}, f)
-        self.assertNotIn("embeddinggemma-2", h.needed_downloads())
-        self.assertEqual(h.task_status("luoke-search.embed")["status"], "unsupported")
-        h.manifests = {}
-        h.recipe.verified["luoke-search"] = {"versions": ["0.2.0"]}    # 新配方认了：没装也下（菜单栏照常补下）
-        self.assertIn("embeddinggemma-2", h.needed_downloads())
-        h.recipe.tasks["luoke-search.embed"]["tiers"] = []             # 认了但台账哪一档都没开：不下，答这一档没通过验证
-        self.assertNotIn("embeddinggemma-2", h.needed_downloads())
         self.assertEqual(h.task_status("luoke-search.embed")["reason"], "这一档没通过验证")
-        h.recipe.verified["luoke-ime"] = {"versions": ["0.1.0"]}       # 两个任务共用一个专用模型：有一个开着就下
-        h.recipe.tasks["luoke-ime.rerank"]["tiers"] = []
+        h.recipe.tasks["luoke-search.embed"]["tiers"] = None             # 开了：没装配件也下（菜单栏照常补下）
+        self.assertIn("embeddinggemma-2", h.needed_downloads())
+        h.recipe.tasks["luoke-ime.rerank"]["tiers"] = None               # 两个任务共用一个专用模型：有一个开着就下
         self.assertIn("qwen3.5-0.8b-base-4bit", h.tier_models("128"))
-        h.recipe.tasks["luoke-ime.predict"]["tiers"] = []
+        h.recipe.tasks["luoke-ime.rerank"]["tiers"] = []
         self.assertNotIn("qwen3.5-0.8b-base-4bit", h.tier_models("128"))
 
     def test_app_processes_survive_c_locale(self):
@@ -1769,7 +1785,8 @@ class HubUnitTest(unittest.TestCase):
         self.assertFalse(any(e.key in a for a in cmd) or any(e.key in v for v in env.values()))
         self.assertEqual(env["HF_HUB_OFFLINE"], "1")
         sp = os.path.join(d, "settings.json")
-        self.assertEqual(json.load(open(sp)), {"auth": {"api_key": e.key}})     # 旧的整份清掉，只留密钥
+        # 旧的整份清掉，只留密钥；CORS 关掉（oMLX 默认 "*"）
+        self.assertEqual(json.load(open(sp)), {"auth": {"api_key": e.key}, "server": {"cors_origins": []}})
         self.assertEqual(os.stat(sp).st_mode & 0o777, 0o600)
         self.assertIn('"HF_HUB_OFFLINE": "1"', open(os.path.join(ROOT, "luoke_core", "scorer.py")).read())
 
@@ -1846,6 +1863,36 @@ class HubUnitTest(unittest.TestCase):
             self.assertFalse(h.fits_memory("qwen3.5-9b-4bit"))           # 5.8 > (7-2)*0.95
         finally:
             machine.memory_sample = real
+
+    def test_battery_mode_setting(self):
+        """battery_mode：旧设置照认、写的时候旧字段跟着写；不运行大模型时不装底座、本机检查往后放"""
+        from luoke_core.hub import BadRequest, Hub, NO_LARGE_MODEL_MSG
+        from luoke_core.engine import EngineError
+        d = tempfile.mkdtemp()
+        os.makedirs(os.path.join(d, "Qwen3.5-9B-4bit"))
+        with open(os.path.join(d, "settings.json"), "w") as f:
+            json.dump({"background_on_battery": True}, f)
+        h = Hub(Recipe.load(RECIPE), d, d, lab=True, accessory_dirs=[d], mem_gb=32, smoke=False)
+        self.assertEqual((h.settings["battery_mode"], h.dispatcher.battery_mode), ("normal", "normal"))
+        h.update_settings({"battery_mode": "no_large_model"})
+        self.assertEqual((h.settings["battery_mode"], h.settings["background_on_battery"]), ("no_large_model", False))
+        with open(os.path.join(d, "settings.json")) as f:
+            self.assertEqual(json.load(f)["battery_mode"], "no_large_model")
+        with self.assertRaises(BadRequest):
+            h.update_settings({"battery_mode": "off"})
+        h.update_settings({"background_on_battery": True})                # 旧客户端
+        self.assertEqual(h.settings["battery_mode"], "normal")
+        h.update_settings({"battery_mode": "no_large_model"})
+        h.dispatcher.on_ac = False
+        h.base_id = "Qwen3.5-9B-4bit"                                       # 测试里没起引擎：直接给
+        with self.assertRaises(EngineError):
+            h.load_base()
+        rec = h.smoke_check(force=True)
+        self.assertTrue(rec.get("deferred"))
+        self.assertEqual(rec["error"], NO_LARGE_MODEL_MSG)
+        self.assertIsNone(h.smoke_failed)
+        h2 = Hub(Recipe.load(RECIPE), d, d, lab=True, accessory_dirs=[d], mem_gb=32, smoke=False)
+        self.assertEqual(h2.dispatcher.battery_mode, "no_large_model")     # 落盘的新值开机就用
 
     def test_user_chosen_tier(self):
         """省空间（issue luoke-core#2）：大内存机器可以选更低的档；设置里存的档开机就用；不能往上选。"""
@@ -3186,6 +3233,62 @@ class MinosCheckTest(unittest.TestCase):
             self.assertEqual(sorted(minos_check.check_app(app)[1]), [("Contents/Frameworks/libother.dylib", "26.0")])
 
 
+    def test_min_macos_has_one_source(self):
+        """最低 macOS 只在 minos_check.LUOKE_MIN_MACOS 定：build_app.sh 和 package_python_app.py 都从那里读，不各写一个"""
+        sys.path.insert(0, os.path.join(ROOT, "tools"))
+        import importlib.util, minos_check
+        self.assertEqual(minos_check.LUOKE_MIN_MACOS, "26.2")
+        with open(os.path.join(ROOT, "app", "build_app.sh"), encoding="utf-8") as f:
+            sh = f.read()
+        self.assertNotRegex(sh, r'"LSMinimumSystemVersion":\s*"\d')
+        self.assertIn('"LSMinimumSystemVersion": os.environ["LUOKE_MIN_MACOS"]', sh)
+        line = next(x for x in sh.splitlines() if x.startswith("LUOKE_MIN_MACOS=$("))
+        cmd = line[len("LUOKE_MIN_MACOS=$("):line.index(") ||")].replace('"$root/tools"', os.path.join(ROOT, "tools"))
+        out = subprocess.run(["/bin/sh", "-c", cmd], capture_output=True, text=True)
+        self.assertEqual(out.stdout.strip(), "26.2", out.stderr)          # build_app.sh 那一行真读得出来
+        spec = importlib.util.spec_from_file_location("ppa_minos", os.path.join(ROOT, "tools", "package_python_app.py"))
+        ppa = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(ppa)
+        self.assertEqual(ppa.MIN_MACOS, minos_check.LUOKE_MIN_MACOS)
+
+    def test_floor_problems_cover_the_app_and_nested_apps(self):
+        """螺壳.app 和里面嵌套的 .app 声称的最低 macOS 不能低于 LUOKE_MIN_MACOS（没写也不行）；gap 写出声称的和实际要的"""
+        sys.path.insert(0, os.path.join(ROOT, "tools"))
+        import minos_check, plistlib
+        with tempfile.TemporaryDirectory() as d:
+            app = os.path.join(d, "螺壳.app")
+            os.makedirs(os.path.join(app, "Contents", "MacOS"))
+            with open(os.path.join(app, "Contents", "Info.plist"), "wb") as f:
+                plistlib.dump({"LSMinimumSystemVersion": "26.2"}, f)
+            with open(os.path.join(app, "Contents", "MacOS", "LuokeCore"), "wb") as f:
+                f.write(self.macho((14, 0)))
+            self.assertEqual(minos_check.floor_problems(app), [])
+            self.assertEqual(minos_check.gap(app), ("26.2", "14.0"))
+            nested = os.path.join(app, "Contents", "Helpers", "Old.app", "Contents")
+            os.makedirs(nested)
+            with open(os.path.join(nested, "Info.plist"), "wb") as f:
+                plistlib.dump({"LSMinimumSystemVersion": "14.0"}, f)
+            os.makedirs(os.path.join(app, "Contents", "Resources", "Bare.app", "Contents"))
+            self.assertEqual(minos_check.floor_problems(app), [("Contents/Helpers/Old.app", "14.0"), ("Contents/Resources/Bare.app", None)])
+            with open(os.path.join(app, "Contents", "Info.plist"), "wb") as f:
+                plistlib.dump({"LSMinimumSystemVersion": "14.0"}, f)
+            self.assertEqual(minos_check.floor_problems(app)[0], (".", "14.0"))
+            self.assertEqual(minos_check.floor_problems(app, "13.0"), [("Contents/Resources/Bare.app", None)])
+            self.assertEqual(minos_check.main([app, "--floor"]), 1)
+
+    def test_release_stops_on_the_floor(self):
+        """发布：主控或嵌套的 .app 低于 LUOKE_MIN_MACOS 就停；引擎包要的比它高也停；单独安装的配件（输入法）先只提醒"""
+        with open(os.path.join(ROOT, "tools", "release.py"), encoding="utf-8") as f:
+            src = f.read()
+        build = src[src.index("    limit, bad = minos_check.check_app(paths.app)"):]
+        self.assertLess(build.index("minos_check.floor_problems(paths.app)"), build.index("leak_check(paths.app"))
+        self.assertIn("die(f\"主控 .app 或嵌套的 .app 声称的最低 macOS 低于螺壳的", build)
+        acc = src[src.index("limit, bad = minos_check.check_app(app)"):src.index("zip_path = os.path.join(paths.acc_dir")]
+        self.assertIn("minos_check.floor_problems(app)", acc)
+        self.assertIn("say(f\"提醒：", acc)
+        self.assertNotIn("die(f\"{name} 声称的最低", acc)
+        self.assertIn("minos_check.version_tuple(top) > minos_check.version_tuple(minos_check.LUOKE_MIN_MACOS)", src)
+
 class DualSourceTest(unittest.TestCase):
     """模型文件两个地址（ModelScope + Hugging Face）：测速排序、一个地址坏了换另一个续传。"""
 
@@ -3600,7 +3703,7 @@ class ReleaseToolsTest(unittest.TestCase):
             for tag, stops in (("beta2-rc1", True), ("beta2", True), ("internal-1106", False)):
                 paths = types.SimpleNamespace(recipe=recipe, manifest=manifest, release=tag, out=d, app=os.path.join(d, "app", "x.app"))
                 with unittest.mock.patch.object(self.rel, "release_team", lambda: ""), \
-                        unittest.mock.patch.object(self.rel.Recipe, "load", lambda p: types.SimpleNamespace(version_verified=lambda *x: True)), \
+                        unittest.mock.patch.object(self.rel.Recipe, "load", lambda p: types.SimpleNamespace(version_verified=lambda *x: True, engine={})), \
                         unittest.mock.patch.object(self.rel.subprocess, "run", lambda *x, **k: calls.append(tag) or (_ for _ in ()).throw(RuntimeError("built"))):
                     if stops:
                         with self.assertRaises(SystemExit):
@@ -3632,6 +3735,94 @@ class ReleaseToolsTest(unittest.TestCase):
                 json.dump({"accessory": "luoke-mail", "version": "0.19.28"}, f)
             self.assertEqual(self.rel.bundled_unverified(d, {"luoke-mail": {"versions": ["0.19.27"]}}), "0.19.28")
             self.assertIsNone(self.rel.bundled_unverified(d, {"luoke-mail": {"versions": ["0.19.28"]}}))
+            # 主控不核配件版本以后（62f5427）：邮件助手没证据和搜索一样，内部版照出（原来内部版也停），RC、正式版停
+            for tag in ("internal-1114", "local-1114-0900"):
+                self.rel.check_mail_evidence(tag, d, {})
+            for tag in ("beta2", "beta2-rc1", "v1.0"):
+                with self.assertRaises(SystemExit):
+                    self.rel.check_mail_evidence(tag, d, {})
+                self.rel.check_mail_evidence(tag, d, {"luoke-mail": {"versions": ["0.19.28"]}})
+
+    def test_accessory_without_evidence_has_no_tiers(self):
+        """主控只看 tiers 以后，这一版一条证据都没有的配件，配方里它的任务哪一档都不开
+        （原来主控的 task_open 要「配件在 verified 里有版本」）；有证据的照台账，agent 核心照源码补进 verified 的不受影响"""
+        r = {"tasks": {"luoke-mail.triage": {"accessory": "luoke-mail", "tiers": ["16", "128"]},
+                       "luoke-ime.tidy": {"accessory": "luoke-ime", "tiers": ["128"]},
+                       "luoke-ime.old": {"accessory": "luoke-ime", "tiers": []},
+                       "luoke-agent.chat": {"accessory": "luoke-agent", "tiers": ["128"]}}}
+        verified = {"luoke-core": {"versions": ["0.2.0"]}, "luoke-mail": {"versions": ["0.19.28"], "tasks": {}},
+                    "luoke-agent": {"versions": ["0.0.5"]}}
+        self.assertEqual(self.rel.close_unevaluated_tasks(r, verified), ["luoke-ime.tidy"])
+        self.assertEqual(r["tasks"]["luoke-ime.tidy"]["tiers"], [])
+        self.assertIn("没有评测证据", r["tasks"]["luoke-ime.tidy"]["_tiers"])
+        self.assertEqual(r["tasks"]["luoke-mail.triage"]["tiers"], ["16", "128"])
+        self.assertEqual(r["tasks"]["luoke-agent.chat"]["tiers"], ["128"])
+
+    def _unverified_note(self, accessory: str, version: str, verified: dict) -> tuple:
+        """note_unverified_bundled 写进流程报告的那句，和同一份 verified 下 close_unevaluated_tasks 关没关它的任务"""
+        ib = self._tool("internal_build")
+        repo = accessory
+        with tempfile.TemporaryDirectory() as d:
+            sub = "Resources" if accessory == "luoke-search" else "packaging"
+            os.makedirs(os.path.join(d, sub))
+            with open(os.path.join(d, sub, "luoke-accessory.json"), "w", encoding="utf-8") as f:
+                json.dump({"accessory": accessory, "version": version}, f)
+            with unittest.mock.patch.object(ib.Recipe, "load", lambda p: unittest.mock.Mock(verified=verified)):
+                ib.note_unverified_bundled("internal-1116", {repo: d})
+        note = ib.TIMELINE.data.get("kept", {}).pop(f"{repo}.evidence")
+        r = {"tasks": {"t": {"accessory": accessory, "tiers": ["16", "128"]}}}
+        self.rel.close_unevaluated_tasks(r, verified)
+        return note, r["tasks"]["t"]["tiers"]
+
+    def test_unverified_note_when_no_version_has_evidence(self):
+        """这一版一个版本的证据都没有：任务在配方里全关了，报告不能写成「主控照样用它」（#211 审查）；搜索只能按字词搜"""
+        note, tiers = self._unverified_note("luoke-mail", "0.19.60", {"luoke-core": {"versions": ["0.2.0"]}})
+        self.assertEqual(tiers, [])
+        self.assertIn("0.19.60 这一版没有评测证据，它的任务这一版哪一档都不开", note)
+        self.assertNotIn("照台账", note)
+        self.assertNotIn("按字词搜", note)
+        note, tiers = self._unverified_note("luoke-search", "0.1.5", {})
+        self.assertEqual(tiers, [])
+        self.assertIn("它的任务这一版哪一档都不开，只能按字词搜", note)
+
+    def test_unverified_note_when_another_version_has_evidence(self):
+        """证据是别的版本的、打进来的这一版没有：任务照台账开着，用的是没评测过的版本（内部版才会走到这里，RC、正式版在 evidence_gate 停）"""
+        note, tiers = self._unverified_note("luoke-mail", "0.19.60", {"luoke-mail": {"versions": ["0.19.59"]}})
+        self.assertEqual(tiers, ["16", "128"])
+        self.assertIn("0.19.60 这一版没有评测证据，任务照台账开着，但这一版没评测过", note)
+        self.assertNotIn("哪一档都不开", note)
+        note, tiers = self._unverified_note("luoke-search", "0.1.5", {"luoke-search": {"versions": ["0.1.4"]}})
+        self.assertEqual(tiers, ["16", "128"])
+        self.assertIn("任务照台账开着，但这一版没评测过", note)
+        self.assertNotIn("按字词搜", note)
+
+    def test_build_gates_mem_on_evidence_and_agent_on_name(self):
+        """打包阶段：记忆没证据，内部版照出、RC 停（原来一律停：learn 会被拒）；agent 不核版本，只核配方 verified 里有它的名字"""
+        import types
+        with tempfile.TemporaryDirectory() as d:
+            mem = os.path.join(d, "mem")
+            os.makedirs(os.path.join(mem, "packaging"))
+            with open(os.path.join(mem, "packaging", "accessory.json"), "w", encoding="utf-8") as f:
+                json.dump({"accessory": "luoke-mem", "version": "0.28.3"}, f)
+            recipe, manifest = os.path.join(d, "recipe.json"), os.path.join(d, "release.json")
+            for p in (recipe, manifest):
+                open(p, "w").write("{}")
+            def built(*x, **k):
+                raise RuntimeError("built")
+            for tag, verified, agent, stops in (
+                    ("internal-1114", {}, "", False),                                     # 记忆没证据：内部版照出
+                    ("beta2-rc1", {}, "", True),                                          # RC 停
+                    ("beta2-rc1", {"luoke-mem": {"versions": ["0.28.3"]}}, "", False),
+                    ("internal-1114", {"luoke-mem": {"versions": ["0.28.3"]}}, "/agent", True),       # 带 agent，verified 里没它的名字：停
+                    ("internal-1114", {"luoke-mem": {"versions": ["0.28.3"]}, "luoke-agent": {"versions": ["0.0.1"]}}, "/agent", False)):  # 版本不管
+                a = types.SimpleNamespace(repo_override={"luoke-mem": mem, **({"luoke-agent": agent} if agent else {})})
+                paths = types.SimpleNamespace(recipe=recipe, manifest=manifest, release=tag, out=d, app=os.path.join(d, "app", "x.app"))
+                rec = Recipe.load(os.path.join(ROOT, "recipes", "dev.json"))
+                rec.verified = verified
+                with unittest.mock.patch.object(self.rel.Recipe, "load", lambda p, rec=rec: rec), \
+                        unittest.mock.patch.object(self.rel.subprocess, "run", built):
+                    with self.assertRaises(SystemExit if stops else RuntimeError, msg=(tag, verified, agent)):
+                        self.rel.stage_build(a, paths)
 
     def test_transcribe_and_tidy_eval_summaries(self):
         """luoke-ime 的转写评测（evals/transcribe）：总分是字准确率，硬性条目由评测程序判（按住不说话不出字），延迟看终稿；每档各评一遍"""
@@ -3696,6 +3887,56 @@ class ReleaseToolsTest(unittest.TestCase):
         spec.loader.exec_module(m)
         return m
 
+    def _release_copies(self, d, names):
+        """build.noindex/release/ 的样子：names 按从旧到新排，目录时间各差一小时"""
+        t = time.time() - 100 * 3600
+        for i, n in enumerate(names):
+            os.makedirs(os.path.join(d, n, "apps.noindex", "螺壳输入法.app", "Contents"))
+            os.utime(os.path.join(d, n), (t + i * 3600, t + i * 3600))
+
+    def test_prune_release_copies_keeps_newest_three_internal(self):
+        """出完一版只留最近 3 份 internal-*；这一版、上一版（差异对比 / 证据沿用）留着；beta、rc、local- 不动；删前注销 .app"""
+        ib = self._tool("internal_build")
+        with tempfile.TemporaryDirectory() as d:
+            self._release_copies(d, ["beta2-rc1", "local-1109-0900", "internal-1110", "internal-1111", "internal-1112-2",
+                                     "internal-1113", "internal-1114", "internal-1114-2", "beta2"])
+            with open(os.path.join(d, "internal-notes.txt"), "w") as f:
+                f.write("x")                       # 不是目录：不碰
+            unreg = []
+            with unittest.mock.patch.object(ib.lsapps, "_ls", lambda flag, path: unreg.append((flag, path))):
+                removed = ib.prune_release_copies("internal-1114-2", ("internal-1110", None), base=d)
+            self.assertEqual(sorted(removed), ["internal-1111", "internal-1112-2"])
+            self.assertEqual(sorted(os.listdir(d)), ["beta2", "beta2-rc1", "internal-1110", "internal-1113", "internal-1114",
+                                                     "internal-1114-2", "internal-notes.txt", "local-1109-0900"])
+            self.assertEqual(sorted(os.path.basename(os.path.dirname(os.path.dirname(p))) for f, p in unreg if f == "-u"),
+                             ["internal-1111", "internal-1112-2"])
+
+    def test_prune_release_copies_never_fails_the_build(self):
+        """删不掉（或目录不在）只记一笔，不抛：这一版已经发出去了"""
+        ib = self._tool("internal_build")
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(ib.prune_release_copies("internal-1114", base=os.path.join(d, "missing")), [])
+            self._release_copies(d, ["internal-1110", "internal-1111", "internal-1112", "internal-1113", "internal-1114"])
+            def boom(path, *a, **k):
+                raise PermissionError(13, "denied", path)
+            with unittest.mock.patch.object(ib.shutil, "rmtree", boom), unittest.mock.patch.object(ib.lsapps, "_ls", lambda *a: None):
+                self.assertEqual(ib.prune_release_copies("internal-1114", base=d), [])
+            self.assertEqual(len(os.listdir(d)), 5)
+            with unittest.mock.patch.object(ib.lsapps, "_ls", lambda *a: None):     # 正在出的那份就算排不进最近 3 份也不删
+                os.utime(os.path.join(d, "internal-1114"), (0, 0))
+                self.assertEqual(sorted(ib.prune_release_copies("internal-1114", base=d)), ["internal-1110"])
+
+    def test_prune_runs_only_after_publishing_an_internal_build(self):
+        """只在发布那一步后面、只对 internal-*（beta、候选版、本机版不走这里），下一版要比的那版也传进去"""
+        with open(os.path.join(ROOT, "tools", "internal_build.py"), encoding="utf-8") as f:
+            src = f.read()
+        main_src = src[src.index("def main()"):]
+        i, j = main_src.index('step("publish"'), main_src.index("prune_release_copies(")
+        self.assertLess(i, j)
+        self.assertLess(j, main_src.index("发布后的复测"))
+        self.assertIn("if INTERNAL_TAG.fullmatch(a.tag):", main_src[i:j])
+        self.assertIn("prune_release_copies(a.tag, (prev, reuse_from, nxt))", main_src)
+
     def test_release_requests_from_issue_comments(self):
         """/release 谁能发、--accept 只认负责人本人（会话的留言以「（…会话）」开头）、beta 不归流水线。"""
         d = self._tool("release_daemon")
@@ -3724,6 +3965,139 @@ class ReleaseToolsTest(unittest.TestCase):
         r = d.parse_request(c(cut), allowed, owner)
         self.assertEqual((r["tag"], r["accept"], r["by"]), ("internal-1029-3", False, "lab-owner（会话）"))
         self.assertIn("只认负责人本人", d.parse_request(c("（luoke-top 定时截版）\n/release beta1.1"), allowed, owner)["reject"])
+
+    def test_eval_paths_limit_reuse_check(self):
+        """11-09 应 luoke-ime：评测表写了 paths 的，只在这些路径（加评测程序、题集）变了时重跑；没写的照旧看整个仓库（文档除外）。"""
+        ib = self._tool("internal_build")
+        spec = {"paths": ["engines/personal/", "scripts/evidence.py"], "evalset": "{ime_corpus}",
+                "command": ["/usr/bin/python3", "engines/personal/eval_predict.py", "{ime_corpus}", "--hub", "{hub}", "--result", "{raw}/x.json"]}
+        self.assertEqual(ib.eval_paths(spec), ["engines/personal/", "engines/personal/eval_predict.py", "scripts/evidence.py"])
+        self.assertIsNone(ib.eval_paths({"command": ["/usr/bin/python3", "x/y.py"]}))
+        tidy = {"paths": ["engines/voice/tidy_prompt.txt"], "evalset": "evals/tidy/cases.tsv", "command": ["/usr/bin/python3", "evals/tidy/eval_tidy.py"]}
+        self.assertEqual(ib.eval_paths(tidy), ["engines/voice/tidy_prompt.txt", "evals/tidy/cases.tsv", "evals/tidy/eval_tidy.py"])
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        d = tmp.name
+        import subprocess
+        git = lambda *a: subprocess.run(["git", "-C", d, *a], check=True, capture_output=True, text=True).stdout.strip()
+
+        def write(f, text):
+            os.makedirs(os.path.dirname(os.path.join(d, f)), exist_ok=True)
+            with open(os.path.join(d, f), "w") as fh:
+                fh.write(text)
+        git("init", "-q"); git("config", "user.email", "t@t"); git("config", "user.name", "t")
+        for f in ("engines/personal/p.py", "engines/personal/eval_predict.py", "Sources/Shell.swift", "scripts/evidence.py"):
+            write(f, "1")
+        git("add", "-A"); git("commit", "-qm", "a"); a = git("rev-parse", "HEAD")
+        write("Sources/Shell.swift", "2")                                        # 改壳：predict 沿用，不写 paths 的照旧重跑
+        git("commit", "-qam", "b"); b = git("rev-parse", "HEAD")
+        self.assertTrue(ib.unchanged_since(d, a, b, ib.eval_paths(spec)))
+        self.assertFalse(ib.unchanged_since(d, a, b))
+        write("scripts/evidence.py", "2")                                        # 改了它看的：重跑
+        git("commit", "-qam", "c"); c = git("rev-parse", "HEAD")
+        self.assertFalse(ib.unchanged_since(d, b, c, ib.eval_paths(spec)))
+
+    def test_eval_paths_that_do_not_hold_fall_back_to_the_whole_repo(self):
+        """paths 写错了、目录挪走了（钉住的提交里没有这一项）、不是非空的字符串列表：不当成「没变」，退回看整个仓库；
+        paths 里列的 .md（提示词文件）变了也算变。"""
+        ib = self._tool("internal_build")
+        self.assertIsNone(ib.eval_paths({"paths": "engines/personal/", "command": ["/usr/bin/python3", "x/y.py"]}))
+        self.assertIsNone(ib.eval_paths({"paths": ["engines/personal/", ""], "command": ["/usr/bin/python3", "x/y.py"]}))
+        self.assertIsNone(ib.eval_paths({"paths": ["engines/personal/", 3]}))
+        with tempfile.TemporaryDirectory() as d:
+            import subprocess
+            git = lambda *a: subprocess.run(["git", "-C", d, *a], check=True, capture_output=True, text=True).stdout.strip()
+
+            def write(f, text):
+                os.makedirs(os.path.dirname(os.path.join(d, f)), exist_ok=True)
+                with open(os.path.join(d, f), "w") as fh:
+                    fh.write(text)
+            git("init", "-q"); git("config", "user.email", "t@t"); git("config", "user.name", "t")
+            for f in ("engines/personal/p.py", "engines/voice/prompt.md", "Sources/Shell.swift"):
+                write(f, "1")
+            git("add", "-A"); git("commit", "-qm", "a"); a = git("rev-parse", "HEAD")
+            write("Sources/Shell.swift", "2")
+            git("commit", "-qam", "b"); b = git("rev-parse", "HEAD")
+            self.assertTrue(ib.unchanged_since(d, a, b, ["engines/personal/"]))
+            self.assertTrue(ib.unchanged_since(d, a, b, ["engines/personal/p.py", "engines/voice/prompt.md"]))
+            self.assertFalse(ib.unchanged_since(d, a, b, ["engines/personal/", "engines/persnal/"]))    # 写错的路径
+            self.assertFalse(ib.unchanged_since(d, a, b, ["engine/"]))
+            self.assertFalse(ib.unchanged_since(d, a, b, []))
+            git("mv", "engines/personal", "engines/own"); git("commit", "-qm", "c"); c = git("rev-parse", "HEAD")
+            self.assertFalse(ib.unchanged_since(d, b, c, ["engines/personal/"]))                      # 目录挪走了
+            write("docs/x.md", "1"); git("add", "-A"); git("commit", "-qm", "d"); e = git("rev-parse", "HEAD")
+            self.assertTrue(ib.unchanged_since(d, c, e, ["engines/own/"]))                            # 钉住的提交里有，没变
+            self.assertTrue(ib.unchanged_since(d, c, e))                                              # 没写 paths：文档照旧不算
+            write("engines/voice/prompt.md", "2"); git("commit", "-qam", "e"); f2 = git("rev-parse", "HEAD")
+            self.assertFalse(ib.unchanged_since(d, e, f2, ["engines/voice/prompt.md"]))               # 列了的 .md 变了算变
+            self.assertTrue(ib.unchanged_since(d, e, f2))
+    def test_release_rights_go_by_account(self):
+        """beta 2 安全审查 H1：权限只按账号和实验室配置的名单认。定时截版的机器账号（cut_senders）只能发带标签的内部版，
+        别的名单里有也一样；不在名单里的账号（会话的机器账号）什么都发不了；自称会话的留言照旧不给负责人、候选版的权限"""
+        d = self._tool("release_daemon")
+        allowed, owner, rcs, cut = {"lab-owner", "lab-dev"}, "lab-owner", {"lab-dev"}, {"lab-cut"}
+        def c(body, who):
+            return {"id": 7, "body": body, "user": {"login": who}}
+        def p(body, who, cut_senders=cut, own=owner):
+            return d.parse_request(c(body, who), allowed, own, rcs, cut_senders)
+        cutpost = "（luoke-top 定时截版）\n/release internal-1114-2\n\n说明"
+        self.assertEqual(p(cutpost, "lab-cut"), {"accept": False, "by": "lab-cut（定时截版）", "comment": 7, "tag": "internal-1114-2"})
+        self.assertEqual(p("/release internal-1114", "lab-cut")["tag"], "internal-1114")
+        for body in ("/release", "/release internal-1114 --accept", "/release internal-1114 --no-eval", "/release beta2",
+                     "/release beta2-rc2", "/release beta2-rc2 --accept", "/release internal-1114 internal-1114-2"):
+            self.assertIn("定时截版的账号", p(body, "lab-cut")["reject"], body)
+        # 负责人的账号也写进了 cut_senders：按定时截版的账号办，不出 beta、不 --accept
+        self.assertIn("定时截版的账号", p("/release beta2", "lab-owner", cut | {"lab-owner"})["reject"])
+        self.assertIn("定时截版的账号", p("/release internal-1114 --accept", "lab-owner", cut | {"lab-owner"})["reject"])
+        # 负责人的账号：beta、--accept 都行；自称会话的不给
+        self.assertEqual(p("/release beta2", "lab-owner")["tag"], "beta2")
+        self.assertTrue(p("/release --accept", "lab-owner")["accept"])
+        self.assertIn("只认负责人本人", p("（某某 会话）/release beta2", "lab-owner")["reject"])
+        # 候选版的账号：候选版和它的 --accept；beta、内部版的 --accept 不行；自称会话的不给
+        self.assertTrue(p("/release beta2-rc2 --accept", "lab-dev")["accept"])
+        self.assertIn("只认负责人本人", p("/release beta2", "lab-dev")["reject"])
+        self.assertIn("--accept 只认", p("/release --accept", "lab-dev")["reject"])
+        self.assertIn("--accept 只认", p("（某某 会话）/release beta2-rc2 --accept", "lab-dev")["reject"])
+        # 不在任何名单里的账号（会话、hub 的机器账号）：写什么开头都不行
+        for body in ("/release", "（luoke-top 定时截版）\n/release internal-1114", "/release beta2-rc2"):
+            self.assertIn("不在", p(body, "lab-sessions")["reject"])
+        # 名单没配负责人、留言读不到账号：谁都不是负责人
+        self.assertIn("只认负责人本人", p("/release beta2", "lab-dev", own="")["reject"])
+        self.assertIn("不在", d.parse_request({"id": 7, "body": "/release beta2", "user": {}}, allowed | {""}, "", rcs, cut)["reject"])
+
+    def test_release_tick_reads_cut_senders_from_lab_config(self):
+        """tick 把实验室配置里的 cut_senders 交给 parse_request；配置里没有这一项时和以前一样"""
+        d = self._tool("release_daemon")
+        comments = [{"id": 11, "body": "（luoke-top 定时截版）\n/release internal-1114", "user": {"login": "lab-cut"}, "created_at": None},
+                    {"id": 12, "body": "/release beta2", "user": {"login": "lab-cut"}, "created_at": None}]
+        st = {"last_comment": 10, "scheduled": "", "queue": [], "running": {"tag": "busy"}, "history": []}
+        replies = []
+        lab = {"allowed": ["lab-owner"], "owner": "lab-owner", "rc_senders": [], "cut_senders": ["lab-cut"]}
+        with unittest.mock.patch.object(d, "load_state", lambda: st), unittest.mock.patch.object(d, "save_state", lambda s: None), \
+             unittest.mock.patch.object(d, "preempt_repeats", lambda s: None), unittest.mock.patch.object(d, "finish_build", lambda s: None), \
+             unittest.mock.patch.object(d, "comments_after", lambda last: [x for x in comments if x["id"] > last]), \
+             unittest.mock.patch.object(d, "request_age_hours", lambda c: 0), unittest.mock.patch.object(d, "reply", replies.append), \
+             unittest.mock.patch.object(d.lab_config, "release", lambda: lab), \
+             unittest.mock.patch.dict(os.environ, {}, clear=False):
+            for k in ("LUOKE_RELEASE_ALLOWED", "LUOKE_RELEASE_OWNER", "LUOKE_RELEASE_HOUR"):
+                os.environ.pop(k, None)
+            d.tick()
+        self.assertEqual([(q["tag"], q["by"]) for q in st["queue"]], [("internal-1114", "lab-cut（定时截版）")])
+        self.assertEqual(len(replies), 2)
+        self.assertIn("排上了（lab-cut（定时截版））", replies[0])
+        self.assertIn("没排上：@lab-cut 是定时截版的账号", replies[1])
+        # 没配 cut_senders（现在出版机上的配置）：这个账号不在 allowed 里，什么都不排
+        st.update(last_comment=10, queue=[])
+        replies.clear()
+        del lab["cut_senders"]
+        with unittest.mock.patch.object(d, "load_state", lambda: st), unittest.mock.patch.object(d, "save_state", lambda s: None), \
+             unittest.mock.patch.object(d, "preempt_repeats", lambda s: None), unittest.mock.patch.object(d, "finish_build", lambda s: None), \
+             unittest.mock.patch.object(d, "comments_after", lambda last: [x for x in comments if x["id"] > last]), \
+             unittest.mock.patch.object(d, "request_age_hours", lambda c: 0), unittest.mock.patch.object(d, "reply", replies.append), \
+             unittest.mock.patch.object(d.lab_config, "release", lambda: lab):
+            d.tick()
+        self.assertEqual(st["queue"], [])
+        self.assertTrue(all("不在能发 /release 的名单里" in r for r in replies))
 
     def test_release_no_eval_only_for_internal_builds(self):
         """/release --no-eval 不评测、沿用上一版的证据；谁能发和普通 /release 一样，beta、候选版不认"""
@@ -3847,12 +4221,13 @@ class ReleaseToolsTest(unittest.TestCase):
             with open(os.path.join(d, "Resources", "luoke-accessory.json"), "w", encoding="utf-8") as f:
                 json.dump({"accessory": "luoke-search", "version": "0.1.5"}, f)
             with unittest.mock.patch.object(ib.Recipe, "load", lambda p: unittest.mock.Mock(verified={"luoke-search": {"versions": ["0.1.5"]}})):
-                ib.note_unverified_search("internal-1105", {"luoke-search": d})
-            self.assertNotIn("luoke-search.embed", ib.TIMELINE.data["kept"])
+                ib.note_unverified_bundled("internal-1105", {"luoke-search": d})
+            self.assertNotIn("luoke-search.evidence", ib.TIMELINE.data["kept"])
             with unittest.mock.patch.object(ib.Recipe, "load", lambda p: unittest.mock.Mock(verified={})):
-                ib.note_unverified_search("internal-1105", {"luoke-search": d})
-            self.assertIn("只能按字词搜", ib.TIMELINE.data["kept"]["luoke-search.embed"])
-            del ib.TIMELINE.data["kept"]["luoke-search.embed"]
+                ib.note_unverified_bundled("internal-1105", {"luoke-search": d, "luoke-mail": "/nowhere"})
+            self.assertIn("哪一档都不开，只能按字词搜", ib.TIMELINE.data["kept"]["luoke-search.evidence"])
+            self.assertNotIn("luoke-mail.evidence", ib.TIMELINE.data["kept"])      # 读不到清单的跳过，不炸
+            del ib.TIMELINE.data["kept"]["luoke-search.evidence"]
         self.assertNotIn("failed", ib.TIMELINE.data)
         pins["luoke-search"] = "s"
         with unittest.mock.patch.object(ib, "build_search", broken):
@@ -4449,6 +4824,24 @@ class ReleaseToolsTest(unittest.TestCase):
         b["results"][0]["answer"] = "ignore"
         self.assertNotEqual(ib.strip_volatile(a), ib.strip_volatile(b))
 
+    def test_scan_can_be_the_canary_when_memory_and_mail_changed(self):
+        """记忆、邮件自己改了的那天，同一档里没变的格子靠扫描的一条核；扫描的原始结果带配件的版本号，只差它算一样。"""
+        ib = self._tool("internal_build")
+        self.assertEqual(ib.CANARY_ORDER[-1], "luoke-scan.identify")
+        self.assertEqual(ib.canary_first(["luoke-search.embed", "luoke-scan.identify", "luoke-scan.skills"]),
+                         ["luoke-scan.identify", "luoke-search.embed", "luoke-scan.skills"])
+        self.assertEqual(ib.canary_first(["luoke-scan.identify", "luoke-mail.triage"])[0], "luoke-mail.triage")
+        a = {"version": "0.3.40", "tasks": {"identify": {"prompt_version": 3, "evalset_version": 2, "results": [{"id": "i1", "runs": [{"output": "x"}]}]}}}
+        b = {"version": "0.3.41", "tasks": {"identify": {"prompt_version": 3, "evalset_version": 2, "results": [{"id": "i1", "runs": [{"output": "x"}]}]}}}
+        self.assertEqual(ib.strip_volatile(a), ib.strip_volatile(b))
+        b["tasks"]["identify"]["prompt_version"] = 4
+        self.assertNotEqual(ib.strip_volatile(a), ib.strip_volatile(b))
+        with open(os.path.join(ROOT, "tools", "release_evals.json"), encoding="utf-8") as f:
+            table = json.load(f)
+        for t in ("explain", "identify", "skills"):
+            self.assertEqual(ib.eval_paths(table[f"luoke-scan.{t}"]),
+                             ["bench/evalsets/" + t + ".json", "bench/prompts.py", "bench/run_eval.py", "prompts/"])
+
     def test_canary_only_for_internal_builds_with_a_recent_full_eval(self):
         ib = self._tool("internal_build")
         root = tempfile.mkdtemp()
@@ -4619,7 +5012,8 @@ class ReleaseToolsTest(unittest.TestCase):
                     d.start_build({"tag": tag}, {"history": []})
 
     def test_daemon_release_candidate_requests(self):
-        """候选版 /release betaN[.M]-rcM：负责人本人和 rc_senders 里的机器账号能发，机器账号不在 allowed 里就只能发候选版；beta1.x 的候选版不走流水线。"""
+        """候选版 /release betaN[.M]-rcM：负责人本人和 rc_senders 里的账号能发，不在 allowed 里就只能发候选版；候选版的 --accept 也认
+        rc_senders（会话的不认），beta 和内部版的 --accept 只认负责人本人；beta1.x 的候选版不走流水线。"""
         d = self._tool("release_daemon")
         allowed, owner, bots = {"lab-owner"}, "lab-owner", {"lab-bot"}
         def c(body, who="lab-owner"):
@@ -4629,7 +5023,12 @@ class ReleaseToolsTest(unittest.TestCase):
         self.assertEqual((r["tag"], r["by"], r["accept"]), ("beta2.1-rc3", "lab-bot", False))
         for body in ("/release", "/release internal-1102", "/release beta2"):
             self.assertIn("只能发候选版", d.parse_request(c(body, who="lab-bot"), allowed, owner, bots)["reject"])
-        self.assertIn("--accept 只认负责人本人", d.parse_request(c("/release beta2-rc1 --accept", who="lab-bot"), allowed, owner, bots)["reject"])
+        r = d.parse_request(c("/release beta2-rc1 --accept", who="lab-bot"), allowed, owner, bots)
+        self.assertEqual((r["tag"], r["by"], r["accept"]), ("beta2-rc1", "lab-bot", True))     # 候选版的 --accept 也认 rc_senders
+        for body in ("（luoke-hub 会话）/release beta2-rc1 --accept", "看一下\n（luoke-hub 会话）/release beta2-rc1 --accept"):
+            self.assertIn("--accept 只认", d.parse_request(c(body, who="lab-bot"), allowed, owner, bots)["reject"])   # 会话发的不算
+        self.assertIn("只能发候选版", d.parse_request(c("/release --accept", who="lab-bot"), allowed, owner, bots)["reject"])
+        self.assertIn("候选版只认", d.parse_request(c("/release beta2-rc1 --accept", who="lab-member"), allowed | {"lab-member"}, owner, bots)["reject"])
         self.assertTrue(d.parse_request(c("/release beta2-rc1 --accept"), allowed, owner, bots)["accept"])
         self.assertIn("候选版只认", d.parse_request(c("（luoke-top 会话）/release beta2-rc1"), allowed, owner, bots)["reject"])
         # 会话标签不在第一行也算会话：开头先写了别的
@@ -4647,6 +5046,60 @@ class ReleaseToolsTest(unittest.TestCase):
         self.assertEqual(d.parse_request(c("/release beta2-rc1", who="lab-bot"), both, owner, bots)["tag"], "beta2-rc1")
         self.assertIn("beta 只认", d.parse_request(c("/release beta2", who="lab-bot"), both, owner, bots)["reject"])
         self.assertIn("--accept 只认", d.parse_request(c("/release internal-1103 --accept", who="lab-bot"), both, owner, bots)["reject"])
+        self.assertIn("--accept 只认", d.parse_request(c("/release --accept", who="lab-bot"), both, owner, bots)["reject"])
+        self.assertIn("beta 只认", d.parse_request(c("/release beta2 --accept", who="lab-bot"), both, owner, bots)["reject"])
+        self.assertTrue(d.parse_request(c("/release beta2-rc1 --accept", who="lab-bot"), both, owner, bots)["accept"])
+
+    def test_daemon_candidate_pins_without_clones_next_to_the_build_clone(self):
+        """出版机的布局：出版克隆旁边没有配件的克隆（TOP/<repo>），配件只有 SRC 里的持久克隆、origin 直接是 GitHub。
+        候选版钉版要从持久克隆取 public，不能因为 TOP/<repo> 不在就停；两处都没有时说清楚找过哪里。"""
+        import subprocess
+        d = self._tool("release_daemon")
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        env = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1", GIT_AUTHOR_NAME="x", GIT_AUTHOR_EMAIL="x@example.com",
+                   GIT_COMMITTER_NAME="x", GIT_COMMITTER_EMAIL="x@example.com")
+        def g(cwd, *a):
+            return subprocess.run(["git", *a], cwd=cwd, env=env, check=True, capture_output=True, text=True).stdout.strip()
+        top = os.path.join(tmp, "home")
+        core = os.path.join(top, "luoke-core")
+        src = os.path.join(core, "build.noindex", "src")
+        shas = {}
+        for repo in d.REPOS:
+            gh, work = os.path.join(tmp, "gh", repo + ".git"), os.path.join(tmp, "work", repo)
+            g(tmp, "init", "-q", "--bare", "-b", "main", gh)
+            g(tmp, "clone", "-q", gh, work)
+            with open(os.path.join(work, "README"), "w") as f:
+                f.write(repo)
+            g(work, "add", "-A"); g(work, "commit", "-qm", "c"); g(work, "push", "-q", "origin", "HEAD")
+            g(tmp, "clone", "-q", gh, core if repo == "luoke-core" else os.path.join(src, repo))   # 持久克隆直接连 GitHub
+            g(work, "checkout", "-q", "--orphan", "public")          # public 是克隆好以后才推的
+            with open(os.path.join(work, "README"), "w") as f:
+                f.write(repo + " public")
+            g(work, "commit", "-qam", "exported"); g(work, "push", "-q", "origin", "HEAD")
+            shas[repo] = g(work, "rev-parse", "HEAD")
+        self.assertFalse(any(os.path.exists(os.path.join(top, r)) for r in d.REPOS[1:]))
+        real_sh = d.sh
+        def fake_sh(cmd, cwd=None, check=True):
+            if cmd[:2] == ["gh", "api"]:
+                parts = cmd[2].split("/")
+                return ("" if len(parts) == 3 else shas.get(parts[2], "")) + "\n"
+            return real_sh(cmd, cwd, check)
+        # mem 的持久克隆当初是从 TOP/luoke-mem clone 的、TOP 后来删了：origin 指着不在的路径，照样要从 GitHub 取到
+        g(os.path.join(src, "luoke-mem"), "remote", "set-url", "origin", os.path.join(top, "luoke-mem"))
+        with unittest.mock.patch.object(d, "sh", fake_sh), unittest.mock.patch.dict(os.environ, env), \
+                unittest.mock.patch.object(d, "CORE", core), unittest.mock.patch.object(d, "TOP", top), unittest.mock.patch.object(d, "SRC", src), \
+                unittest.mock.patch.object(d, "remote_url", lambda r: os.path.join(tmp, "gh", r + ".git")), \
+                unittest.mock.patch.object(d, "log", lambda m: None):
+            self.assertEqual(d.pins_public(), shas)
+            # 公开 main 的提交私有 public 上没有：报错写明核的是哪个克隆、从哪取的
+            real_shas, shas = shas, dict(shas, **{"luoke-ime": "c" * 40})
+            with self.assertRaisesRegex(RuntimeError, "luoke-ime 公开 main 是 ccccccc，.*src/luoke-ime 从 .*gh/luoke-ime.git 取过 public 以后还没有"):
+                d.pins_public()
+            shas = real_shas
+            shutil.rmtree(os.path.join(src, "luoke-mail"))
+            with self.assertRaisesRegex(RuntimeError, "luoke-mail：本机没有它的克隆（找过 .*luoke-mail、.*src/luoke-mail）"):
+                d.pins_public()
 
     def test_daemon_release_candidate_pins_and_hosting(self):
         """候选版钉四个公开仓库 main 现在的提交（私有 public 上取不到就停）；出好了按清单拷到局域网托管的目录、核哈希，整个换掉旧的。"""
@@ -4996,6 +5449,153 @@ class ReleaseToolsTest(unittest.TestCase):
             self.assertIn("luoke-scan：7df627c→5f2469c 改了代码、版本号还是 0.1.1，这一版沿用 0.1.1（请升版本号）。", text)
             self.assertIn("| eval 16 |", r.report("internal-1024", "internal-1023"))
 
+    def test_each_eval_cell_records_its_timing(self):
+        """每格评测记开始、结束和其中加载模型的秒数：一行一段写进 evidence/timing-<档>.jsonl（实验室主控起来一段，每格一段），
+        这一格的证据里也带一份 timing。模型加载从实验室主控日志里这一格那一段读，主控起来时加载的底座不算进第一格。"""
+        rel = self.rel
+        log_text = ("2026-11-13 10:00:00 hub 0.1 tier=16 mem=16GB base=qwen3.5-9b-4bit recipe=x\n"
+                    "2026-11-13 10:00:05 unloaded qwen3.5-9b-4bit (making room for gemma-4-26b)\n"
+                    "2026-11-13 10:00:30 loaded qwen3.5-9b-4bit in 24.5s\n"
+                    "2026-11-13 10:01:00 loaded qwen3.5-0.8b alongside qwen3.5-9b-4bit in 3.0s\n"
+                    "2026-11-13 10:01:10 scorer ready in 4.2s (/x/models/qwen3.5-0.8b-base-4bit)\n"
+                    "2026-11-13 10:01:11 engine ready port=1 models=['a'] in 3.2s\n"
+                    "2026-11-13 10:01:12 chat task=t.x prio=background outcome=ok\n")
+        self.assertEqual(rel.model_loads(log_text), [{"model": "qwen3.5-9b-4bit", "secs": 24.5}, {"model": "qwen3.5-0.8b", "secs": 3.0},
+                                                     {"model": "qwen3.5-0.8b-base-4bit", "secs": 4.2}])
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, True)
+        repo = os.path.join(root, "luoke-ime")
+        os.makedirs(repo)
+        json.dump({"version": "0.1.0"}, open(os.path.join(repo, "m.json"), "w"))
+        open(os.path.join(repo, "set.tsv"), "w").write("a\tb\n")
+        app = os.path.join(root, "oMLX.app")
+        os.makedirs(os.path.join(app, "Contents"))
+        recipe = Recipe.load(os.path.join(ROOT, "recipes", "dev.json"))
+        with open(os.path.join(app, "Contents", "Info.plist"), "wb") as f:
+            plistlib.dump({"CFBundleShortVersionString": recipe.engine["version"].replace("omlx-", "")}, f)
+        recipe.engine = dict(recipe.engine, app=app)
+        spec = {"accessory": "luoke-ime", "repo": "../luoke-ime", "version": {"manifest": "m.json"}, "command": ["true"],
+                "summary": "ime-rerank-stdout", "evalset": "set.tsv", "hard": "x"}
+        out = ("n=600  先给的首选 88.0%  不标 more 的首选 89.5%  最终首选 90.5%  补发改了 3 条\n"
+               "最后一个键到第一份答复：p50 10 ms  p90 17 ms  p99 22 ms  最长 26 ms\n"
+               "最后一个键到不标 more 的答复：p50 78 ms  p90 102 ms  p99 150 ms  最长 300 ms\n主控打分 1200 次：前缀缓存命中 71.2%，")
+
+        class Hub:
+            def __init__(self, paths, recipe_path, recipe, tier, model_source):
+                self.env = os.path.join(root, "lab", tier)
+                self.hub_log = os.path.join(self.env, "logs", "hub.log")
+                self.sock = "/nonexistent.sock"
+
+            def start(self):
+                t0 = time.time()
+                os.makedirs(os.path.dirname(self.hub_log))
+                open(self.hub_log, "a").write("2026-11-13 10:00:30 loaded qwen3.5-9b-4bit in 20.0s\n")
+                self.ready = rel.timing_since(t0, self.hub_log, 0)
+                return {"base": "qwen3.5-9b-4bit", "phase": "running"}
+
+            def stop(self):
+                pass
+
+        def bench(cmd, cwd, env, task, kind, hub_log, **kw):
+            open(hub_log, "a").write("2026-11-13 10:05:00 scorer ready in 7.5s (/m/qwen3.5-0.8b-base-4bit)\n")
+            return rel.EvalResult(0, out, "")
+        a = types.SimpleNamespace(tasks="luoke-ime.rerank", tiers="128", template="x.json", model_source=root, ime_corpus="",
+                                  repo_override={"luoke-ime": repo}, keep_accessory_results=False)
+        with unittest.mock.patch.object(rel, "ROOT", root), unittest.mock.patch.object(rel, "LabHub", Hub), \
+                unittest.mock.patch.object(rel, "run_watched", bench), unittest.mock.patch.object(rel, "machine_summary", lambda: {}), \
+                unittest.mock.patch.object(rel, "load_evals", lambda: {"luoke-ime.rerank": spec}):
+            paths = rel.Paths("internal-1113")
+            rel.stage_eval(a, paths, recipe)
+        lines = [json.loads(x) for x in open(os.path.join(paths.evidence, "timing-128.jsonl"))]
+        self.assertEqual([(x["kind"], x["tier"], x["load_secs"]) for x in lines], [("hub", "128", 20.0), ("cell", "128", 7.5)])
+        self.assertEqual(lines[0]["base"], "qwen3.5-9b-4bit")
+        cell = lines[1]
+        self.assertEqual((cell["task"], cell["exit"], cell["stalled"], cell["loads"]),
+                         ("luoke-ime.rerank", 0, None, [{"model": "qwen3.5-0.8b-base-4bit", "secs": 7.5}]))
+        self.assertTrue(cell["start"] <= cell["end"] and cell["secs"] >= 0)
+        ev = rel.load_evidence(paths.rec)
+        self.assertEqual(len(ev), 1)                       # .jsonl 不当证据读
+        rec = next(iter(ev.values()))
+        self.assertEqual(rec["timing"], {k: v for k, v in cell.items() if k not in ("kind", "task", "tier", "exit", "stalled")})
+        # 日志被截短、重建了（比记下的位置还短）：从头读
+        log = os.path.join(root, "short.log")
+        open(log, "w").write("2026-11-13 loaded m in 1.5s\n")
+        self.assertEqual(rel.timing_since(time.time(), log, 10_000)["load_secs"], 1.5)
+        self.assertEqual(rel.timing_since(time.time(), os.path.join(root, "none.log"), 0)["loads"], [])
+
+    def test_remote_timing_comes_back_and_reused_records_drop_it(self):
+        """远端评的那一档的 timing-<档>.jsonl 跟着证据拿回来；沿用来的证据不带评的那一版的用时"""
+        ib = self._tool("internal_build")
+        root, remote = tempfile.mkdtemp(), tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, True)
+        self.addCleanup(shutil.rmtree, remote, True)
+        combo = {"key": "k", "model": "m", "base": "m", "tiers": ["16"], "params": {}}
+        json.dump({"task": "t.x", "tier_run": "16", "combo": combo}, open(os.path.join(remote, "t.x.k.16.json"), "w"))
+        open(os.path.join(remote, "timing-16.jsonl"), "w").write(json.dumps({"kind": "cell", "task": "t.x", "tier": "16", "secs": 9}) + "\n")
+        with unittest.mock.patch.object(ib, "ROOT", root), unittest.mock.patch.object(ib, "MACHINES", {"16": {"host": "h", "core": "c"}}), \
+                unittest.mock.patch.object(ib, "rsync", lambda src, dst, excludes=(): shutil.copytree(remote, dst, dirs_exist_ok=True)), \
+                unittest.mock.patch.object(ib, "log", lambda m: None):
+            ib.merge_remote("internal-1113", "16")
+            ev = os.path.join(root, "releases", "internal-1113", "evidence")
+            self.assertEqual(json.loads(open(os.path.join(ev, "timing-16.jsonl")).read())["secs"], 9)
+            old = {"task": "t.x", "accessory": "a", "tier_run": "16", "combo": combo, "timing": {"secs": 9}, "_file": "x"}
+            ib.copy_reused("internal-1113-2", "internal-1113", [("16", old)])
+        d = json.load(open(os.path.join(root, "releases", "internal-1113-2", "evidence", "t.x.k.16.json")))
+        self.assertEqual(d["reused_from"], "internal-1113")
+        self.assertNotIn("timing", d)
+
+    def test_release_report_lists_the_slowest_cells(self):
+        """流程报告：每一档评了几格、各用多久（其中加载模型）、实验室主控起来多久、其余多久；最慢的几格和上次真评这一格的用时
+        （上一版沿用的顺着 reused_from 往前找）；明显变慢的格子进摘要；总用时里不在任何一步里的空档单独写出来。"""
+        r = self._tool("release_report")
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, True)
+
+        def write(tag, phases=(), timing=(), evidence=()):
+            ev = os.path.join(root, "releases", tag, "evidence")
+            os.makedirs(ev)
+            json.dump({"tag": tag, "host": "studio", "samples": [],
+                       "phases": [{"name": n, "start": a, "end": b, "ok": True} for n, a, b in phases]},
+                      open(os.path.join(root, "releases", tag, "timeline.json"), "w"))
+            for x in timing:
+                with open(os.path.join(ev, f"timing-{x['tier']}.jsonl"), "a") as f:
+                    f.write(json.dumps(x) + "\n")
+            for task, tier, src in evidence:
+                json.dump({"task": task, "tier_run": tier, "reused_from": src}, open(os.path.join(ev, f"{task}.k.{tier}.json"), "w"))
+
+        def cell(task, tier, secs, loads=(), **kw):
+            x = dict(kind="cell", task=task, tier=tier, start=1000.0, end=1000.0 + secs, secs=secs,
+                     load_secs=sum(m["secs"] for m in loads), loads=list(loads), exit=0, stalled=None)
+            x.update(kw)
+            return x
+        write("beta1.1", timing=[cell("luoke-mail.triage", "16", 590)])
+        write("beta2-rc1", timing=[cell("luoke-scan.skills", "16", 600), cell("luoke-ime.rerank", "128", 1200)],
+              evidence=[("luoke-mail.triage", "16", "beta1.1")])
+        write("beta2-rc2",
+              phases=[("eval 16", 0, 3600), ("eval 128", 0, 1800), ("diff", 3600, 3601), ("freeze", 10801, 10811)],
+              timing=[dict(kind="hub", tier="16", start=0.0, end=60.0, secs=60.0, load_secs=30.0, loads=[{"model": "q9b", "secs": 30.0}]),
+                      cell("luoke-scan.skills", "16", 1500),
+                      cell("luoke-mail.triage", "16", 600, loads=[{"model": "q9b", "secs": 20.0}, {"model": "q9b", "secs": 25.0}]),
+                      cell("luoke-mem.topics", "16", 700, stalled="stalled", exit=-15),
+                      cell("luoke-ime.rerank", "128", 100), cell("luoke-ime.rerank", "128", 1250)])
+        write("internal-1110", phases=[("eval 16", 0, 60)])          # 加这份记录之前的版：报告照旧，没有每格评测
+        with unittest.mock.patch.object(r, "ROOT", root):
+            text = "\n".join(r.summary("beta2-rc2", "beta2-rc1"))
+            self.assertIn("其中 2 小时 0 分不在任何一步里", text)
+            self.assertIn("最慢的 3 格评测：luoke-scan.skills 16 GB 25 分、luoke-ime.rerank 128 GB 20 分、luoke-mem.topics 16 GB 11 分。", text)
+            self.assertIn("比上次评明显变慢的格：luoke-scan.skills 16 GB 25 分（上次 10 分）。", text)    # 别的格没慢到一半以上、5 分钟以上
+            rep = r.report("beta2-rc2", "beta2-rc1")
+            self.assertIn("- 16 GB 档：评了 3 格，共 46 分（其中加载模型 45 秒）；实验室主控起了 1 次，共 1 分（其中加载模型 30 秒）；"
+                          "eval 16 一共 1 小时 0 分，其余 12 分不在评测里（同步、起停、拷回）。", rep)
+            self.assertIn("- 128 GB 档：评了 2 格", rep)            # 同一格评了两次：合计都算，表里取最后一次
+            self.assertRegex(rep, r"\| luoke-scan\.skills \| 16 \| [^|]+ \| 25 分 \| 0 秒 \| 10 分 \|  \|")
+            self.assertRegex(rep, r"\| luoke-mail\.triage \| 16 \| [^|]+ \| 10 分 \| 45 秒（q9b 2 次 45 秒） \| 9 分（beta1\.1） \|  \|")
+            self.assertRegex(rep, r"\| luoke-mem\.topics \| 16 \| [^|]+ \| 11 分 \| 0 秒 \| — \| 没进展、停掉 \|")
+            self.assertRegex(rep, r"\| luoke-ime\.rerank \| 128 \| [^|]+ \| 20 分 \| 0 秒 \| 20 分 \|  \|")
+            self.assertNotIn("## 每格评测", r.report("internal-1110"))
+            self.assertNotIn("格评测", "\n".join(r.summary("internal-1110")))
+            self.assertNotIn("不在任何一步里", "\n".join(r.summary("internal-1110")))
+
     def test_plan_combos_dedupes_same_model_and_params(self):
         plan = self.rel.plan_combos(self.recipe, ["16", "32", "128"], ["luoke-mail.triage", "luoke-ime.rerank", "nope.task"])
         triage = [c for (t, _), c in plan.items() if t == "luoke-mail.triage"]
@@ -5135,7 +5735,7 @@ class ReleaseToolsTest(unittest.TestCase):
         用到的 <模块>.<名字> 都得真的存在。"""
         import ast
         import importlib
-        for name in ("release.py", "internal_build.py", "support.py", "local_allow.py"):
+        for name in ("release.py", "internal_build.py", "support.py"):
             tree = ast.parse(open(os.path.join(ROOT, "tools", name), encoding="utf-8").read())
             mods = {}
             for node in ast.walk(tree):
@@ -5404,6 +6004,39 @@ class IdleJobsTest(unittest.TestCase):
         self.assertEqual(jobs.due(slow, 1000, 980, True, running, False, "wrapped_up"), "interval")     # 10 分钟内还是等
         self.assertEqual(jobs.due(slow, 1000 + 11 * 60, 1000, True, running, False, "wrapped_up"), None)   # 被打断的：11 分钟后就能接着跑
         self.assertEqual(jobs.due(slow, 1000 + 11 * 60, 1000, True, running, False, "done"), "interval")   # 做完的：等满 min_interval
+
+    def test_queue_lists_waiting_jobs_with_what_they_wait_for(self):
+        """右边栏的任务队列（/status 的 queue）：没在跑的空闲任务，按会先起哪个排，各带卡在什么条件上；title 是可选的人话"""
+        from luoke_core import jobs
+        d = tempfile.mkdtemp()
+        m = self.fake_app(d, ["-c", "pass"])
+        m["jobs"] = [dict(m["jobs"][0], title="整理记忆"), {"name": "later", "command": ["-c", "pass"], "min_interval_minutes": 60}]
+        clock = Clock()
+        quiet, bg, busy = [False], [("running", [])], [False]
+        state = {"jobs": {"fake.later": {"last_start": clock() - 600, "reason": "done"}}}
+        j = jobs.IdleJobs(now=clock, quiet=lambda: quiet[0], background_state=lambda allow: bg[0], busy=lambda: busy[0],
+                          state=state, save_state=lambda: None, log=lambda s: None, socket_path=lambda: "/tmp/x.sock", logs_dir=os.path.join(d, "logs"))
+        q = j.queue({"ai.luoke.fake": m})
+        self.assertEqual([(i["id"], i["tool"], i["title"]) for i in q], [("fake.work", "fake", "整理记忆"), ("fake.later", "fake", None)])
+        self.assertEqual(q[0]["wait"], {"kind": "quiet"})
+        self.assertEqual(q[1]["wait"], {"kind": "time", "at": round(clock() - 600 + 3600)})     # 间隔没到：报最早能起的时间
+        bg[0] = ("paused", ["battery"])
+        self.assertEqual(j.queue({"ai.luoke.fake": m})[0]["wait"], {"kind": "power"})
+        bg[0] = ("paused", ["thermal"])
+        self.assertEqual(j.queue({"ai.luoke.fake": m})[0]["wait"], {"kind": "thermal"})
+        bg[0], quiet[0], busy[0] = ("running", []), True, True
+        self.assertEqual(j.queue({"ai.luoke.fake": m})[0]["wait"], {"kind": "busy"})
+        j.run_soon("fake.later", {"ai.luoke.fake": m})
+        self.assertEqual(j.queue({"ai.luoke.fake": m})[1]["wait"], {"kind": "soon"})
+        busy[0] = False
+        j.tick({"ai.luoke.fake": m})                              # 起了第一个：它不在排着的里
+        self.assertEqual([i["id"] for i in j.queue({"ai.luoke.fake": m})], ["fake.later"])
+        j._terminate(j.running, "test")
+        for _ in range(50):
+            j.tick({"ai.luoke.fake": m})
+            if not j.running:
+                break
+            time.sleep(0.05)
 
     def run_job(self, command, quiet_after=None):
         from luoke_core import jobs
@@ -5807,6 +6440,75 @@ class InstallTest(unittest.TestCase):
         os.makedirs(os.path.join(d, "engines", h.recipe.engine["version"], "oMLX.app", "Contents"))
         self.assertEqual(h.installed_engine_app(), os.path.join(d, "engines", h.recipe.engine["version"], "oMLX.app"))
 
+    def test_luoke_engine_package(self):
+        """顶层 ADR 0020：配方的引擎版本是 luoke-engine-<版本> 时，引擎包是 LuokeEngine.app（不带 Python，配方没有 python、site），
+        装好以后起的是它的 luoke-engine；换过来以后旧的 oMLX 版本照常清掉"""
+        from luoke_core import hub as hubmod
+        from luoke_core.hub import Hub, engine_app_matching
+        d = tempfile.mkdtemp()
+        recipe = Recipe.load(RECIPE)
+        recipe.engine = {"version": "luoke-engine-0.1.0", "log_level": "warning"}
+        h = Hub(recipe, d, d, lab=True, accessory_dirs=[d], mem_gb=32, smoke=False)
+        self.assertEqual(h.engine_install_app(), os.path.join(d, "engines", "luoke-engine-0.1.0", "LuokeEngine.app"))
+        self.assertTrue(h.engine_missing())
+        self.assertIn("engine", h.needed_downloads())
+        app = h.engine_install_app()
+        os.makedirs(os.path.join(app, "Contents", "MacOS"))
+        open(os.path.join(app, "Contents", "MacOS", "luoke-engine"), "w").close()
+        with open(os.path.join(app, "Contents", "Info.plist"), "wb") as f:
+            plistlib.dump({"CFBundleShortVersionString": "0.1.0"}, f)
+        self.assertEqual(engine_app_matching(app, "luoke-engine-0.1.0"), app)
+        self.assertIsNone(engine_app_matching(app, "luoke-engine-0.2.0"))
+        h.downloads = {"engine": {"state": "done"}}
+        h.engine.stop = lambda: None
+        with unittest.mock.patch.object(h, "restart_engine", lambda: None):
+            h._after_downloads({"items": {"engine": {"kind": "engine"}}}, ["engine"])
+        self.assertEqual(h.engine_app, app)
+        self.assertEqual(h.engine.cli, os.path.join(app, "Contents", "MacOS", "luoke-engine"))
+        self.assertFalse(h.engine_missing())
+        # 从 oMLX 换过来、冒烟检查过了：旧的 omlx-* 删掉，螺壳引擎这一份留着
+        p = object.__new__(hubmod.Hub)
+        p.env_dir, p.lab, p.release_path, p.log = d, False, os.path.join(d, "release.json"), (lambda m: None)
+        open(p.release_path, "w").write("{}")
+        p.recipe = recipe
+        os.makedirs(os.path.join(d, "engines", "omlx-0.7.2", "oMLX.app", "Contents"))
+        self.assertEqual(p.prune_old_engines(), ["omlx-0.7.2"])
+        self.assertEqual(os.listdir(os.path.join(d, "engines")), ["luoke-engine-0.1.0"])
+
+    def test_bundled_engine(self):
+        """luoke-core#199：螺壳引擎是一个可执行文件，打进螺壳.app 的 Contents/Helpers。配方要的正是这一版就用它，
+        不要引擎包、不下载；配方还是 oMLX、或者版本对不上，照旧按清单装的引擎包"""
+        from luoke_core import hub as hubmod
+        from luoke_core.hub import Hub
+        d = tempfile.mkdtemp()
+        exe = os.path.join(d, "Helpers", "luoke-engine")
+        os.makedirs(os.path.dirname(exe))
+        open(exe, "w").close()
+        os.chmod(exe, 0o755)
+
+        def hub(version, bundled_version="0.1.0", path=exe):
+            recipe = Recipe.load(RECIPE)
+            recipe.engine = {"version": version, "log_level": "warning"}
+            return Hub(recipe, d, d, lab=True, accessory_dirs=[d], mem_gb=32, smoke=False,
+                       bundled_engine=path, bundled_engine_version=bundled_version)
+        h = hub("luoke-engine-0.1.0")
+        self.assertEqual(h.engine_app, exe)
+        self.assertEqual(h.engine.cli, exe)
+        self.assertFalse(h.engine_missing())
+        self.assertNotIn("engine", h.needed_downloads())
+        for other in (hub("luoke-engine-0.2.0"), hub("omlx-0.7.2"), hub("luoke-engine-0.1.0", path=os.path.join(d, "none")),
+                      hub("luoke-engine-0.1.0", bundled_version=None)):
+            self.assertIsNone(other.bundled_engine())
+            self.assertIn("engine", other.needed_downloads())
+            self.assertTrue(other.engine_missing())
+        # 发布版用上打进来的引擎、冒烟检查过了：engines/ 里以前下的都删掉
+        p = object.__new__(hubmod.Hub)
+        p.env_dir, p.lab, p.release_path, p.log = d, False, os.path.join(d, "release.json"), (lambda m: None)
+        open(p.release_path, "w").write("{}")
+        p.recipe, p.bundled_engine_path, p.bundled_engine_version = h.recipe, exe, "0.1.0"
+        os.makedirs(os.path.join(d, "engines", "omlx-0.7.2", "oMLX.app", "Contents"))
+        self.assertEqual(p.prune_old_engines(), ["omlx-0.7.2"])
+
     def test_users_own_omlx_is_never_started(self):
         """luoke-core#143：引擎包还没下完时，主控起了配方里写的 /Applications/oMLX.app（测试机上用户自己装的 0.3.9），
         参数对不上，起了 3 次后熔断。引擎包没装上就当没有引擎：不起配方写的那份（版本对不对都一样），等引擎包下完再起"""
@@ -5983,6 +6685,25 @@ class EndpointTest(unittest.TestCase):
         c.close()
         return r.status, data
 
+    def test_body_limit_follows_the_engine(self):
+        """core-private#208：本机端点原样转给引擎，上限照引擎包（螺壳引擎 8 MB、oMLX 32 MB）；超了在主控处答 413，不读请求体、不到引擎。"""
+        h, port, record, _, d = self.hub_with_endpoint()
+        h.endpoint.set_key("")
+
+        def post(n):
+            return self.raw(port, (f"POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n"
+                                   f"Content-Type: application/json\r\nContent-Length: {n}\r\n\r\n").encode())
+        nine = 9 << 20
+        h.recipe.engine["version"] = "omlx-0.7.2"
+        self.assertEqual(post(33 << 20), [b"413"])
+        h.recipe.engine["version"] = "luoke-engine-0.1.0"
+        self.assertEqual(post(nine), [b"413"])
+        self.assertEqual(post(0), [b"400"])
+        self.assertEqual(record, [])
+        st, _ = self.call(port, "POST", "/v1/chat/completions",
+                          body={"model": h.base_name, "messages": [{"role": "user", "content": "hi"}]})
+        self.assertEqual(st, 200)                                                  # 上限以内照常转发
+
     def test_auth_host_and_origin(self):
         from luoke_core import endpoint as ep
         h, port, _, _, d = self.hub_with_endpoint()
@@ -5998,6 +6719,79 @@ class EndpointTest(unittest.TestCase):
         new = h.endpoint.rotate_key()
         self.assertEqual(self.call(port, "GET", "/v1/models", key=key)[0], 401)                      # 换了密钥旧的立即失效
         self.assertEqual(self.call(port, "GET", "/v1/models", key=new)[0], 200)
+
+    def test_web_page_requests_refused_without_origin(self):
+        """网页里不带 Origin 的请求（跨站的 img、script）Host 照样是 127.0.0.1，靠 Sec-Fetch-Site 认出来；密钥设成空时只剩这一道。
+        Node 的 fetch 带 Sec-Fetch-Mode、不带 Sec-Fetch-Site，要照常能用；地址栏自己打开的（none）也照常。"""
+        import http.client
+        h, port, _, _, d = self.hub_with_endpoint()
+        h.endpoint.set_key("")
+        self.assertEqual(self.call(port, "GET", "/v1/models")[0], 200)                                # 别的程序：照常
+        self.assertEqual(self.call(port, "GET", "/v1/models", headers={"Sec-Fetch-Mode": "cors"})[0], 200)       # Node fetch
+        self.assertEqual(self.call(port, "GET", "/v1/models", headers={"Sec-Fetch-Site": "none", "Sec-Fetch-Mode": "navigate"})[0], 200)
+        for hdrs in ({"Sec-Fetch-Site": "cross-site", "Sec-Fetch-Mode": "no-cors", "Sec-Fetch-Dest": "script"},
+                     {"Sec-Fetch-Site": "same-site", "Sec-Fetch-Mode": "no-cors", "Sec-Fetch-Dest": "image"},
+                     {"Sec-Fetch-Site": "same-origin"}):
+            self.assertEqual(self.call(port, "GET", "/v1/models", headers=hdrs)[0], 403, hdrs)
+        st, _ = self.call(port, "POST", "/v1/chat/completions", body={"model": h.base_name, "messages": []},
+                          headers={"Sec-Fetch-Site": "cross-site", "Sec-Fetch-Mode": "no-cors"})
+        self.assertEqual(st, 403)
+        c = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        c.request("GET", "/v1/models", headers={"Sec-Fetch-Site": "cross-site"})
+        r = c.getresponse()
+        r.read()
+        c.close()
+        self.assertEqual(r.getheader("X-Content-Type-Options"), "nosniff")
+        self.assertEqual(r.getheader("Connection"), "close")
+
+    def raw(self, port, data):
+        """一个连接发 data，读到对方关连接为止；对方不关（还等着下一个请求）就算失败。"""
+        import socket as _s
+        c = _s.create_connection(("127.0.0.1", port), timeout=5)
+        out = b""
+        try:
+            c.sendall(data)
+            while True:
+                try:
+                    b = c.recv(65536)
+                except ConnectionResetError:
+                    break
+                except _s.timeout:
+                    self.fail(f"拒绝以后没关连接：{out[:300]!r}")
+                if not b:
+                    break
+                out += b
+        finally:
+            c.close()
+        return re.findall(rb"HTTP/1\.[01] (\d{3}) ", out)          # 不认行首：前一个答复的 JSON 后面直接接下一个状态行
+
+    def test_refused_request_closes_the_connection(self):
+        """被拒的请求体没读：不关连接的话，请求体里夹带的完整请求会被当成下一个请求，不带 Origin、Sec-Fetch-Site，
+        绕过检查（网页发 text/plain 的 no-cors POST 就能做到）。拒绝以后一律关连接，只回一个 403 / 401。"""
+        h, port, record, _, d = self.hub_with_endpoint()
+        h.endpoint.set_key("")
+        get = f"GET /v1/models HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n".encode()
+        chat = json.dumps({"model": h.base_name, "messages": [{"role": "user", "content": "hi"}]}).encode()
+        post = (f"POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\n"
+                f"Content-Length: {len(chat)}\r\n\r\n").encode() + chat
+
+        def outer(body, **extra):
+            head = {"Host": f"127.0.0.1:{port}", "Content-Type": "text/plain", "Content-Length": str(len(body)), **extra}
+            return ("POST /v1/chat/completions HTTP/1.1\r\n" + "".join(f"{k}: {v}\r\n" for k, v in head.items())
+                    + "\r\n").encode() + body
+        self.assertEqual(self.raw(port, outer(get, **{"Origin": "http://localhost:3000", "Sec-Fetch-Site": "same-site"})),
+                         [b"403"])
+        self.assertEqual(self.raw(port, outer(get, **{"Origin": "https://evil.example", "Sec-Fetch-Site": "cross-site"})),
+                         [b"403"])
+        self.assertEqual(self.raw(port, outer(post, **{"Sec-Fetch-Site": "cross-site"})), [b"403"])
+        self.assertEqual(self.raw(port, outer(get, Host="evil.example")), [b"403"])          # DNS rebinding 那道
+        self.assertEqual(record, [])                                                            # 夹带的聊天请求没到引擎
+        key = h.endpoint.rotate_key()                  # 密钥不对的 401 也关：夹带的请求带着对的密钥也进不来
+        get_k = f"GET /v1/models HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {key}\r\n\r\n".encode()
+        self.assertEqual(self.raw(port, outer(get_k, Authorization="Bearer wrong")), [b"401"])
+        # 没被拒的照旧保持连接：一个连接连发两个 GET，两个都答
+        two = self.raw(port, get_k + get_k.replace(b"\r\n\r\n", b"\r\nConnection: close\r\n\r\n"))
+        self.assertEqual(two, [b"200", b"200"])
 
     def test_chat_base_and_user_model_and_background_yields(self):
         from luoke_core import endpoint as ep
@@ -6030,6 +6824,9 @@ class EndpointTest(unittest.TestCase):
         st2 = h.endpoint_status()
         self.assertEqual(st2["usage_today"]["requests"], 2)
         self.assertEqual(st2["usage_today"]["completion_tokens"], 2)
+        out = h.output_status()                                          # 生成了多少 token：本机接口的也算
+        self.assertEqual((out["today"], out["total"], out["since"]), (2, 2, time.strftime("%Y-%m-%d")))
+        self.assertEqual(h.queue_status()["running"], [])                # 做完了：本机接口不在正在做的里
         self.assertEqual(self.call(port, "POST", "/v1/chat/completions", {"model": "nope", "messages": []}, key=key)[0], 404)
         self.assertEqual(self.call(port, "POST", "/v1/chat/completions", {"model": ep.USER_PREFIX + "missing", "messages": []}, key=key)[0], 404)
 
@@ -6303,6 +7100,53 @@ class StreamChatCancelTest(unittest.TestCase):
             srv.shutdown()
 
 
+class BatteryNoLargeModelTest(unittest.TestCase):
+    def test_user_waiting_chat_is_refused_on_battery(self):
+        """用电池、设置是「不运行大模型」（11-12 定）：前台要用底座的请求先不做，答 needs_user 和原因，不附占内存的名单；
+        已加载的底座卸掉。接上电源就照常。"""
+        import threading as _t
+        from luoke_core.hub import Hub, serve, NO_LARGE_MODEL_MSG
+        from luoke_core.client import HubClient, HubError
+        d = tempfile.mkdtemp(); self.addCleanup(shutil.rmtree, d, True)
+        h = Hub(Recipe.load(RECIPE), d, d, lab=True, accessory_dirs=[d], mem_gb=32, smoke=False)
+        os.makedirs(h.model_dir_of(h.base_name))
+        h.engine_missing = lambda: False
+        h.engine.alive = lambda: True
+        h.engine.serving = lambda: True
+        h.engine.owns_port = lambda: True
+        h.base_id = "base-id"
+        h.engine.loaded = "base-id"
+        h.phase = "running"
+        streams = []
+        h.engine.unload = lambda m=None: setattr(h.engine, "loaded", None) or True
+        h.engine.stream_chat = lambda *a, **k: streams.append(1) or {"status": 200, "error": None, "detail": None, "first_token_secs": 0.1, "usage": None}
+        h.update_settings({"battery_mode": "no_large_model"})
+        h.dispatcher.on_ac = False
+        h._battery_unload()
+        self.assertIsNone(h.engine.loaded)
+        sd = tempfile.mkdtemp(prefix="lk"); self.addCleanup(shutil.rmtree, sd, True); sock = os.path.join(sd, "h.sock")
+        srv = serve(h, sock)
+        _t.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            c = HubClient("luoke-mail/0.15.0", sock)
+            with self.assertRaises(HubError) as cm:
+                list(c.chat("luoke-mail.triage", {"messages": [{"role": "user", "content": "x"}], "luoke_items": 1}))
+            self.assertEqual((cm.exception.code, cm.exception.message), ("needs_user", NO_LARGE_MODEL_MSG))
+            self.assertEqual(cm.exception.extra.get("reason"), "battery_no_large_model")
+            self.assertNotIn("occupants", cm.exception.extra)
+            with self.assertRaises(HubError) as cm:
+                list(c.chat("luoke-mail.triage", {"messages": [{"role": "user", "content": "x"}], "luoke_items": 1},
+                            priority="background", allow_battery=True))
+            self.assertEqual((cm.exception.code, cm.exception.extra.get("reason")), ("paused", "battery_no_large_model"))
+        finally:
+            srv.shutdown()
+            srv.server_close()
+        self.assertEqual(streams, [])
+        h.dispatcher.on_ac = True
+        h._battery_unload()                      # 接上电源不再卸
+        self.assertFalse(h.dispatcher.no_large_model())
+
+
 class MemoryRefusalRetryTest(unittest.TestCase):
     def test_memory_refusal_frees_the_pool_and_retries_once(self):
         """10-20 16 GB 测试机：oMLX 的预填守卫把 MLX 留着的缓冲池算作占用，一条大请求过后稍长的提示一直被拒。
@@ -6489,6 +7333,255 @@ class LabConfigTest(unittest.TestCase):
         import internal_build as ib
         with self.assertRaises(RuntimeError):
             ib.eval_local("x", "16", [], "", {})
+
+
+class BundledEngineReleaseTest(unittest.TestCase):
+    """配方的引擎是螺壳引擎（luoke-engine-<版本>）时：不出单独的引擎包；出版按配方钉的提交从源码现编、打进主控，
+    签好以后核引擎的签名、跑它的自检；评测还跑不了，只出不评测的内部版，引擎换了写明没评测。"""
+
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, os.path.join(ROOT, "tools"))
+        import release
+        cls.rel = release
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("internal_build", os.path.join(ROOT, "tools", "internal_build.py"))
+        cls.ib = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.ib)
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.d, ignore_errors=True)
+
+    def recipe(self, version, commit=None):
+        with open(os.path.join(ROOT, "recipes", "dev.json"), encoding="utf-8") as f:
+            data = json.load(f)
+        data["engine"] = dict(data["engine"], version=version)
+        if commit is not None:
+            data["engine"]["commit"] = commit
+        return Recipe(data)
+
+    def template(self, version, commit=None, name="template.json"):
+        p = os.path.join(self.d, name)
+        with open(os.path.join(ROOT, "recipes", "dev.json"), encoding="utf-8") as f:
+            data = json.load(f)
+        data["engine"] = dict(data["engine"], version=version)
+        if commit is not None:
+            data["engine"]["commit"] = commit
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        return p
+
+    def git(self, cwd, *args):
+        env = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1", GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
+                   GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
+        return subprocess.run(["git", *args], cwd=cwd, env=env, check=True, capture_output=True, text=True).stdout.strip()
+
+    def engine_repo(self, version="0.1.0"):
+        """一个假的引擎仓库：tools/package.sh 照真的那样出 luoke-engine-<版本>-macos-arm64/（程序答 --version，开着实验室包答 <版本>-lab）"""
+        src = os.path.join(self.d, "engine-src")
+        os.makedirs(os.path.join(src, "tools"))
+        with open(os.path.join(src, "tools", "package.sh"), "w") as f:
+            f.write(f"""#!/bin/sh
+set -eu
+d="$1/luoke-engine-{version}-macos-arm64"
+mkdir -p "$d"
+v={version}
+[ "${{LUOKE_LAB:-}}" = 1 ] && v={version}-lab
+printf '#!/bin/sh\n[ "$1" = --version ] && echo %s\n' "$v" > "$d/luoke-engine"
+chmod 755 "$d/luoke-engine"
+for f in LICENSE NOTICE THIRD-PARTY-PACKAGES.txt THIRD-PARTY-LICENSES.txt; do echo x > "$d/$f"; done
+""")
+        self.git(self.d, "init", "-q", "-b", "main", src)
+        self.git(src, "add", "-A")
+        self.git(src, "commit", "-q", "-m", "engine")
+        return src, self.git(src, "rev-parse", "HEAD")
+
+    def test_version_and_commit_come_from_the_recipe(self):
+        c = "a" * 40
+        self.assertEqual(self.rel.bundled_engine_version(self.recipe("omlx-0.7.2")), "")
+        self.assertEqual(self.rel.bundled_engine_version(self.recipe("luoke-engine-0.1.0", c)), "0.1.0")
+        self.assertEqual(self.rel.bundled_engine_commit(self.recipe("omlx-0.7.2")), "")
+        self.assertEqual(self.rel.bundled_engine_commit(self.recipe("luoke-engine-0.1.0", c)), c)
+        for bad in (None, "", "a" * 7, "A" * 40, "g" * 40, "a" * 41):        # 螺壳引擎的配方要钉完整的提交号
+            with self.assertRaises(SystemExit, msg=bad):
+                self.rel.bundled_engine_commit(self.recipe("luoke-engine-0.1.0", bad))
+
+    def test_engine_is_built_from_the_pinned_commit(self):
+        src, commit = self.engine_repo()
+        out = os.path.join(self.d, "out")
+        lab = unittest.mock.patch.dict(self.rel.SH_ENV, {"LUOKE_LAB": "1"})       # 环境里开着实验室包也打正式包
+        with open(os.path.join(src, ".luoke-commit"), "w") as f:      # 冻结时写的，不算改动
+            f.write(commit + "\n")
+        with lab:
+            env = self.rel.bundled_engine_env(src, self.recipe("luoke-engine-0.1.0", commit), out)
+        built = os.path.join(out, "engine.noindex", "luoke-engine-0.1.0-macos-arm64")
+        self.assertEqual(env, {"LUOKE_ENGINE_PKG": built, "LUOKE_ENGINE_VERSION": "0.1.0"})
+        self.assertEqual(self.rel.engine_version_of(os.path.join(built, "luoke-engine")), "0.1.0")
+        # oMLX 的配方：不编、不带；给了引擎源码就停
+        self.assertEqual(self.rel.bundled_engine_env("", self.recipe("omlx-0.7.2"), out), {})
+        with self.assertRaises(SystemExit):
+            self.rel.bundled_engine_env(src, self.recipe("omlx-0.7.2"), out)
+        # 没给源码、源码不在钉的提交、版本对不上
+        for engine_src, recipe in (("", self.recipe("luoke-engine-0.1.0", commit)),
+                                   (src, self.recipe("luoke-engine-0.1.0", "b" * 40)),
+                                   (src, self.recipe("luoke-engine-0.2.0", commit))):
+            with self.assertRaises(SystemExit, msg=recipe.engine):
+                self.rel.bundled_engine_env(engine_src, recipe, out)
+        # 源码有改动（改了跟踪的文件、多了没跟踪的文件）
+        for change in ("tools/package.sh", "extra.txt"):
+            path = os.path.join(src, change)
+            with open(path, "a") as f:
+                f.write("# changed\n")
+            with self.assertRaises(SystemExit, msg=change):
+                self.rel.bundled_engine_env(src, self.recipe("luoke-engine-0.1.0", commit), out)
+            self.git(src, "checkout", "-q", "--", ".")
+            if change == "extra.txt":
+                os.remove(path)
+        self.rel.bundled_engine_env(src, self.recipe("luoke-engine-0.1.0", commit), out)
+        # 目录名对、程序自己说的版本不对
+        with open(os.path.join(src, "tools", "package.sh"), "a") as f:
+            f.write('sed -i "" "s/echo 0.1.0/echo 0.0.9/" "$d/luoke-engine"\n')
+        self.git(src, "commit", "-qam", "wrong version")
+        with self.assertRaises(SystemExit):
+            self.rel.bundled_engine_env(src, self.recipe("luoke-engine-0.1.0", self.git(src, "rev-parse", "HEAD")), out)
+        self.git(src, "revert", "--no-edit", "HEAD")
+        # 编出来的程序是个链接：不认
+        with open(os.path.join(src, "tools", "package.sh"), "a") as f:
+            f.write('mv "$d/luoke-engine" "$d/real" && ln -s real "$d/luoke-engine"\n')
+        self.git(src, "commit", "-qam", "link")
+        with self.assertRaises(SystemExit):
+            self.rel.bundled_engine_env(src, self.recipe("luoke-engine-0.1.0", self.git(src, "rev-parse", "HEAD")), out)
+
+    def test_engine_stage_makes_no_package_and_drops_an_old_record(self):
+        info = os.path.join(self.d, "engine.json")
+        with open(info, "w") as f:
+            f.write("{}")
+        paths = types.SimpleNamespace(engine_info=info, engine_dir=self.d)
+        self.rel.stage_engine(types.SimpleNamespace(engine_app=os.path.join(self.d, "missing.app")), paths, self.recipe("luoke-engine-0.1.0"))
+        self.assertFalse(os.path.exists(info))
+        with self.assertRaises(SystemExit):           # oMLX 的配方照旧要引擎 .app
+            self.rel.stage_engine(types.SimpleNamespace(engine_app=os.path.join(self.d, "missing.app")), paths, self.recipe("omlx-0.7.2"))
+
+    def fake_app(self, plist_version="0.1.0", says="0.1.0"):
+        app = os.path.join(self.d, "螺壳.app")
+        shutil.rmtree(app, ignore_errors=True)
+        os.makedirs(os.path.join(app, "Contents", "Helpers"))
+        with open(os.path.join(app, "Contents", "Info.plist"), "wb") as f:
+            plistlib.dump({"LuokeEngineVersion": plist_version}, f)
+        if says is not None:
+            exe = os.path.join(app, "Contents", "Helpers", "luoke-engine")
+            with open(exe, "w") as f:
+                f.write(f'#!/bin/sh\ncase "$1" in --version) echo {says};; selftest) exit "${{SELFTEST_RC:-0}}";; esac\n')
+            os.chmod(exe, 0o755)
+        return app
+
+    def test_built_app_must_hold_the_engine_the_recipe_names(self):
+        self.rel.check_bundled_engine(self.fake_app(), "0.1.0")
+        for plist_version, says, want in (("0.1.0", None, "0.1.0"),          # 程序不在
+                                          ("0.1.0", "0.1.0", "0.2.0"),       # 不是配方要的那一版
+                                          ("0.1.0", "0.2.0", "0.1.0"),       # Info.plist 对、程序是别的版本
+                                          ("0.2.0", "0.1.0", "0.1.0")):      # 程序对、Info.plist 写的不对
+            with self.assertRaises(SystemExit, msg=(plist_version, says, want)):
+                self.rel.check_bundled_engine(self.fake_app(plist_version, says), want)
+
+    def test_signed_app_is_checked_and_runs_the_selftest(self):
+        """签好以后：标识、hardened runtime、和螺壳同一个团队、版本，再跑自检；oMLX 的配方不查。"""
+        recipe = self.recipe("luoke-engine-0.1.0", "a" * 40)
+        app = self.fake_app()
+        sigs = {}
+
+        def codesign(cmd, **kw):
+            if cmd[0] != "codesign":
+                return real_run(cmd, **kw)
+            id_, team, flags = sigs["engine" if cmd[-1].endswith("luoke-engine") else "app"]
+            return subprocess.CompletedProcess(cmd, 0, "", f"Identifier={id_}\nCodeDirectory v=20500 size=1 flags={flags} hashes=1\nTeamIdentifier={team}\n")
+        real_run = subprocess.run
+        good = {"app": ("ai.luoke.core", "ABCDE12345", "0x10000(runtime)"), "engine": ("ai.luoke.engine", "ABCDE12345", "0x10000(runtime)")}
+        with unittest.mock.patch.object(self.rel.subprocess, "run", codesign):
+            sigs.update(good)
+            self.rel.check_signed_engine(app, recipe)
+            self.rel.check_signed_engine(app, self.recipe("omlx-0.7.2"))          # 不查
+            for part, value in (("engine", ("luoke-engine", "ABCDE12345", "0x10000(runtime)")),     # 标识丢了
+                                ("engine", ("ai.luoke.engine", "ABCDE12345", "0x2(adhoc)")),        # 没开 hardened runtime
+                                ("engine", ("ai.luoke.engine", "ZZZZZ99999", "0x10000(runtime)")),  # 别的团队
+                                ("engine", ("ai.luoke.engine", "not set", "0x10002(adhoc,runtime)")),
+                                ("app", ("ai.luoke.core", "not set", "0x10000(runtime)")),
+                                ("both", ("ai.luoke.engine", "not set", "0x10002(adhoc,runtime)"))):   # 两个都是临时签名：团队一样也不行
+                sigs.update(good)
+                if part == "both":
+                    sigs["app"], sigs["engine"] = ("ai.luoke.core",) + value[1:], value
+                else:
+                    sigs[part] = value
+                with self.assertRaises(SystemExit, msg=(part, value)):
+                    self.rel.check_signed_engine(app, recipe)
+            sigs.update(good)
+            with self.assertRaises(SystemExit):           # 程序说自己是别的版本
+                self.rel.check_signed_engine(self.fake_app(says="0.2.0"), recipe)
+            with unittest.mock.patch.dict(os.environ, {"SELFTEST_RC": "1"}), self.assertRaises(SystemExit):     # 自检没过
+                self.rel.check_signed_engine(self.fake_app(), recipe)
+
+    def test_engine_is_frozen_at_the_pinned_commit_and_its_tag(self):
+        ib = self.ib
+        src, commit = self.engine_repo()
+        self.git(src, "tag", "v0.1.0")
+        frozen = os.path.join(self.d, "frozen")
+        with unittest.mock.patch.object(ib, "SRC", frozen), unittest.mock.patch.object(ib, "TOP", os.path.join(self.d, "top")), \
+                unittest.mock.patch.object(ib, "remote_url", lambda repo: src), unittest.mock.patch.object(ib, "log", lambda m: None):
+            self.assertEqual(ib.freeze_engine(self.template("omlx-0.7.2")), "")
+            dst = ib.freeze_engine(self.template("luoke-engine-0.1.0", commit))
+            self.assertEqual(dst, os.path.join(frozen, "luoke-engine"))
+            self.assertEqual(self.git(dst, "rev-parse", "HEAD"), commit)
+            # tag 在别的提交上、没有这个 tag：停
+            self.git(src, "commit", "-q", "--allow-empty", "-m", "next")
+            later = self.git(src, "rev-parse", "HEAD")
+            for version, pin in (("0.1.0", later), ("0.2.0", commit)):
+                with self.assertRaises(SystemExit, msg=(version, pin)):
+                    ib.freeze_engine(self.template(f"luoke-engine-{version}", pin))
+            with self.assertRaises(SystemExit):           # 配方没钉提交
+                ib.freeze_engine(self.template("luoke-engine-0.1.0"))
+
+    def test_without_evaluation_the_engine_change_is_written_down(self):
+        ib = self.ib
+        c1, c2 = "1" * 40, "2" * 40
+        recipes = os.path.join(self.d, "recipes")
+        os.makedirs(recipes)
+        for tag, version, commit in (("internal-1115", "omlx-0.7.2", None), ("internal-1116", "luoke-engine-0.1.0", c1)):
+            shutil.copy(self.template(version, commit), os.path.join(recipes, f"{tag}.json"))
+        with unittest.mock.patch.object(ib, "ROOT", self.d):
+            now = self.template("luoke-engine-0.1.0", c2)
+            self.assertEqual(ib.unevaluated_engine(now, "internal-1115"),
+                             "引擎换成了 螺壳引擎 0.1.0（2222222），没评测：评测结果和开关沿用 internal-1115（引擎 oMLX 0.7.2）")
+            # 同一个版本号、换了提交，也算换了引擎
+            self.assertIn("沿用 internal-1116（引擎 螺壳引擎 0.1.0（1111111））", ib.unevaluated_engine(now, "internal-1116"))
+            self.assertEqual(ib.unevaluated_engine(self.template("luoke-engine-0.1.0", c1), "internal-1116"), "")
+            self.assertEqual(ib.unevaluated_engine(self.template("omlx-0.7.2"), "internal-1115"), "")
+            self.assertIn("引擎 不明", ib.unevaluated_engine(now, "internal-0101"))
+            self.assertEqual(ib.engine_label(ib.release_recipe("internal-1116")), "螺壳引擎 0.1.0（1111111）")
+
+    def test_a_luoke_engine_recipe_is_only_released_without_evaluation(self):
+        """评测还跑不了螺壳引擎：内部版要 --no-eval，beta、候选版、正式版不出。"""
+        ib = self.ib
+        engine, omlx = self.template("luoke-engine-0.1.0", "a" * 40), self.template("omlx-0.7.2", name="omlx.json")
+        ib.check_engine_eval("internal-1116", engine, True)
+        for tag in ("internal-1116", "beta2", "beta2-rc1", "local-1116-1200"):
+            ib.check_engine_eval(tag, omlx, False)
+            with self.assertRaises(SystemExit, msg=tag):
+                ib.check_engine_eval(tag, engine, False)
+
+    def test_release_report_says_the_engine_was_not_evaluated(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("release_report", os.path.join(ROOT, "tools", "release_report.py"))
+        r = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(r)
+        tag = "internal-1116"
+        os.makedirs(os.path.join(self.d, "releases", tag))
+        note = "引擎换成了 螺壳引擎 0.1.0（2222222），没评测：评测结果和开关沿用 internal-1115（引擎 oMLX 0.7.2）"
+        with open(os.path.join(self.d, "releases", tag, "timeline.json"), "w") as f:
+            json.dump({"tag": tag, "host": "h", "phases": [{"name": "sign", "start": 0, "end": 60, "ok": True}], "samples": [],
+                       "unevaluated_engine": note}, f)
+        with unittest.mock.patch.object(r, "ROOT", self.d):
+            self.assertIn(note + "。", "\n".join(r.summary(tag, None)))
 
 
 class WindowSizingTest(unittest.TestCase):

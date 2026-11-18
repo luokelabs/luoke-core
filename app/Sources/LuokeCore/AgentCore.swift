@@ -14,8 +14,120 @@ import SwiftUI
 #if canImport(LuokeWindow)
 import Combine
 import LuokeWindow
+import ServiceManagement
 import UserNotifications
 #endif
+
+/// 主窗口左下角那一行（和 logo 共存，有事才出现）要说的事：主控这边按轻重排好，只给最要紧的一件（luoke-agent 的
+/// `WindowModel.sidebarNotice`，agent-private#126）。连不上 agent 核心、还在准备这两种 agent 自己判断，排在这些前面。
+/// 短话四个字以内（那里只有一百来点宽，「模型在下载」五个字就截断了）
+struct CoreNotice: Equatable {
+    enum Kind: Equatable { case error, paused, downloading, update }
+    /// 点了做什么：设置 · 通用 / 系统设置的「电池」/ 只是知道了（自己会好的，没什么要改）/ 重新启动螺壳 / 检查更新
+    enum Action: Equatable { case settings, batterySettings, dismiss, restart, update }
+    let kind: Kind
+    let text: String
+    /// 点开以后的一两句话：为什么、在哪改（11-12 定；agent-private#131）
+    var detail: String? = nil
+    /// 按钮上的字；nil 用主窗口默认的「去设置里改」
+    var actionLabel: String? = nil
+    var action: Action = .settings
+
+    /// 出错了 > 已暂停 > 下载中 > 有新版本
+    static func top(status: HubStatus?, unreachable: Bool, updateFound: Bool) -> CoreNotice? {
+        if unreachable || status?.state == .error {
+            return CoreNotice(kind: .error, text: "出错了", detail: "螺壳的模型没在运行，生成、整理这些先做不了。重新启动螺壳一般就好了。",
+                              actionLabel: "重新启动螺壳", action: .restart)
+        }
+        if let st = status {
+            if st.backgroundState != "running" { return paused(st.backgroundReasons) }
+            if st.downloading { return CoreNotice(kind: .downloading, text: "下载中") }
+        }
+        if updateFound { return CoreNotice(kind: .update, text: "有新版本", action: .update) }
+        return nil
+    }
+
+    /// 后台为什么暂停（主控 /status 的 background.reasons），几个原因同时在时说最该先处理的那个
+    static func paused(_ reasons: [String]) -> CoreNotice {
+        if reasons.contains("battery_no_large_model") {
+            return CoreNotice(kind: .paused, text: "已暂停",
+                              detail: "在用电池，按设置不运行大模型：后台的整理和要用大模型的事先不做，接上电源就接着做。想在电池上也用，在「设置 · 通用」的「用电池时」里改。")
+        }
+        if reasons.contains("battery") {
+            return CoreNotice(kind: .paused, text: "已暂停",
+                              detail: "正在用电池，后台的整理先不做，免得费电；接上电源就接着做。想在电池上也做，在「设置 · 通用」的「用电池时」里选「照常运行」。")
+        }
+        if reasons.contains("low_power") {
+            return CoreNotice(kind: .paused, text: "已暂停", detail: "这台 Mac 开着低电量模式，后台的整理先不做；关掉低电量模式就接着做。",
+                              actionLabel: "打开电池设置", action: .batterySettings)
+        }
+        if reasons.contains("thermal") {
+            return CoreNotice(kind: .paused, text: "已暂停", detail: "这台 Mac 有点热，后台的整理先歇一会儿，凉下来会自己接着做。",
+                              actionLabel: "知道了", action: .dismiss)
+        }
+        if reasons.contains("memory") {
+            return CoreNotice(kind: .paused, text: "已暂停", detail: "内存有点紧，后台的整理先等等，别的程序腾出内存后会自己接着做。",
+                              actionLabel: "知道了", action: .dismiss)
+        }
+        return CoreNotice(kind: .paused, text: "已暂停", detail: "后台的整理暂时停着，条件好了会自己接着做。", actionLabel: "知道了", action: .dismiss)
+    }
+}
+
+/// 右边栏的任务队列和生成量（11-12 和 luoke-agent 商定）：主控 /status 的 queue、output 换成给人看的样子，
+/// AgentCore 再填进 luoke-agent 的 TaskRow、OutputStats（这里不依赖 LuokeWindow，好测）
+struct RailTask: Equatable {
+    enum Wait: Equatable { case soon, time(Date), power, thermal, memory, paused, quiet, busy }
+    enum State: Equatable { case running(fraction: Double?), queued(Wait?) }
+    let id: String
+    let tool: String?          // 应用编号（luoke-mail……）；本机接口是 nil
+    let title: String
+    let state: State
+
+    /// 名字不带应用名：右边栏每行下面已经写了是哪个应用（11-12 截图里「螺壳邮件助手的后台整理」重复又被截断）
+    static func rows(_ st: HubStatus?) -> [RailTask] {
+        guard let st else { return [] }
+        var out: [RailTask] = []
+        for r in st.queueRunning {
+            let tool = r["tool"] as? String
+            let title: String
+            switch r["kind"] as? String {
+            case "endpoint": title = "本机接口 · " + ModelName.display(r["name"] as? String ?? "")
+            case "job": title = (r["title"] as? String) ?? "后台任务"
+            default: title = "在用模型"
+            }
+            out.append(RailTask(id: r["id"] as? String ?? UUID().uuidString, tool: tool, title: title,
+                                state: .running(fraction: (r["fraction"] as? NSNumber)?.doubleValue)))
+        }
+        for q in st.queueWaiting {
+            let tool = q["tool"] as? String
+            let w = q["wait"] as? [String: Any]
+            let wait: Wait?
+            switch w?["kind"] as? String {
+            case "soon": wait = .soon
+            case "time": wait = (w?["at"] as? NSNumber).map { .time(Date(timeIntervalSince1970: $0.doubleValue)) }
+            case "power": wait = .power
+            case "thermal": wait = .thermal
+            case "memory": wait = .memory
+            case "paused": wait = .paused
+            case "quiet": wait = .quiet
+            case "busy": wait = .busy
+            default: wait = nil
+            }
+            out.append(RailTask(id: q["id"] as? String ?? UUID().uuidString, tool: tool,
+                                title: (q["title"] as? String) ?? "后台任务", state: .queued(wait)))
+        }
+        return out
+    }
+
+    /// 「11 月 12 日」；不是今年的带上年份。主控给的是 YYYY-MM-DD，认不出就原样
+    static func since(_ ymd: String?, now: Date = Date()) -> String? {
+        guard let ymd else { return nil }
+        let p = ymd.split(separator: "-").compactMap { Int($0) }
+        guard p.count == 3 else { return ymd }
+        let year = Calendar.current.component(.year, from: now)
+        return (p[0] == year ? "" : "\(p[0]) 年 ") + "\(p[1]) 月 \(p[2]) 日"
+    }
+}
 
 /// 别处用主窗口和 agent 核心的入口；这一份没带主窗口时什么都不做
 enum MainWindow {
@@ -297,6 +409,12 @@ final class AgentCore: NSObject, NSWindowDelegate, WindowHost {
     private lazy var apps: AppsModel = {
         let m = AppsModel()
         m.$rows.dropFirst().sink { [weak self] _ in DispatchQueue.main.async { MainActor.assumeIsolated { self?.refreshApps() } } }.store(in: &subs)   // 装了、升了：侧栏的版本和「升级」跟着变
+        // 「应用管理」页由主窗口照 appsSnapshot() 画：行、正在做的、做完那一句、能换回的上一版，变了就让它重读
+        Publishers.MergeMany(m.$rows.map { _ in () }.eraseToAnyPublisher(), m.$phase.map { _ in () }.eraseToAnyPublisher(),
+                             m.$progress.map { _ in () }.eraseToAnyPublisher(), m.$fraction.map { _ in () }.eraseToAnyPublisher(),
+                             m.$previous.map { _ in () }.eraseToAnyPublisher(), m.$imeAdded.map { _ in () }.eraseToAnyPublisher())
+            .dropFirst(6).receive(on: RunLoop.main)
+            .sink { [weak self] in MainActor.assumeIsolated { self?.model.hostAppsChanged() } }.store(in: &subs)
         return m
     }()
 
@@ -312,6 +430,9 @@ final class AgentCore: NSObject, NSWindowDelegate, WindowHost {
         model.$apps.dropFirst().sink { [weak self] _ in DispatchQueue.main.async { MainActor.assumeIsolated { self?.openPendingToolPage() } } }.store(in: &subs)
         // 用户这期间换了页：记着的就不去了
         model.$page.dropFirst().sink { [weak self] _ in MainActor.assumeIsolated { self?.pendingToolPage = nil } }.store(in: &subs)
+        // 进「应用管理」页：本体的应用目录重新列一遍（页面是窗口画的，没有本体的 onAppear 了）
+        model.$page.dropFirst().filter { $0 == .apps }.receive(on: RunLoop.main)
+            .sink { [weak self] _ in MainActor.assumeIsolated { self?.apps.load() } }.store(in: &subs)
     }
 
     func start() {
@@ -344,10 +465,88 @@ final class AgentCore: NSObject, NSWindowDelegate, WindowHost {
                 self.model.modelName = ModelName.display(st?.loaded ?? st?.base ?? "—")
             }
         }.store(in: &subs)
+        // 左下角那一行：出错、暂停、下载、有新版本，只给最要紧的一件。点「有新版本」开检查更新那一页，别的去「设置 · 通用」
+        let hub = HubModel.shared
+        hub.$status.combineLatest(hub.$hubError, hub.$hubExit, hub.$updateFound).receive(on: RunLoop.main).sink { [weak self] st, _, _, found in
+            MainActor.assumeIsolated { self?.showNotice(CoreNotice.top(status: st, unreachable: hub.unreachable, updateFound: found != nil)) }
+        }.store(in: &subs)
+        // 右边栏：任务队列和生成了多少 token（RailTask 换好，这里只套 LuokeWindow 的类型）；没变不重设
+        hub.$status.receive(on: RunLoop.main).sink { [weak self] st in
+            MainActor.assumeIsolated { self?.showRail(st) }
+        }.store(in: &subs)
+        // 「设置」由主窗口照 settingsSnapshot() 画：主控状态、更新、换档前挡下的那一句、计费网络变了就重算；进「设置」时把本机接口、权限读一遍
+        Publishers.MergeMany(hub.$status.map { _ in () }.eraseToAnyPublisher(), hub.$updateFound.map { _ in () }.eraseToAnyPublisher(),
+                             hub.$tierError.map { _ in () }.eraseToAnyPublisher(), hub.$meteredNetwork.map { _ in () }.eraseToAnyPublisher())
+            .receive(on: RunLoop.main)
+            .sink { [weak self] in MainActor.assumeIsolated { self?.settingsChanged() } }.store(in: &subs)
+        model.$page.filter { $0 == .prefs }.receive(on: RunLoop.main)
+            .sink { [weak self] _ in MainActor.assumeIsolated { self?.enterSettings() } }.store(in: &subs)
         // 有没有急事：菜单栏图标的小点
         model.$urgent.receive(on: RunLoop.main).sink { _ in MainActor.assumeIsolated { MenuBar.shared.refreshIcon() } }.store(in: &subs)
         refreshApps()
         reportPermissions()
+    }
+
+    private func showRail(_ st: HubStatus?) {
+        let (tasks, stats) = Self.rail(st)
+        if model.tasks != tasks { model.tasks = tasks }
+        if model.outputStats != stats { model.outputStats = stats }
+    }
+
+    /// 主控的 /status → 右边栏的任务行和生成量（截图工具也用）
+    static func rail(_ st: HubStatus?) -> ([TaskRow], OutputStats?) {
+        let tasks = RailTask.rows(st).map { t -> TaskRow in
+            let tool = toolIcon(t.tool)
+            let state: TaskRow.State
+            switch t.state {
+            case .running(let f): state = .running(fraction: f, note: nil)
+            case .queued(let w):
+                let wait: TaskRow.Wait?
+                switch w {
+                case .soon?: wait = .soon
+                case .time(let d)?: wait = .time(d)
+                case .power?: wait = .power
+                case .thermal?: wait = .thermal
+                case .memory?: wait = .memory
+                case .paused?: wait = .paused
+                case .quiet?: wait = .quiet
+                case .busy?: wait = .busy
+                case nil: wait = nil
+                }
+                state = .queued(wait: wait)
+            }
+            return TaskRow(id: t.id, tool: tool, title: t.title, state: state)
+        }
+        let stats = st.map { OutputStats(tasksToday: nil, tokensToday: $0.tokensToday, tokensTotal: $0.tokensTotal,
+                                          since: RailTask.since($0.tokensSince)) }
+        return (tasks, stats)
+    }
+
+    /// 左下角那一行（CoreNotice）交给主窗口；没变就不重画
+    private func showNotice(_ n: CoreNotice?) {
+        guard let n else {
+            if model.sidebarNotice != nil { model.sidebarNotice = nil }
+            return
+        }
+        let kind: SidebarNotice.Kind
+        switch n.kind {
+        case .error: kind = .error
+        case .paused: kind = .paused
+        case .downloading: kind = .downloading
+        case .update: kind = .update
+        }
+        // 暂停的原因换了（拔电源 → 过热）说的话也跟着换：比到 detail
+        if let cur = model.sidebarNotice, cur.kind == kind, cur.text == n.text, cur.detail == n.detail { return }
+        var open: (@MainActor () -> Void)? = nil      // nil：去「设置 · 通用」
+        switch n.action {
+        case .settings: open = nil
+        case .update: open = { Updater.show() }
+        case .restart: open = { HubModel.shared.restartHub() }
+        case .dismiss: open = {}                       // 自己会好的：按钮只是收起这段话
+        case .batterySettings:
+            open = { if let u = URL(string: "x-apple.systempreferences:com.apple.Battery-Settings.extension") { NSWorkspace.shared.open(u) } }
+        }
+        model.sidebarNotice = SidebarNotice(id: "core.\(n.kind)", kind: kind, text: n.text, detail: n.detail, actionLabel: n.actionLabel, open: open)
     }
 
     func stop() {
@@ -378,8 +577,8 @@ final class AgentCore: NSObject, NSWindowDelegate, WindowHost {
                          styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                          backing: .buffered, defer: false)
         w.title = AppInfo.appName
-        w.titleVisibility = .hidden
-        w.titlebarAppearsTransparent = true       // 红黄绿落在侧栏左上角留出的位置（LuokeWindow 的 WindowControls）
+        // 标题栏归 LuokeWindow：隐藏标题、透明，加一个空的统一工具栏，红黄绿在 52 高的顶行正中，带字的 logo 在它右边（agent-private#120）
+        MainWindowChrome.apply(to: w)
         w.contentMinSize = NSSize(width: 860, height: 600)
         w.contentView = NSHostingView(rootView: MainWindowView(model: model))
         w.isReleasedWhenClosed = false
@@ -415,6 +614,7 @@ final class AgentCore: NSObject, NSWindowDelegate, WindowHost {
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     self?.connection?.reportNotifications(status: status, alerts: alerts)
+                    self?.notificationAuth = (status, alerts)
                     self?.model.notificationsNotAsked = s.authorizationStatus == .notDetermined
                 }
             }
@@ -449,22 +649,13 @@ final class AgentCore: NSObject, NSWindowDelegate, WindowHost {
 
     // MARK: WindowHost：模型、隐私、添加应用、升级都画在主窗口里
 
-    /// 「设置」的模型、隐私：本体自己的那两块，画在主窗口的设置里（11-09 负责人定，不再另弹「螺壳设置」）
-    func settingsContent(_ tab: PrefsTab) -> AnyView? {
-        switch tab {
-        case .model: return AnyView(HubModelSettings().environmentObject(HubModel.shared))
-        case .privacy: return AnyView(HubPrivacySettings(uninstallBack: { [weak self] in self?.showSettings(tab: .privacy) }).environmentObject(HubModel.shared))
-        default: return nil
-        }
-    }
-
-    /// 打开主窗口到「设置」：菜单栏的「设置」、⌘, 经 SettingsWindow.show 到这里，tab 为 nil 停在上次看的标签；卸载页的「取消」「完成」回「隐私」
+    /// 打开主窗口到「设置」：菜单栏的「设置」、⌘, 经 SettingsWindow.show 到这里，tab 为 nil 停在上次看的标签；卸载页的「取消」「完成」回「通用」
     func showSettings(tab: PrefsTab? = nil) {
         show()
         model.go(.prefs, tab: tab?.rawValue)
     }
 
-    func openModelSettings() { showSettings(tab: .model) }     // 窗口只在 settingsContent 为 nil 时调；留着不另开窗口
+    func openModelSettings() { showSettings(tab: .model) }     // 窗口只在没有 settingsSnapshot 时调；留着不另开窗口
 
     func askPermission(app: String, id: String) { PermissionWindow.ask(app: app, id: id) }
     func askPermission(app: String, id: String, ready: @escaping @MainActor () -> Void) {
@@ -473,9 +664,31 @@ final class AgentCore: NSObject, NSWindowDelegate, WindowHost {
     func askSystem(id: String) { PermissionWindow.askSystem(id: id) }
 
     func askNotifications() {
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { [weak self] _, _ in
-            DispatchQueue.main.async { MainActor.assumeIsolated { self?.reportNotifications() } }
+        let center = UNUserNotificationCenter.current()
+        center.getNotificationSettings { before in
+            if before.authorizationStatus == .denied {      // 以前关掉了：系统不会再问，直接去系统设置里打开
+                DispatchQueue.main.async { MainActor.assumeIsolated { Self.openNotificationSettings() } }
+                return
+            }
+            center.requestAuthorization(options: [.alert, .sound]) { [weak self] _, _ in
+                center.getNotificationSettings { after in
+                    DispatchQueue.main.async {
+                        MainActor.assumeIsolated {
+                            // 系统没弹询问（还是「没决定」：这份构建不让问，例如 ad-hoc 签名的开发构建）：点了不能什么都不发生
+                            // （负责人 11-14：「打开通知」点了没用），打开系统设置里螺壳的通知那一页
+                            if after.authorizationStatus == .notDetermined { Self.openNotificationSettings() }
+                            self?.reportNotifications()
+                        }
+                    }
+                }
+            }
         }
+    }
+
+    /// 系统设置里螺壳自己的通知那一页
+    static func openNotificationSettings() {
+        let id = Bundle.main.bundleIdentifier ?? "ai.luoke.core"
+        if let u = URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension?id=\(id)") { NSWorkspace.shared.open(u) }
     }
 
     func setPermission(app: String, id: String, on: Bool) {
@@ -486,9 +699,6 @@ final class AgentCore: NSObject, NSWindowDelegate, WindowHost {
         }
     }
     func openPrivacySettings() { showSettings(tab: .privacy) } // 同上
-    /// 「添加应用」页：本体的应用目录，装、升级、开启、停用、换回上一版都在这一页的行里
-    func appsContent() -> AnyView? { AnyView(AppsView(m: apps, inWindow: true)) }
-
     /// 打开主窗口到「添加应用」页（菜单栏的「应用」、「去升级应用」、卸载完回来都经 AppsWindow.show 到这里）
     func showApps() -> AppsModel {
         let showing = window != nil && model.page == .apps  // 已经在这一页（窗口关了再开也算）：页面不会再出现一次，在这里 load
@@ -499,8 +709,288 @@ final class AgentCore: NSObject, NSWindowDelegate, WindowHost {
         return apps
     }
 
-    func openAddApps() { _ = showApps() }       // 窗口只在 appsContent 为 nil 时调；留着不另开窗口
-    func upgrade(app: String) { apps.load() }   // 窗口已经翻到「添加应用」页：那一行有「升级」
+    func openAddApps() { _ = showApps() }       // 窗口只在没有 appsSnapshot 时调；留着不另开窗口
+
+    /// 「应用管理」页的数据（docs/界面接口.md §16）：窗口照它画，动作回到下面几个方法
+    func appsSnapshot() -> HostApps? {
+        let rows = AppsSnapshot.entries(apps).map(Self.hostRow)
+        let notice = AppsSnapshot.notice(phase: apps.phase, imeAdded: apps.imeAdded, rows: apps.rows).map { n in
+            HostAppsNotice(text: n.text, ok: n.ok, action: n.keyboardSettingsFor.map { ("打开键盘设置", $0, HostAppAction.openKeyboardSettings) })
+        }
+        return HostApps(rows: rows, notice: notice)
+    }
+
+    static func hostRow(_ e: AppEntry) -> HostAppRow {
+        let state: HostAppRow.State
+        switch e.state {
+        case .installed: state = .installed
+        case .disabled: state = .disabled
+        case .installable: state = .installable
+        case .update(let v): state = .update(to: v)
+        case .unavailable(let why): state = .unavailable(reason: why)
+        case .working(let label, let f): state = .working(label: label, progress: f)
+        }
+        let actions: [HostAppAction] = e.actions.map {
+            switch $0 {
+            case .enable: return .enable
+            case .disable: return .disable
+            case .restart: return .restart
+            case .deleteData: return .deleteData
+            case .uninstall: return .uninstall
+            case .rollback(let v): return .rollback(to: v)
+            case .openKeyboardSettings: return .openKeyboardSettings
+            }
+        }
+        return HostAppRow(id: e.id, tool: toolIcon(e.id), name: e.name, tagline: e.tagline, version: e.version,
+                          origin: e.poweredBy ? .poweredBy : .luoke, state: state, bundled: e.bundled, facts: e.facts, actions: actions)
+    }
+
+    static func toolIcon(_ accessory: String?) -> ToolIcon {
+        switch accessory {
+        case "luoke-mail": return .mail
+        case "luoke-scan": return .scan
+        case "luoke-mem": return .mem
+        case "luoke-search": return .search
+        case "luoke-ime": return .ime
+        default: return .core
+        }
+    }
+
+    private func appRow(_ id: String) -> AppsModel.Row? {
+        if apps.rows.isEmpty { apps.load() }
+        return apps.rows.first { $0.id == id }
+    }
+
+    /// 侧栏、应用管理页上的「升级」：就在这一行里升。螺壳自己（设置 · 通用的「升级」）走检查更新那一页：下载、核对、输密码
+    func upgrade(app: String) {
+        if app == ToolIcon.core.accessory { Updater.show(); return }
+        guard let r = appRow(app), r.canUpdate, !apps.busy else { apps.load(); return }
+        apps.update(r)
+    }
+
+    func install(app: String) {
+        guard let r = appRow(app), r.installed == nil, r.unavailable == nil, !apps.busy else { return }
+        apps.install(r)
+    }
+
+    /// 卸载走本体自己的卸载页（列出要删的、勾选、确认），做完回「应用管理」
+    func uninstall(app: String) {
+        Uninstall.show(preselect: app, back: { [weak self] in _ = self?.showApps() })
+    }
+
+    func perform(app: String, action: HostAppAction) {
+        if action == .uninstall { uninstall(app: app); return }
+        if action == .openKeyboardSettings { FirstRunModel(preselect: nil).openKeyboardSettings(); return }
+        guard let r = appRow(app), !apps.busy else { return }
+        switch action {
+        case .enable: apps.enable(r)
+        case .disable: apps.disable(r)
+        case .restart: apps.restartInputMethod(r)
+        case .rollback: apps.rollback(r)
+        case .deleteData: DeleteData.show(accessory: r.id, name: r.name)
+        case .uninstall, .openKeyboardSettings: break
+        }
+    }
+
+    // MARK: 设置（docs/界面接口.md §16）：通用、模型、隐私与权限里本体管的那几块，窗口照 settingsSnapshot() 画
+
+    /// 窗口每次重画都来读：存着，主控的状态、更新、本机接口、登录项变了才重算
+    private var settingsCache: HostSettings?
+    /// 本机接口（GET /endpoint）：进「设置」时读一次，开关、换密钥以后再读
+    private var endpointInfo: [String: Any] = [:]
+    private var endpointError: String?
+    private var loginError: String?
+    private var notificationAuth: (status: String, alerts: Bool)?
+    private var checkingUpdates = false
+
+    /// 算设置的东西变了：在「设置」页上就让窗口重读，不在就等进来时再算
+    private func settingsChanged() {
+        settingsCache = nil
+        if model.page == .prefs { model.hostSettingsChanged() }
+    }
+
+    /// 进「设置」：本机接口、通知授权这些不随主控状态推过来的，重新读一遍
+    private func enterSettings() {
+        endpoint(nil)
+        reportNotifications()
+        settingsChanged()
+    }
+
+    func settingsSnapshot() -> HostSettings? {
+        if let s = settingsCache { return s }
+        let s = buildSettings()
+        settingsCache = s
+        return s
+    }
+
+    private func buildSettings() -> HostSettings {
+        let hub = HubModel.shared
+        let st = hub.status
+        let login: HostLoginItem
+        if let e = loginError {
+            login = .error("没设置上：" + e)
+        } else {
+            switch SMAppService.mainApp.status {
+            case .enabled: login = .on
+            case .requiresApproval: login = .requiresApproval
+            default: login = .off
+            }
+        }
+        let release = st?.release ?? Updater.myRelease
+        let last = UserDefaults.standard.double(forKey: Updater.lastKey)
+        let general = HostGeneral(loginItem: login, currentVersion: release.isEmpty ? "开发版" : SettingsSnapshot.versionText(release),
+                                  latestVersion: hub.updateFound?.tag, lastChecked: last > 0 ? Date(timeIntervalSince1970: last) : nil,
+                                  powerMode: HostPowerMode(rawValue: st?.powerMode ?? "") ?? .balanced,
+                                  batteryMode: HostBatteryMode(rawValue: st?.batteryMode ?? "") ?? .light,
+                                  autoCheck: Updater.autoEnabled)
+
+        let recipe = Manifests.recipe() ?? [:]
+        let choices = Manifests.tierChoices(memGB: Diagnostics.memGB())
+        let tiers = st.map { st in
+            SettingsSnapshot.tiers(choices: choices, recipe: recipe, current: st.tier, pending: st.pendingTier, downloads: st.downloads,
+                                   needed: st.neededDownloads, tierError: hub.tierError.map { (hub.tierErrorTier ?? "", $0) },
+                                   installed: Manifests.modelInstalled,
+                                   sizeGB: { n in
+                                       let b = Manifests.itemSize(n)
+                                       return b > 0 ? Double(b) / 1e9 : SettingsSnapshot.sizeGB(recipe, n)
+                                   })
+        } ?? []
+        let catalog = SettingsSnapshot.catalog(choices: choices, recipe: recipe)
+        let e = endpointInfo
+        let api = HostLocalAPI(enabled: e["enabled"] as? Bool ?? false, address: "127.0.0.1",
+                               port: e["port"] as? Int ?? e["want_port"] as? Int ?? 0, models: e["models"] as? [String] ?? [],
+                               hasKey: !(e["key"] as? String ?? "").isEmpty, error: endpointError)
+        let models = HostModels(tiers: tiers.map(Self.hostTier), catalog: catalog.map(Self.hostModelRow), metered: hub.meteredNetwork, advanced: api)
+        let privacy = HostPrivacy(dataLine: "模型在这台 Mac 上跑，数据只存在这台 Mac 上，没有遥测。", systemChecks: systemChecks())
+        return HostSettings(general: general, models: models, privacy: privacy)
+    }
+
+    static func hostTier(_ t: TierEntry) -> HostTier {
+        let state: HostTier.State
+        switch t.state {
+        case .inUse: state = .inUse
+        case .switching(let p): state = .switching(progress: p)
+        case .available(let need): state = .available(needGB: need)
+        case .failed(let why): state = .failed(reason: why)
+        }
+        // title 不填：名字由主窗口照 kind 写（ADR 0028）
+        return HostTier(id: t.id, title: "", model: t.model, sizeGB: t.sizeGB, state: state, kind: t.kind == .full ? .full : .lighter,
+                        current: t.current, canRetry: t.canRetry)
+    }
+
+    static func hostModelRow(_ c: CatalogEntry) -> HostModelRow {
+        // purpose 不填：用途由主窗口照 base、accessories 写（ADR 0028）
+        HostModelRow(name: c.name, purpose: "", params: c.params, quant: c.quant, sizeGB: c.sizeGB,
+                     base: c.base.map { $0 == .full ? .full : .lighter }, accessories: c.accessories)
+    }
+
+    /// 系统权限检查：通知（主动提醒要用），和开着的应用声明过的、螺壳名下的系统权限（查不出的不列）
+    private func systemChecks() -> [HostSystemCheck] {
+        var out: [HostSystemCheck] = []
+        if let n = notificationAuth {
+            let ok = ["authorized", "provisional", "ephemeral"].contains(n.status) && n.alerts
+            out.append(HostSystemCheck(name: "通知", ok: ok, detail: ok ? nil : "主动提醒要用"))
+        }
+        let states = HostPermissions.current()
+        var users: [String: [String]] = [:]
+        for b in BundledApps.all where b.enabled {
+            for id in PermissionWindow.declared(app: b.accessory) { users[id, default: []].append(b.manifest?.name ?? b.accessory) }
+        }
+        for (id, apps) in users.sorted(by: { $0.key < $1.key }) {
+            guard let s = states[id] else { continue }
+            let name = id == "fda" ? "完全磁盘访问" : (id == "photos" ? "照片" : id)
+            out.append(HostSystemCheck(name: name, ok: s == "granted", detail: apps.joined(separator: "、") + "要用"))
+        }
+        return out
+    }
+
+    func apply(_ change: HostSettingChange) {
+        let hub = HubModel.shared
+        switch change {
+        case .loginItem(let on):
+            loginError = nil
+            do { if on { try LoginItem.register() } else { try LoginItem.unregister() } }
+            catch { loginError = error.localizedDescription; NSLog("登录项：%@", error.localizedDescription) }
+            settingsChanged()
+        case .powerMode(let m): hub.setPowerMode(m.rawValue)
+        case .batteryMode(let m): hub.setBatteryMode(m.rawValue)
+        case .tier(let t): hub.setTier(t)
+        case .localAPI(let on): endpoint { _ = try $0.request("PUT", "/settings", body: ["endpoint_enabled": on]) }
+        case .autoCheckUpdates(let on):        // 设置 · 通用「每天自动检查更新」（luoke-agent 11-16）
+            Updater.autoEnabled = on
+            settingsChanged()
+        }
+    }
+
+    /// 本机接口：做一件事（可以没有），再把 /endpoint 读回来；做成了说一句 said
+    private func endpoint(_ work: ((HubClient) throws -> Void)?, said: String? = nil) {
+        let client = HubModel.shared.client
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            var err: String?
+            do { try work?(client) } catch { err = (error as? HubError)?.message ?? error.localizedDescription }
+            let fresh = try? client.request("GET", "/endpoint").1
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    if let fresh { self.endpointInfo = fresh }
+                    if work != nil { self.endpointError = err }
+                    if err == nil, let said { self.model.show(said) }
+                    self.settingsChanged()
+                }
+            }
+        }
+    }
+
+    func copyLocalAPIKey() {
+        guard let key = endpointInfo["key"] as? String, !key.isEmpty else { endpoint(nil); return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(key, forType: .string)
+        model.show("密钥已复制")
+    }
+
+    func rotateLocalAPIKey() {
+        endpoint({ _ = try $0.request("POST", "/endpoint/key") }, said: "换了新密钥，用旧密钥的程序要重新填")
+    }
+
+    func retryDownloads() { HubModel.shared.retryDownloads() }
+
+    /// 「检查更新」：就在这一行里查，查完写「有新版本 …」或「已是最新 · 今天 … 检查过」；升级再走检查更新那一页。
+    /// 本机版、开发版不从网上查：打开那一页说清楚
+    func checkForUpdates() {
+        switch Updater.channel {
+        case .local, .none: Updater.show(); return
+        case .internalBuild, .beta: break
+        }
+        guard !checkingUpdates else { return }
+        checkingUpdates = true
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let r = Result { try Updater.check() }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.checkingUpdates = false
+                    switch r {
+                    case .success(let f):
+                        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: Updater.lastKey)
+                        HubModel.shared.updateFound = f
+                        self.model.show(f.map { "有新版本 \($0.tag)" } ?? "已是最新")
+                    case .failure(let e):
+                        self.model.show("没查成：" + e.localizedDescription)
+                    }
+                    self.settingsChanged()
+                }
+            }
+        }
+    }
+
+    func exportDiagnostics() { Diagnostics.export(model: HubModel.shared) }
+
+    /// 卸载螺壳走本体自己的卸载页（列出要删的、勾选、确认），取消回「设置 · 通用」
+    func uninstallLuoke() {
+        Uninstall.show(preselect: UninstallModel.all, back: { [weak self] in self?.showSettings(tab: .general) })
+    }
+
+    func openMemory() { Memory.open() }
 
     // MARK: 本体的界面画进主窗口（检查更新、卸载、权限、首次运行、升级……，负责人 11-10：只有一个窗口）
 
@@ -626,6 +1116,11 @@ final class AgentCore: NSObject, NSWindowDelegate, WindowHost {
     /// 用户离开了它（窗口已经不画了）
     func hostPageClosed(_ id: String) { forget(id)?.closed?() }
 
+    /// 用户在一个应用的页上点了（窗口交给 agent 之前）：只有搜索的页上的这一下，才让「添加」弹选文件夹的框
+    func appPageTapped(app: String, page: String) {
+        if app == SearchHelper.accessory { SearchFolderPick.searchTapped() }
+    }
+
     /// 打包后的自检（`LuokeCore --check-window <目录>`，build_app.sh 调）：用示例应用画一遍主窗口的「今天」和「添加应用」，
     /// 画得出来就正常退出。11-04：internal-1104-2 的主窗口一画应用图标就崩（资源包只在出版机的编译目录里找得到），自检照用户的 Mac 那样跑
     static func checkWindow(to dir: String) {
@@ -655,15 +1150,15 @@ final class AgentProcess {
         if let h = ProcessInfo.processInfo.environment["LUOKE_HOME"] { return URL(fileURLWithPath: h, isDirectory: true) }
         return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".luoke", isDirectory: true)
     }
-    /// 数据目录：正式版 ~/.luoke/agent（原来「螺壳 agent.app」用的就是这里，接着用）；
-    /// 开发版、实验室构建用自己环境目录下的 agent，不碰用户在用的那份
+    /// 数据目录：~/.luoke/agent（原来「螺壳 agent.app」用的就是这里，接着用；开发版、开发实例也用它）；
+    /// 普通的实验室构建用自己环境目录下的 agent（AppInfo.usesRealData）
     static var home: URL {
-        AppInfo.isDev || AppInfo.isLab ? AppInfo.envDir.appendingPathComponent("agent", isDirectory: true)
-                                       : luokeHome.appendingPathComponent("agent", isDirectory: true)
+        AppInfo.usesRealData ? luokeHome.appendingPathComponent("agent", isDirectory: true)
+                             : AppInfo.envDir.appendingPathComponent("agent", isDirectory: true)
     }
-    /// 记忆文件，和 Memory.open 的规矩一样：实验室构建没给 LUOKE_HOME 就不读本机的（给一个不存在的文件，核心先不读记忆）
+    /// 记忆文件，和 Memory.open 的规矩一样：普通的实验室构建没给 LUOKE_HOME 就不读本机的（给一个不存在的文件，核心先不读记忆）
     static var memory: URL {
-        if AppInfo.isLab && ProcessInfo.processInfo.environment["LUOKE_HOME"] == nil { return home.appendingPathComponent("mem.db") }
+        if !AppInfo.usesRealData && ProcessInfo.processInfo.environment["LUOKE_HOME"] == nil { return home.appendingPathComponent("mem.db") }
         return luokeHome.appendingPathComponent("mem.db")
     }
     static var socketPath: String { home.appendingPathComponent("run/agent.sock").path }
@@ -675,6 +1170,8 @@ final class AgentProcess {
     private var host: ToolHost?
     private var quitting = false
     private var backoff: TimeInterval = 2
+    /// 连着几次撞上数据目录锁（退出码 3）：先每 3 秒看一次（多半是刚停掉的螺壳的核心还没退完），10 次以后改成每分钟
+    private var lockedTries = 0
     private var startedAt = Date()
     private var oldWatch: NSObjectProtocol?
 
@@ -741,10 +1238,14 @@ final class AgentProcess {
         case 75:            // 核心见 Python 换了（本体升级、改名）：马上用新的那份起
             backoff = 2
             start()
-        case 3:             // 这个数据目录已经有一个核心在跑：不抢它的，隔一分钟再看
-            onProblem?("另一个螺壳的核心在用这份数据（多半是旧的「螺壳 agent」）：退出它以后，这里就接上了。")
-            retry(after: 60)
+        case 3:             // 这个数据目录已经有一个核心在跑：不抢它的。刚停掉的螺壳的核心要几秒才退完，先勤看几次，再隔一分钟看
+            if Date().timeIntervalSince(startedAt) >= 60 { lockedTries = 0 }     // 稳定跑过一阵以后才撞上的：重新从勤看开始
+            lockedTries += 1
+            onProblem?(lockedTries <= 10 ? "正在接上螺壳的核心…"
+                                         : "另一个螺壳的核心在用这份数据（多半是另一个螺壳还开着）：退出它以后，这里就接上了。")
+            retry(after: lockedTries <= 10 ? 3 : 60)
         default:
+            lockedTries = 0
             if Date().timeIntervalSince(startedAt) >= 60 { backoff = 2 }     // 稳定跑过一阵才停的：不接着上次的等待
             onProblem?("螺壳的核心停了，正在重新启动…")
             NSLog("agent 核心退出了（%d），%.0f 秒后重起", code, backoff)

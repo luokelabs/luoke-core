@@ -5,11 +5,32 @@ import ServiceManagement
 import SwiftUI
 import UserNotifications
 
+/// 入口。SwiftUI 启动时会挑一个场景当初始窗口显示（AppWindowsController.showInitialWindow，在交给 AppDelegate 之前）；
+/// 螺壳唯一的场景是凑数的 Settings，于是每次启动都多出一个空的「“螺壳”设置」窗口（11-17 查到，开发实例上每次都有）。
+/// macOS 15 起可以让它启动时不显示（.defaultLaunchBehavior(.suppressed)），但 SceneBuilder 里不能按 #available 分支，
+/// 所以按系统版本选两个 App 之一；macOS 14 上没有这个修饰符，靠 PlaceholderSettings 出现即关
 @main
+enum LuokeMain {
+    static func main() {
+        LuokeScenes.runHelperModes()
+        if #available(macOS 15, *) { LuokeCoreApp.main() } else { LuokeCoreAppMacOS14.main() }
+    }
+}
+
+@available(macOS 15, *)
 struct LuokeCoreApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
+    var body: some Scene { LuokeScenes.placeholder.defaultLaunchBehavior(.suppressed) }
+}
 
-    init() {
+struct LuokeCoreAppMacOS14: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
+    var body: some Scene { LuokeScenes.placeholder }
+}
+
+enum LuokeScenes {
+    /// 不起界面的几种用法：认出来就原地做完，不往下起 App
+    static func runHelperModes() {
         // 本体、主控起包外的程序时经这里带上 disclaim 换成它（Spawn.swift）：不起界面，原地换掉
         if CommandLine.arguments.count >= 3, CommandLine.arguments[1] == Spawn.disclaimFlag {
             Spawn.execDisclaimed(Array(CommandLine.arguments.dropFirst(2)))
@@ -22,17 +43,47 @@ struct LuokeCoreApp: App {
         }
     }
 
-    var body: some Scene {
-        // 菜单栏图标和菜单在 MenuBar.swift（NSStatusItem）。SwiftUI 至少要一个场景：留一个空的 Settings，⌘, 改走 SettingsWindow
-        // （10-23：升级时安装器激活主控、走一遍 reopen，SwiftUI 把唯一的场景——设置——当窗口打开了，标题是"“螺壳”设置"，只有一行「主控启动中」）。
-        // 这个场景不会被打开：顶部菜单的「设置…」换掉了，reopen 一律答 false（螺壳只有一个窗口，11-10）
+    /// 菜单栏图标和菜单在 MenuBar.swift（NSStatusItem）。SwiftUI 至少要一个场景：留一个空的 Settings，只为挂顶部菜单；⌘, 改走 SettingsWindow。
+    /// 它不该以窗口出现：启动时不显示（见 LuokeMain），reopen 一律答 false（10-23 升级时 reopen 打开过它；螺壳只有一个窗口，11-10）
+    static var placeholder: some Scene {
         Settings { EmptyView() }
             .commands {
                 CommandGroup(replacing: .appSettings) {
-                    Button("设置…") { SettingsWindow.show() }.keyboardShortcut(",", modifiers: .command)
+                    Button("设置") { SettingsWindow.show() }.keyboardShortcut(",", modifiers: .command)
                 }
                 MainWindowCommands()      // 主窗口的「前往」、收起侧栏（这一份没带主窗口时是空的）
             }
+    }
+}
+
+/// 凑数的 Settings 场景万一还是出现了（macOS 14 上启动时没法不显示它；以后 SwiftUI 再换打开的路），一出现就关掉、
+/// 不参与窗口恢复，并在 hub.log 记下调用栈。macOS 15 起正常启动不会走到这里（LuokeMain）
+enum PlaceholderSettings {
+    /// SwiftUI 给 Settings 场景窗口的标识（defaults 里存位置的键也是它）
+    static let id = "com_apple_SwiftUI_Settings_window"
+
+    static func isPlaceholder(_ w: NSWindow) -> Bool {
+        w.identifier?.rawValue == id || w.frameAutosaveName == id
+    }
+
+    static func guardAgainstShowing() {
+        // 成为主键窗口时同步发通知：调用栈里有打开它的那条路
+        NotificationCenter.default.addObserver(forName: NSWindow.didBecomeKeyNotification, object: nil, queue: nil) { n in
+            if let w = n.object as? NSWindow { closeIfPlaceholder(w, via: "becomeKey") }
+        }
+        // 不当主键窗口就出现的（例如窗口恢复）：看可见性
+        NotificationCenter.default.addObserver(forName: NSWindow.didChangeOcclusionStateNotification, object: nil, queue: nil) { n in
+            if let w = n.object as? NSWindow, w.occlusionState.contains(.visible) { closeIfPlaceholder(w, via: "visible") }
+        }
+        for w in NSApp.windows where w.isVisible { closeIfPlaceholder(w, via: "launch") }   // 启动前已经恢复出来的
+    }
+
+    private static func closeIfPlaceholder(_ w: NSWindow, via: String) {
+        guard isPlaceholder(w) else { return }
+        w.isRestorable = false
+        let stack = Thread.callStackSymbols.prefix(24).joined(separator: "\n  ")
+        BundledApps.note("空的设置窗口被打开（\(via)），关掉。调用栈：\n  \(stack)")
+        DispatchQueue.main.async { w.close() }
     }
 }
 
@@ -56,6 +107,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        PlaceholderSettings.guardAgainstShowing()
         if let i = CommandLine.arguments.firstIndex(of: "--render-ui"), i + 1 < CommandLine.arguments.count {
             UIRender.run(to: CommandLine.arguments[i + 1])      // 截图用：画完就退，不起主控
             exit(0)
@@ -94,8 +146,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             NSApp.terminate(nil)
             return
         }
+        // 正式版、开发版、开发实例用同一个环境目录（AppInfo.envDir）：另一个螺壳已经开着，这一个什么都不起，把那一个叫到前面就退。
+        // 两个同时开，主控抢 socket，邮件助手、agent 抢同一份数据
+        if AppInfo.hubAnswering(at: AppInfo.socketPath) {
+            BundledApps.note("另一个螺壳开着（\(AppInfo.socketPath) 有主控在应答），\(AppInfo.appName) 不起，退出")
+            let me = ProcessInfo.processInfo.processIdentifier
+            if let other = NSWorkspace.shared.runningApplications.first(where: {
+                $0.processIdentifier != me && ($0.bundleIdentifier ?? "").hasPrefix("ai.luoke.core") }), let url = other.bundleURL {
+                NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration()) { _, _ in
+                    DispatchQueue.main.async { NSApp.terminate(nil) }
+                }
+            } else {
+                NSApp.terminate(nil)
+            }
+            return
+        }
         MenuBar.shared.install()
-        Installer.retireStrayCopies()          // 两处各有一份（老用户又拖了一份进 /Applications）：另一份挪进 previous.noindex（ADR 0012）
+        Installer.retireStrayCopies()         // 两处各有一份（老用户又拖了一份进 /Applications）：另一份挪进 previous.noindex（ADR 0012）
         // 上一次换包的结果（ADR 0012）：没成的话现在跑的是脚本放回的旧版，"刚升级"的标记作废，照实说一声
         if let r = Swap.takeResult(), !r.ok {
             try? FileManager.default.removeItem(at: Installer.upgradeFile)
@@ -315,8 +382,9 @@ final class HubModel: ObservableObject {
     }
 
     func setPowerMode(_ mode: String) { update(["power_mode": mode]) }
-    func setBackgroundOnBattery(_ on: Bool) { update(["background_on_battery": on]) }
+    func setBatteryMode(_ mode: String) { update(["battery_mode": mode]) }
     @Published var tierError: String?
+    var tierErrorTier: String?      // tierError 说的是哪一档（主窗口的设置画在那一行上）
     func setTier(_ tier: String) {
         // 换到要新下底座的档前先看磁盘（审查 2026-10-17）
         let base = ((Manifests.recipe()?["assignment"] as? [String: Any])?[tier] as? [String: Any])?["base"] as? String
@@ -324,10 +392,12 @@ final class HubModel: ObservableObject {
             let need = Manifests.itemSize(b) + (1 << 30)
             let free = (try? URL(fileURLWithPath: NSHomeDirectory()).resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]).volumeAvailableCapacityForImportantUsage) ?? 0
             if free < need {      // 不弹窗，写在这一行下面（10-23）
+                tierErrorTier = tier
                 tierError = "磁盘空间不够：换这一档要下载 \(Diagnostics.humanSize(Manifests.itemSize(b)))，现在只剩 \(Diagnostics.humanSize(free))。"
                 return
             }
         }
+        tierErrorTier = nil
         tierError = nil
         update(["tier": tier == (status?.memoryTier ?? tier) ? NSNull() : tier])    // 选回内存算的档就清掉设置
     }
@@ -361,8 +431,9 @@ struct SettingsView: View {
     var body: some View {
         LKPage {
             Text("设置").font(.system(size: 20, weight: .semibold))
-            HubModelSettings()
-            HubPrivacySettings(uninstallBack: { SettingsWindow.show() })
+            HubModelSettings(about: false)
+            HubPrivacySettings()
+            HubAboutSettings(uninstallBack: { SettingsWindow.show() })
         } footer: {
             Spacer()
             Button("完成") { NSApp.keyWindow?.close() }.buttonStyle(LKPrimaryButton())
@@ -371,18 +442,19 @@ struct SettingsView: View {
     }
 }
 
-/// 设置里归主控的两块（11-09 负责人定）：菜单栏「设置…」的窗口把两块拼在一起；主窗口「设置」的「模型」「隐私」两个标签
-/// 各画一块（`AgentCore.settingsContent`），不再另弹这个窗口。
+/// 设置里归主控的几块：只有没带主窗口的这一份用（菜单栏「设置…」的窗口把它们拼在一起）。带主窗口时本体给数据
+/// （`AgentCore.settingsSnapshot`），「设置」页由主窗口画。
 enum SettingsParts {
     static func header(_ t: String) -> some View {
         Text(t).font(.system(size: 11, weight: .medium)).foregroundStyle(Color.lkMuted).padding(.top, 20).padding(.bottom, 8)
     }
 
-    static func info(_ label: String, _ value: String) -> some View {
+    /// mono：版本号、模型名、地址用等宽（规范 v2 §3）
+    static func info(_ label: String, _ value: String, mono: Bool = false) -> some View {
         HStack(alignment: .top) {
             Text(label).font(.system(size: 14))
             Spacer(minLength: 16)
-            Text(value).font(.system(size: 13)).foregroundStyle(Color.lkMuted).multilineTextAlignment(.trailing).textSelection(.enabled)
+            Text(value).font(.system(size: 13, design: mono ? .monospaced : .default)).foregroundStyle(Color.lkMuted).multilineTextAlignment(.trailing).textSelection(.enabled)
         }
         .padding(.horizontal, 16).padding(.vertical, 10)
     }
@@ -395,21 +467,33 @@ enum SettingsParts {
     }
 }
 
-/// 「模型」那一块：通用（能耗、电池、登录时启动）、下载、模型、高级（本机接口）
+/// 「通用」那一块（标签的 rawValue 仍是 model）：通用（能耗、电池、登录时启动）、下载、模型、高级（默认收起：原名、本机接口）、关于、卸载
 struct HubModelSettings: View {
     @EnvironmentObject var model: HubModel
     @State private var loginItem = SMAppService.mainApp.status == .enabled
     @State private var loginError: String?
+    @State private var advanced: Bool
+    /// 主窗口「设置 · 通用」最底下接着画关于和卸载；拼成一个窗口时（SettingsView）由外面放到最后
+    let about: Bool
+    let uninstallBack: (() -> Void)?
+    static var sampleTiers: [Manifests.TierChoice]? = nil     // 截图用（--render-ui）
+
+    init(about: Bool = true, uninstallBack: (() -> Void)? = nil, advanced: Bool = false) {
+        self.about = about
+        self.uninstallBack = uninstallBack
+        _advanced = State(initialValue: advanced)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             if let st = model.status { sections(st) } else { SettingsParts.starting(model) }
+            if about { HubAboutSettings(uninstallBack: uninstallBack) }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func header(_ t: String) -> some View { SettingsParts.header(t) }
-    private func info(_ label: String, _ value: String) -> some View { SettingsParts.info(label, value) }
+    private func info(_ label: String, _ value: String, mono: Bool = false) -> some View { SettingsParts.info(label, value, mono: mono) }
     private var divider: some View { SettingsParts.divider }
 
     @ViewBuilder private func sections(_ st: HubStatus) -> some View {
@@ -420,9 +504,9 @@ struct HubModelSettings: View {
                             selection: Binding(get: { st.powerMode }, set: { model.setPowerMode($0) }))
             }
             divider
-            LKSettingRow(icon: "battery-medium", title: "使用电池时仍运行后台") {
-                Toggle("", isOn: Binding(get: { st.backgroundOnBattery }, set: { model.setBackgroundOnBattery($0) }))
-                    .toggleStyle(.switch).controlSize(.small).tint(.lkPrimary).labelsHidden()
+            LKSettingRow(icon: "battery-medium", title: "用电池时") {
+                LKSegmented(options: [("normal", "照常运行"), ("light", "少干活"), ("no_large_model", "不运行大模型")],
+                            selection: Binding(get: { st.batteryMode }, set: { model.setBatteryMode($0) }))
             }
             divider
             LKSettingRow(icon: "power", title: "登录时启动螺壳",
@@ -457,49 +541,64 @@ struct HubModelSettings: View {
                 }
             }
         }
+        // 模型：给用户看的只有占多少空间、已经下了多少；模型的原名、清单放进「高级」（11-11 界面走查）
         header("模型")
         LKGroup {
-            let choices = Manifests.tierChoices(memGB: Diagnostics.memGB())
+            let choices = Self.sampleTiers ?? Manifests.tierChoices(memGB: Diagnostics.memGB())
             if choices.count > 1 {
-                LKSettingRow(icon: "hard-drive", title: "占多少空间",
-                             detail: choices.map { "\($0.label) \(ModelName.display($0.base)) 约 \(String(format: "%.0f", $0.sizeGB)) GB" }.joined(separator: "，")
-                                + "。换了会下载另一个，下完自动切换。") {
-                    Picker("", selection: Binding(get: { st.pendingTier ?? st.tier }, set: { model.setTier($0) })) {     // 选了还没换过去的，显示选的那个
-                        ForEach(choices, id: \.tier) { c in Text(c.label).tag(c.tier) }
-                    }
-                    .labelsHidden().fixedSize()
+                LKSettingRow(icon: "hard-drive", title: "占多少空间", detail: Self.tierDetail(choices)) {
+                    LKSelect(options: choices.map { ($0.tier, $0.label) },     // 选了还没换过去的，显示选的那个
+                             selection: Binding(get: { st.pendingTier ?? st.tier }, set: { model.setTier($0) }))
                 }
                 if let e = model.tierError {
-                    Text(e).font(.system(size: 12)).foregroundStyle(Color.lkDanger)
+                    Text(e).font(.system(size: 12)).foregroundStyle(Color.lkDangerText)
                         .fixedSize(horizontal: false, vertical: true).padding(.horizontal, 14).padding(.bottom, 10)
                 }
                 divider
             }
-            info("底座模型", ModelName.display(st.base ?? "—"))      // 硬件档、引擎、本机试跑在诊断信息里
-            if let p = st.pendingTier {     // luoke-core#25：换档等着底座，界面上要看得出来
+            if st.pendingTier != nil {     // luoke-core#25：换档等着底座，界面上要看得出来
+                info("换档", (st.downloading ? "正在下载" : "还没下好") + "，下好后自动切换")
                 divider
-                info("换档", "\(p) GB 档的底座" + (st.downloading ? "正在下载" : "还没下好") + "，下好后自动切换")
             }
-            divider
-            StorageView()
-            if !st.localAllowed.isEmpty {
-                divider
-                info("本机放行", st.localAllowed.map { "\($0["accessory"] as? String ?? "?") \($0["version"] as? String ?? "?")（\($0["by"] as? String ?? "?")）" }.joined(separator: "、"))
-                Text("这些版本还没进发布评测，是试用期里项目会话放行的；螺壳换成包含它们的新版后自动失效。")
-                    .font(.system(size: 12)).foregroundStyle(Color.lkMuted).padding(.horizontal, 16).padding(.bottom, 10)
+            LKSettingRow(icon: "circle-arrow-down", title: "已下载") {
+                Text(StorageView.total()).font(.system(size: 13)).foregroundStyle(Color.lkMuted).monospacedDigit()
             }
         }
-        header("高级")
-        EndpointView()
-        // 不常用、会删东西的放最下面（10-23：卸载、导出诊断信息不放在一打开就点得到的地方）
+        // 高级：给开发者的（模型原名、本机接口），默认收起。折叠行（规范 v2 §6）：整行能点，箭头在左、展开时转 90°，
+        // 占的是其他行图标那一列
+        LKGroup {
+            Button { withAnimation(.easeOut(duration: 0.15)) { advanced.toggle() } } label: {
+                HStack(spacing: 12) {
+                    LKIcon("chevron-right").foregroundStyle(Color.lkMuted).rotationEffect(.degrees(advanced ? 90 : 0)).frame(width: 20)
+                    Text("高级").font(.system(size: 14))
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 16).padding(.vertical, 12)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(advanced ? "收起高级" : "展开高级")
+        }
+        .padding(.top, 20).padding(.bottom, advanced ? 12 : 0)
+        if advanced {
+            LKGroup {
+                info("底座模型", ModelName.display(st.base ?? "—"), mono: true)      // 硬件档、引擎、本机试跑在诊断信息里
+                divider
+                StorageView()
+            }
+            .padding(.bottom, 12)
+            EndpointView()
+        }
+    }
+
+    /// 「占多少空间」的说明：只说大小，不写模型原名（原名在「高级」里）
+    static func tierDetail(_ choices: [Manifests.TierChoice]) -> String {
+        choices.map { "\($0.label)约 \(String(format: "%.0f", $0.sizeGB)) GB" }.joined(separator: "，") + "。换了会下载另一个，下完自动切换。"
     }
 }
 
-/// 「隐私」那一块：推理只在本机、记忆（带了记忆时）、关于（版本、导出诊断信息、卸载）。uninstallBack：卸载页点「取消」「完成」回哪
+/// 「隐私」那一块：推理只在本机、记忆（带了记忆时）。关于、卸载在「通用」页最底下（HubAboutSettings，11-11 界面走查）
 struct HubPrivacySettings: View {
-    @EnvironmentObject var model: HubModel
-    var uninstallBack: (() -> Void)? = nil
-
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             SettingsParts.header("隐私")
@@ -512,44 +611,58 @@ struct HubPrivacySettings: View {
                     }
                 }
             }
-            if let st = model.status { about(st) } else { SettingsParts.starting(model) }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
+}
 
-    private func header(_ t: String) -> some View { SettingsParts.header(t) }
-    private var divider: some View { SettingsParts.divider }
+/// 关于（版本、导出诊断信息）和卸载：卸载单独一组放在最底下，不和「导出」挨着（11-11 界面走查）。uninstallBack：卸载页点「取消」「完成」回哪
+struct HubAboutSettings: View {
+    @EnvironmentObject var model: HubModel
+    var uninstallBack: (() -> Void)? = nil
 
-    @ViewBuilder private func about(_ st: HubStatus) -> some View {
-        header("关于")
-        LKGroup {
-            if let rel = st.release {
-                LKSettingRow(icon: "info", title: "螺壳版本") {
-                    Text(rel.hasPrefix("local-") ? "\(rel)（本机版，没上传）" : rel).font(.system(size: 13)).foregroundStyle(Color.lkMuted).textSelection(.enabled)
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            SettingsParts.header("关于")
+            LKGroup {
+                if let rel = model.status?.release {
+                    LKSettingRow(icon: "info", title: "螺壳版本") {
+                        Text(rel.hasPrefix("local-") ? "\(rel)（本机版，没上传）" : rel).font(.system(size: 13, design: .monospaced)).foregroundStyle(Color.lkMuted).textSelection(.enabled)
+                    }
+                    SettingsParts.divider
                 }
-                divider
+                LKSettingRow(icon: "share", title: "导出诊断信息") {
+                    Button("导出") { Diagnostics.export(model: model) }.buttonStyle(LKSecondaryButton())
+                }
             }
-            LKSettingRow(icon: "share", title: "导出诊断信息") {
-                Button("导出") { Diagnostics.export(model: model) }.buttonStyle(LKSecondaryButton())
+            LKGroup {
+                LKSettingRow(icon: "trash-2", title: "卸载螺壳") {
+                    Button("卸载") { SettingsWindow.window?.close(); Uninstall.show(preselect: UninstallModel.all, back: uninstallBack) }.buttonStyle(LKPrimaryButton(destructive: true))
+                }
             }
-            divider
-            LKSettingRow(icon: "trash-2", title: "卸载螺壳") {
-                Button("卸载") { SettingsWindow.window?.close(); Uninstall.show(preselect: UninstallModel.all, back: uninstallBack) }.buttonStyle(LKPrimaryButton(destructive: true))
-            }
+            .padding(.top, 28)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
 /// 存储页：每个模型占多少、谁在用（V1 §1）。开发版只列模型目录里的东西和大小，删除按钮留到安装器那一块。
 struct StorageView: View {
-    var entries: [(String, String)] {
-        let fm = FileManager.default
-        let items = (try? fm.contentsOfDirectory(atPath: AppInfo.modelDir)) ?? []
-        return items.sorted().map { name in
-            let url = URL(fileURLWithPath: AppInfo.modelDir).appendingPathComponent(name)
-            return (name, Diagnostics.humanSize(Diagnostics.directorySize(url)))
-        }
+    static var sample: [(String, Int64)]? = nil     // 截图用（--render-ui），不读本机的模型目录
+
+    static func sized() -> [(String, Int64)] {
+        if let s = sample { return s }
+        let items = (try? FileManager.default.contentsOfDirectory(atPath: AppInfo.modelDir)) ?? []
+        return items.sorted().map { ($0, Diagnostics.directorySize(URL(fileURLWithPath: AppInfo.modelDir).appendingPathComponent($0))) }
     }
+
+    /// 「模型」里那一行：一共下了多少
+    static func total() -> String {
+        let s = sized()
+        return s.isEmpty ? "还没有模型" : Diagnostics.humanSize(s.reduce(0) { $0 + $1.1 })
+    }
+
+    var entries: [(String, String)] { Self.sized().map { ($0.0, Diagnostics.humanSize($0.1)) } }
 
     var body: some View {
         if entries.isEmpty {
@@ -558,8 +671,7 @@ struct StorageView: View {
             ForEach(Array(entries.enumerated()), id: \.offset) { i, e in
                 if i > 0 { Divider().overlay(Color.lkBorder) }
                 HStack {
-                    Text(ModelName.display(e.0)).font(.system(size: 14))
-                    Text("已下载").font(.system(size: 13)).foregroundStyle(Color.lkMuted)
+                    Text(ModelName.display(e.0)).font(.system(size: 13, design: .monospaced))
                     Spacer()
                     Text(e.1).font(.system(size: 13)).foregroundStyle(Color.lkMuted).monospacedDigit()
                 }

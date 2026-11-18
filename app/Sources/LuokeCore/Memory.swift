@@ -17,7 +17,7 @@ enum Memory {
     static func open(note: String? = nil, view: String? = nil) {
         if MainWindow.presenter != nil { MainWindow.openMemory(note: note, view: view); return }
         if let why = CodeSigning.bundleProblem { alert("记忆打不开", "\(why)，请重新安装螺壳。"); return }
-        if AppInfo.isLab && ProcessInfo.processInfo.environment["LUOKE_HOME"] == nil {
+        if !AppInfo.usesRealData && ProcessInfo.processInfo.environment["LUOKE_HOME"] == nil {
             // 实验室构建不碰本机用户在用的 ~/.luoke/mem.db（审查 2026-10-17；顶层 CLAUDE.md"测试环境拒绝真实目录"）
             alert("实验室构建没有指定记忆的位置", "设 LUOKE_HOME 指向测试用的目录再打开。")
             return

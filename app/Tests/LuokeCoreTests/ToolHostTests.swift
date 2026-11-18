@@ -706,6 +706,36 @@ final class ToolHostTests: XCTestCase {
         XCTAssertTrue(AppInfo.labBuild(bundleID: "ai.luoke.core.dev", environment: ["LUOKE_LAB": "1"]))
         XCTAssertFalse(AppInfo.labBuild(bundleID: "ai.luoke.core.dev", environment: [:]))
         XCTAssertTrue(AppInfo.labBuild(bundleID: "", environment: ["LUOKE_LAB": "1"]))      // swift run，没打包
+
+        // 开发实例（docs/dev-instance.md）：ai.luoke.core.<名字>.lab；普通实验室构建、开发版、正式版都不是
+        XCTAssertEqual(AppInfo.instanceName(bundleID: "ai.luoke.core.agent.lab"), "agent")
+        XCTAssertEqual(AppInfo.instanceName(bundleID: "ai.luoke.core.mail-today.lab"), "mail-today")
+        XCTAssertTrue(AppInfo.labBuild(bundleID: "ai.luoke.core.agent.lab", environment: [:]))
+        for id in ["ai.luoke.core.lab", "ai.luoke.core.dev", "ai.luoke.core", "", "ai.luoke.core.Agent.lab", "ai.luoke.core.a/b.lab",
+                   "ai.luoke.core..lab", "ai.luoke.search.x.lab"] {
+            XCTAssertNil(AppInfo.instanceName(bundleID: id), id)
+        }
+
+        // 用真实数据的都在装着的螺壳的环境目录：输入法这些按 luoke-core/run/hub.sock 找主控
+        XCTAssertEqual(AppInfo.envDirName(realData: true), "luoke-core")
+        XCTAssertEqual(AppInfo.envDirName(realData: false), "luoke-core-lab")
+    }
+
+    func testHubAnsweringOnlyWhenSomeoneListens() throws {
+        let path = "/tmp/lk-\(getpid()).sock"
+        unlink(path)
+        defer { unlink(path) }
+        XCTAssertFalse(AppInfo.hubAnswering(at: path))          // 没有
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        withUnsafeMutableBytes(of: &addr.sun_path) { buf in for (i, b) in Array(path.utf8).enumerated() { buf[i] = b } }
+        let len = socklen_t(MemoryLayout<sockaddr_un>.size)
+        XCTAssertEqual(withUnsafePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.bind(fd, $0, len) } }, 0)
+        XCTAssertEqual(listen(fd, 1), 0)
+        XCTAssertTrue(AppInfo.hubAnswering(at: path))           // 有主控在应答
+        close(fd)
+        XCTAssertFalse(AppInfo.hubAnswering(at: path))          // 上次留下的 socket 文件
     }
 
     func testDefaultComesFromTheManifest() throws {

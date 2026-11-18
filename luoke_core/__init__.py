@@ -3,5 +3,5 @@
 规格：docs/V1.md（§2、§8 是冻结的对外约定版本 1）；规则含义：docs/DESIGN.md。
 """
 
-__version__ = "0.1.0.dev1"
+__version__ = "0.2.0"     # 配件清单的 min_core 和它比；0.2.0 起不核配件版本
 CONTRACT = 1

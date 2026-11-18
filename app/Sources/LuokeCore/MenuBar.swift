@@ -46,17 +46,24 @@ final class MenuBar: NSObject, NSMenuDelegate {
         item?.button?.image = dot ? Self.dotted(state) : Self.icon(state)
     }
 
-    /// 带小点的图标：原图右上角加一个实心圆，照旧是单色模板图
+    /// 带小点的图标：原图右下角加一个红色实心圆（负责人 11-16：要用户马上看的用红色，放右下角；以前是右上角的黑点，
+    /// 像图标头上长了一块）。红点要有颜色，所以不是模板图：图标自己照菜单栏当时的深浅用标签色画，红点周围留一圈空
     static func dotted(_ name: String) -> NSImage? {
         if let i = iconCache[name + "+dot"] { return i }
         guard let base = icon(name) else { return nil }
         let img = NSImage(size: base.size, flipped: false) { rect in
             base.draw(in: rect)
-            NSColor.black.setFill()
-            NSBezierPath(ovalIn: NSRect(x: rect.maxX - 6.5, y: rect.maxY - 6.5, width: 6, height: 6)).fill()
+            NSColor.labelColor.set()
+            rect.fill(using: .sourceAtop)                       // 模板图染成当时的标签色（随菜单栏深浅）
+            let dot = NSRect(x: rect.maxX - 7, y: rect.minY, width: 7, height: 7)
+            NSGraphicsContext.current?.compositingOperation = .destinationOut
+            NSBezierPath(ovalIn: dot.insetBy(dx: -1.5, dy: -1.5)).fill()     // 红点周围挖一圈，和图标分开
+            NSGraphicsContext.current?.compositingOperation = .sourceOver
+            NSColor.systemRed.setFill()
+            NSBezierPath(ovalIn: dot).fill()
             return true
         }
-        img.isTemplate = true
+        img.isTemplate = false
         img.accessibilityDescription = "螺壳：有急事"
         iconCache[name + "+dot"] = img
         return img

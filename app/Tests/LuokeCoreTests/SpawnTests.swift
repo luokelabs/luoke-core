@@ -94,6 +94,7 @@ final class SpawnTests: XCTestCase {
     /// 用 .luoke 的地方，和为什么（Spawn.swift 开头）。加一处要在这里登记
     static let luokeAllowed: Set<String> = [
         "SearchHelper.swift",   // 螺壳搜索：读用户的文件
+        "SearchFolderPick.swift",   // 搜索页的「添加」：试读选的文件夹，和搜索借同一份授权
         "ToolHost.swift",       // 螺壳扫描（agent 用的）
         "ToolLauncher.swift",   // 螺壳扫描（空闲任务）
         "ScanElevate.swift",    // 替扫描删受保护的东西

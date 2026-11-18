@@ -193,6 +193,22 @@ class VMBuildTest(unittest.TestCase):
         self.assertEqual(sorted(os.listdir(f"{job.job}/src/luoke-core")), ["tracked"])
         self.assertEqual(len(job.record["sources"]["luoke-core"]), 40)
 
+    def test_the_built_engine_goes_in_as_a_directory(self):
+        built = f"{self.t}/engine.noindex/luoke-engine-0.1.0-macos-arm64"
+        os.makedirs(built)
+        for n in ("luoke-engine", "LICENSE"):
+            with open(f"{built}/{n}", "w") as f:
+                f.write(n)
+        os.symlink("/etc/hosts", f"{built}/link")
+        job = V.Job("t")
+        self.assertEqual(V.engine_inputs(job, {}), {})
+        g = V.engine_inputs(job, {"LUOKE_ENGINE_PKG": built, "LUOKE_ENGINE_VERSION": "0.1.0"})
+        self.assertEqual(g, {"LUOKE_ENGINE_PKG": f"{V.GJOB}/files/luoke-engine-0.1.0-macos-arm64", "LUOKE_ENGINE_VERSION": "0.1.0"})
+        inside = f"{job.job}/files/luoke-engine-0.1.0-macos-arm64"
+        self.assertEqual(sorted(os.listdir(inside)), ["LICENSE", "link", "luoke-engine"])
+        self.assertTrue(os.path.islink(f"{inside}/link"))          # 链接照拷成链接，不把外面的文件拷进去
+        with self.assertRaises(V.Stop):           # 只收编好的目录
+            V.engine_inputs(V.Job("u"), {"LUOKE_ENGINE_PKG": f"{built}/LICENSE", "LUOKE_ENGINE_VERSION": "0.1.0"})
 
 if __name__ == "__main__":
     unittest.main()

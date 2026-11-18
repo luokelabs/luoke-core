@@ -138,7 +138,7 @@ class Recipe:
         return bool(t) and (t.get("tiers") is None or tier in t["tiers"])
 
     def task_open(self, task: str, tier: str) -> bool:
-        """配方认的、这一档开着的任务：配件在 verified 里有认的版本，task_on_tier。开发配方 verified 是 "*"，都开。
-        主控只给开着的任务下专用模型（2026-11-03 起，Hub.tier_models）；应用的 Manifests.taskOpen 照同一条规则。"""
+        """这一档开着的任务：配方里有、task_on_tier。配件的版本不看。
+        主控只给开着的任务下专用模型（Hub.tier_models）；应用的 Manifests.taskOpen 照同一条规则。"""
         t = self.tasks.get(task)
-        return bool(t) and bool((self.verified.get(t["accessory"]) or {}).get("versions")) and self.task_on_tier(task, tier)
+        return bool(t) and self.task_on_tier(task, tier)

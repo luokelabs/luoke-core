@@ -13,6 +13,7 @@
             共用的组合按其中最大的档跑（评的是质量；各代芯片的回放归人工，V1 §7）。
             汇总写 releases/<发布号>/evidence/<任务>.<组合>.json；配件评测程序的逐条结果经 --out / --result 直接写进 evidence/raw/
             （命令里的 {raw}；语料不进来，配件的工作区也不留东西）。
+            每格的起止和其中加载模型的秒数、每档实验室实例起来的用时记在 evidence/timing-<档>.jsonl（tools/release_report.py 读成报告）。
   diff      和上一个发布的汇总比：硬性条目零回退、总分不低于底线、不低于上次减容差、"支持"变"不支持"算回退。写 diff.md；
             有不过的就停下（硬性条目没过或低于底线：不能发；只是回退：看过报告后加 --accept 放行）。
             硬性条目按档算（V1 §7）：一个任务在某档没过、别的档过了 → 配方里只在过的档支持它，不挡发布（上次那档支持的才算回退）；
@@ -20,10 +21,14 @@
   recipe    recipes/<发布号>.json：模板加 recipe_version、已验证版本（评测过的配件版本和组合）、依据（每条汇总的结论和证据哈希）。
   engine    引擎包：拷一份 oMLX.app、用 release_sign.sh --preserve-entitlements 重签（--notarize 时公证）、zip、哈希；
             旁边生成它带的 Python 包的清单 THIRD-PARTY-PACKAGES.txt（名字、版本、许可）。
+            配方的引擎是螺壳引擎（luoke-engine-<版本>）时不出引擎包：它在 build 阶段从源码现编、打进主控，跟着主控签名、公证。
   manifest  发布清单 releases/<发布号>/release.json：模型目录逐文件哈希、引擎包；地址按 --modelscope / --github 填，
             没给就用本机 file:// 地址（只能本机测试，不能发）。同时把模型和引擎包的摘要写回配方。
-  build     打主控 .app（配方和发布清单放进 Resources；app/build_app.sh）。
-  sign      Developer ID 签名：先打印证书指纹，确认后才签（release_sign.sh；--notarize 时公证并 staple）。
+  build     打主控 .app（配方和发布清单放进 Resources；app/build_app.sh）。配方的引擎是螺壳引擎时要给 --repo luoke-engine=<冻结的
+            引擎源码>：要正好在配方钉的提交（engine.commit）、没有改动，用它自己的 tools/package.sh 现编，--version 要等于配方的版本，
+            程序进 Contents/Helpers。不用引擎仓库 release 上的包。
+  sign      Developer ID 签名：先打印证书指纹，确认后才签（release_sign.sh；--notarize 时公证并 staple）。签好以后核螺壳里的
+            引擎：标识、hardened runtime、和螺壳同一个团队、版本，再在签好的包里跑一次它的自检。
   dmg       出 DMG（make_dmg.sh：签名，--notarize 时公证并 staple）；把主控 DMG 加进发布清单；打印要上传的文件。
 
 产物：build.noindex/release/<发布号>/（不进仓库；.noindex 让 Spotlight 不索引，LaunchServices 就不会把这些副本按 bundle id 登记进去）；
@@ -61,6 +66,7 @@ import vm_build  # noqa: E402  实验室配置开了就在一次性 VM 里编
 PY = "/usr/bin/python3"
 SH_ENV = dict(os.environ, LANG="en_US.UTF-8", LC_ALL="en_US.UTF-8")   # shell 脚本里有中文：没有 UTF-8 locale 时 bash 会把 $var 后面的中文标点当变量名
 STAGES = ["eval", "diff", "recipe", "engine", "manifest", "build", "sign", "dmg"]
+LUOKE_ENGINE = "luoke-engine-"      # 配方引擎版本的前缀：螺壳引擎（打进主控），别的（omlx-）是单独的引擎包
 EVALS = os.path.join(ROOT, "tools", "release_evals.json")
 MODELSCOPE_URL = "https://modelscope.cn/api/v1/models/{org}/{repo}/repo?Revision={rev}&FilePath={{path}}"
 GITHUB_URL = "https://github.com/{repo}/releases/download/{tag}"
@@ -359,6 +365,51 @@ def run_watched(cmd: list, cwd: str, env: dict, task: str, kind: str, hub_log: s
     return EvalResult(p.returncode if p.returncode is not None else -1, out_f.read(), err_f.read(), stalled)
 
 
+# ---- 每格评测的用时：起止和其中加载模型的秒数，记在 evidence/timing-<档>.jsonl（tools/release_report.py 读成报告） ------------
+
+# 实验室主控日志里的模型加载：底座、本机模型是 "loaded <模型> [alongside <模型>] in <秒>s"（engine.py），
+# 专用模型工作进程是 "<scorer|embedder|transcriber> ready in <秒>s (<模型目录>)"（scorer.py）
+MODEL_LOAD = re.compile(r"\bloaded (\S+)(?: alongside \S+)? in ([\d.]+)s|\b(?:scorer|embedder|transcriber|worker) ready in ([\d.]+)s \(([^)]*)\)")
+
+
+def model_loads(text: str) -> list:
+    """[{model, secs}]：这段主控日志里每一次模型加载。"""
+    out = []
+    for m in MODEL_LOAD.finditer(text):
+        if m.group(1):
+            out.append({"model": m.group(1), "secs": float(m.group(2))})
+        else:
+            out.append({"model": os.path.basename(m.group(4).rstrip("/")), "secs": float(m.group(3))})
+    return out
+
+
+def log_size(path: str) -> int:
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return 0
+
+
+def timing_since(start: float, hub_log: str, pos: int) -> dict:
+    """从 start 到现在：起止（epoch 秒）、用时，和这段时间里主控日志（从第 pos 字节读起）记的模型加载。"""
+    end = time.time()
+    try:
+        with open(hub_log, encoding="utf-8", errors="replace") as f:
+            f.seek(pos if log_size(hub_log) >= pos else 0)
+            loads = model_loads(f.read())
+    except OSError:
+        loads = []
+    return {"start": round(start, 1), "end": round(end, 1), "secs": round(end - start, 1),
+            "load_secs": round(sum(x["secs"] for x in loads), 1), "loads": loads}
+
+
+def note_timing(evidence_dir: str, tier: str, entry: dict) -> None:
+    """记一段用时，一行一段：kind 是 hub（实验室主控起来，含引擎启动、底座加载、冒烟检查）或 cell（一格评测，没评成、
+    没进展停掉的也记）。续跑接着往后写。.jsonl：load_evidence 不当证据读；远端评的由 internal_build 的 merge_remote 跟着拿回来。"""
+    with open(os.path.join(evidence_dir, f"timing-{tier}.jsonl"), "a", encoding="utf-8") as f:
+        f.write(json.dumps(dict(entry, tier=str(tier)), ensure_ascii=False) + "\n")
+
+
 MEMORY_REFUSAL = re.compile(r"(内存不够|memory guard rejected|too_large)[^\n]*")
 
 SUMMARIZERS = {"mail-triage": "result", "mail-task": "result", "ime-result": "result", "ime-predict-result": "result", "ime-transcribe-result": "result", "ime-tidy-result": "result",
@@ -565,6 +616,8 @@ class LabHub:
         self.sock = sock
         self.proc: Optional[subprocess.Popen] = None
         self.log_path = os.path.join(self.env, "hub.log")
+        self.hub_log = os.path.join(self.env, "logs", "hub.log")     # 主控自己的日志（请求、模型加载）
+        self.ready: dict = {}         # 这次起来用了多久（timing_since）
 
     def _link_models(self) -> None:
         os.makedirs(self.models, exist_ok=True)
@@ -579,6 +632,7 @@ class LabHub:
                     break
 
     def start(self) -> dict:
+        t0, pos = time.time(), log_size(self.hub_log)
         os.makedirs(os.path.join(self.env, "run"), exist_ok=True)
         self._link_models()
         if os.path.exists(self.sock):
@@ -600,6 +654,7 @@ class LabHub:
                     if st.get("phase") == "running" and smoke.get("ok"):
                         # 评测用全速功耗档：均衡档的"后台跑多久歇多久"是给用户的舒适度规则，评测程序连发 background 请求会撞上 busy
                         HubClient(f"luoke-core/{HUB_VERSION}", self.sock).settings({"power_mode": "full", "background_on_battery": True})
+                        self.ready = timing_since(t0, self.hub_log, pos)
                         return st
                     if st.get("phase") == "running" and smoke.get("ok") is False and not smoke.get("deferred"):
                         self.stop()
@@ -648,6 +703,7 @@ def stage_eval(a, paths: Paths, recipe: Recipe) -> None:
     for tier in sorted(by_tier, key=int):
         hub = LabHub(paths, a.template, recipe, tier, a.model_source)
         st = hub.start()
+        note_timing(paths.evidence, tier, dict(hub.ready, kind="hub", base=st.get("base")))
         try:
             for c in by_tier[tier]:
                 spec = evals[c["task"]]
@@ -660,8 +716,11 @@ def stage_eval(a, paths: Paths, recipe: Recipe) -> None:
                 cmd = [x.format(**subs) for x in spec["command"]]
                 ver_before, commit_before = read_version(repo, spec["version"]), repo_commit(repo)   # 评的是哪一版：开跑前记下
                 say(f"评 {c['task']}（{c['model']}，{tier} GB 档；{spec['accessory']} {ver_before} {str(commit_before)[:7]}）：{' '.join(cmd)}")
+                pos, started = log_size(hub.hub_log), time.time()
                 r = run_watched(cmd, repo, {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": os.path.expanduser("~")},
-                                c["task"], (recipe.task(c["task"]) or {}).get("kind", "generate"), os.path.join(hub.env, "logs", "hub.log"))
+                                c["task"], (recipe.task(c["task"]) or {}).get("kind", "generate"), hub.hub_log)
+                timing = timing_since(started, hub.hub_log, pos)
+                note_timing(paths.evidence, tier, dict(timing, kind="cell", task=c["task"], exit=r.returncode, stalled=r.stalled))
                 if (read_version(repo, spec["version"]), repo_commit(repo)) != (ver_before, commit_before):   # 跑的过程中配件仓库动了：证据说不清评的是哪一版
                     die(f"{c['task']} 评测期间 {repo} 从 {ver_before} {str(commit_before)[:7]} 变成了 "
                         f"{read_version(repo, spec['version'])} {str(repo_commit(repo))[:7]}（2026-10-15 遇到过：评到一半仓库升版）；等它稳定后重跑")
@@ -711,7 +770,7 @@ def stage_eval(a, paths: Paths, recipe: Recipe) -> None:
                        "date": time.strftime("%Y-%m-%d"), "machine": mach, "hard": spec.get("hard"),
                        "evalset": {"path": os.path.relpath(evalset_path, repo) if evalset_path.startswith(repo) else os.path.basename(evalset_path),
                                    "sha256": summ.pop("evalset_sha256", None) or download.sha256_file(evalset_path)},   # 评测程序自己算的题集哈希优先
-                       "command": cmd, **summ}
+                       "command": cmd, "timing": timing, **summ}
                 if result_path and os.path.exists(result_path):
                     raw_name = f"{c['task']}.{c['key'].replace(':', '.')}.json"
                     raw_path = os.path.join(paths.raw, raw_name)
@@ -824,8 +883,8 @@ def stage_diff(a, paths: Paths) -> None:
 
 def bundled_verified(repo_override: dict) -> dict:
     """打进主控的 agent 核心（luoke-core#68，--repo luoke-agent=<钉住的提交的检出>）没有评测的任务，评测证据里不会有它；
-    照那份 luoke_agent/__init__.py 的版本号写进已验证版本，不然主控对它的 GET /tasks、GET /accessories 都答 403，
-    窗口里看不到任何应用。没给 --repo luoke-agent=… 就不写（这一版不带 agent）。"""
+    照那份 luoke_agent/__init__.py 的版本号写进已验证版本。主控不核配件版本以后（62f5427）只看 verified 里有没有这个名字，
+    agent 没有任务，靠的就是这一条：没有它，主控答「螺壳不认得 luoke-agent」，窗口里看不到任何应用。没给 --repo luoke-agent=… 就不写（这一版不带 agent）。"""
     src = repo_override.get("luoke-agent")
     if not src:
         return {}
@@ -841,40 +900,79 @@ def bundled_verified(repo_override: dict) -> dict:
 
 
 def bundled_unverified(src: str, verified: dict) -> Optional[str]:
-    """收进本体的应用版本不在配方里时答那个版本：主控不给它干活。它有评测的任务，版本由评测证据写进配方，
-    不像 agent 核心那样照源码补，补了就绕过了评测。清单在 Resources（螺壳搜索）或 packaging（螺壳邮件助手）。"""
+    """收进本体的应用版本这一版没有评测证据时答那个版本。它有评测的任务，版本由评测证据写进配方，
+    不像 agent 核心那样照源码补，补了就绕过了评测。清单在 Resources（螺壳搜索）或 packaging（螺壳邮件助手、扫描）。"""
+    m = bundled_manifest(src)
+    versions = (verified.get(m["accessory"]) or {}).get("versions", [])
+    return None if m["version"] in versions or "*" in versions else m["version"]
+
+
+def bundled_manifest(src: str) -> dict:
+    """收进本体的应用的配件清单：Resources（螺壳搜索）或 packaging（螺壳邮件助手、扫描）。"""
     path = os.path.join(src, "Resources", "luoke-accessory.json")
     for other in (os.path.join(src, "packaging", "accessory.json"), os.path.join(src, "packaging", "luoke-accessory.json")):
         if not os.path.exists(path):
             path = other
     with open(path, encoding="utf-8") as f:
-        m = json.load(f)
-    versions = (verified.get(m["accessory"]) or {}).get("versions", [])
-    return None if m["version"] in versions or "*" in versions else m["version"]
+        return json.load(f)
+
+
+def unverified_effect(src: str, verified: dict) -> str:
+    """打进来的这一版没有评测证据时，它在这一版实际怎样。和 close_unevaluated_tasks 同一个判断，分两种：
+    verified 里这个配件一个版本都没有：任务在配方里全关了，搜索只能按字词搜；
+    有别的版本的证据、打进来的这一版没有：任务照台账开着，用的是没评测过的版本。"""
+    acc = bundled_manifest(src)["accessory"]
+    if (verified.get(acc) or {}).get("versions"):
+        return "任务照台账开着，但这一版没评测过"
+    return "它的任务这一版哪一档都不开" + ("，只能按字词搜" if acc == "luoke-search" else "")
+
+
+def evidence_gate(tag: str, what: str, bad: str, evals: str) -> None:
+    """打进主控的应用这一版没有评测证据。主控不核配件版本以后（62f5427），这一版实际怎样分两种（unverified_effect）：
+    verified 里这个配件一个版本都没有，close_unevaluated_tasks 把它的任务全关了，它的任务这一版哪一档都不开（搜索只能按字词搜）；
+    有别的版本的证据、打进来的这一版没有，任务照台账开着，但这一版没评测过。
+    这里是它唯一的质量关：内部版、本机版照出（internal_build.py 写进流程报告，11-05 定：不为这个挡住内部版），RC、正式版停。"""
+    why = f"要打进主控的{what} {bad} 这一版没有评测证据"
+    if not tag.startswith(("internal-", "local-")):
+        die(f"{why}：RC、正式版不发没评测过的版本。这一版的评测要跑 {evals}")
+    say(f"{why}；内部版照出")
 
 
 def check_scan_evidence(tag: str, src: str, verified: dict) -> None:
-    """要打进主控的螺壳扫描版本没有评测证据：主控不给它的生成任务（说明、认应用、看 skill）干活，扫描照扫，卡片上少了模型的话。
-    内部版、本机版照出（写进流程报告），RC、正式版停（#102 审查：和搜索一样）。在配方这一步停，不等打包。"""
+    """要打进主控的螺壳扫描版本没有评测证据（#102 审查：和搜索一样）。在配方这一步停，不等打包。"""
     bad = bundled_unverified(src, verified)
-    if not bad:
-        return
-    why = f"要打进主控的螺壳扫描 {bad} 没有评测证据：主控不给它的生成任务干活"
-    if not tag.startswith(("internal-", "local-")):
-        die(f"{why}。这一版的评测要跑 luoke-scan 的任务")
-    say(f"{why}；内部版照出")
+    if bad:
+        evidence_gate(tag, "螺壳扫描", bad, "luoke-scan 的任务")
 
 
 def check_bundled_evidence(tag: str, src: str, verified: dict) -> None:
-    """要打进主控的螺壳搜索版本没有评测证据（这一格关着挪到发布后，或者没评成）：主控不给它算向量，只能按字词搜。
-    内部版、本机版照出，internal_build.py 写进流程报告（11-05 定：不为这个挡住内部版）；RC、正式版停。在这里停，不等打包：打包失败会被当成主窗口编不过"""
+    """要打进主控的螺壳搜索版本没有评测证据（这一格关着挪到发布后，或者没评成）。在这里停，不等打包：打包失败会被当成主窗口编不过"""
     bad = bundled_unverified(src, verified)
-    if not bad:
-        return
-    why = f"要打进主控的螺壳搜索 {bad} 没有评测证据：主控不给它算向量，只能按字词搜"
-    if not tag.startswith(("internal-", "local-")):
-        die(f"{why}。这一版的评测要跑 luoke-search.embed")
-    say(f"{why}；内部版照出")
+    if bad:
+        evidence_gate(tag, "螺壳搜索", bad, "luoke-search.embed")
+
+
+def check_mail_evidence(tag: str, src: str, verified: dict) -> None:
+    """要打进主控的螺壳邮件助手版本没有评测证据。原来内部版也停（主控全拒它的任务），主控不核版本以后和搜索一样"""
+    bad = bundled_unverified(src, verified)
+    if bad:
+        evidence_gate(tag, "螺壳邮件助手", bad, "luoke-mail 的任务")
+
+
+def close_unevaluated_tasks(r: dict, verified: dict) -> list:
+    """这一版一条评测证据都没有的配件，它的任务哪一档都不开；改了的任务名列表。
+    原来主控的 task_open 要「配件在 verified 里有版本」，主控不核版本以后（62f5427）只看 tiers，这一道挪到配方里：
+    台账里这一版没评的格子沿用上一版，配件整个没评时不能让它照旧开着。agent 核心照源码补进 verified（bundled_verified），不受影响。"""
+    closed = []
+    for task, t in (r.get("tasks") or {}).items():
+        acc = t.get("accessory")
+        if not acc or (verified.get(acc) or {}).get("versions"):
+            continue
+        if t.get("tiers") != []:
+            closed.append(task)
+        t["tiers"] = []
+        t["_tiers"] = f"{acc} 这一版没有评测证据：哪一档都不开"
+    return closed
 
 
 def evidence_conclusion(d: dict) -> str:
@@ -918,9 +1016,8 @@ def stage_recipe(a, paths: Paths) -> None:
     if scan_src:
         check_scan_evidence(paths.release, scan_src, verified)
     mail_src = a.repo_override.get("luoke-mail")
-    bad = bundled_unverified(mail_src, verified) if mail_src else None
-    if bad:      # 和搜索不一样，内部版也停：它的任务主控全拒，这一版的邮件助手用不了
-        die(f"要打进主控的螺壳邮件助手 {bad} 没有评测证据：主控不给它干活。这一版的评测要跑 luoke-mail 的任务")
+    if mail_src:
+        check_mail_evidence(paths.release, mail_src, verified)
     r["verified"] = verified
     r["evidence"] = evidence
     # 哪一档开：只看支持台账（tools/support.py；diff 阶段算好存在 support.json，没跑 diff 就现算）
@@ -932,6 +1029,9 @@ def stage_recipe(a, paths: Paths) -> None:
         if task in led:
             t["tiers"] = support.on_tiers(led, task)
             t["_tiers"] = "支持台账：" + "；".join(f"{tier} GB {c['state']}（{c['why']}）" for tier, c in sorted(led[task].items(), key=lambda kv: int(kv[0])))
+    closed = close_unevaluated_tasks(r, verified)
+    if closed:
+        say("这一版没有评测证据的配件，任务哪一档都不开：" + "、".join(closed))
     with open(paths.recipe, "w", encoding="utf-8") as f:
         json.dump(r, f, ensure_ascii=False, indent=1)
     Recipe.load(paths.recipe)      # 能加载
@@ -980,7 +1080,37 @@ def listing_from(m: dict) -> Optional[dict]:
     return out or None
 
 
+def bundled_engine_version(recipe: Recipe) -> str:
+    """配方的引擎是螺壳引擎（engine.version 是 luoke-engine-<版本>）时返回 <版本>：它打进主控、不出单独的引擎包。oMLX 的返回空串。"""
+    v = str(recipe.engine.get("version") or "")
+    return v[len(LUOKE_ENGINE):] if v.startswith(LUOKE_ENGINE) else ""
+
+
+def bundled_engine_commit(recipe: Recipe) -> str:
+    """配方钉的螺壳引擎提交（engine.commit，完整的 40 位提交号）：出版按它冻结、现编，和版本一起在配方里审。
+    配方是螺壳引擎却没钉、钉的不是完整提交号就停；oMLX 的返回空串。"""
+    ver = bundled_engine_version(recipe)
+    if not ver:
+        return ""
+    commit = str(recipe.engine.get("commit") or "")
+    if not re.fullmatch(r"[0-9a-f]{40}", commit):
+        die(f"配方的引擎是螺壳引擎 {ver}：engine.commit 要写引擎仓库里 v{ver} 那个提交的完整提交号（40 位），出版按它冻结、现编")
+    return commit
+
+
+def engine_dir_name(version: str) -> str:
+    """引擎仓库的 tools/package.sh 打出来的单独用的那份：luoke-engine 和许可文件"""
+    return f"luoke-engine-{version}-macos-arm64"
+
+
 def stage_engine(a, paths: Paths, recipe: Recipe) -> None:
+    ver = bundled_engine_version(recipe)
+    if ver:
+        # 清单里不带引擎包；之前这一版跑过 oMLX 的 engine 阶段的话，留下的记录删掉，manifest 不再带它
+        if os.path.exists(paths.engine_info):
+            os.remove(paths.engine_info)
+        say(f"配方的引擎是螺壳引擎 {ver}：build 阶段打进主控，不出引擎包")
+        return
     src = a.engine_app
     if not os.path.isdir(src):
         die(f"没有引擎 .app：{src}")
@@ -1000,6 +1130,8 @@ def stage_engine(a, paths: Paths, recipe: Recipe) -> None:
     machos = list(minos_check.iter_machos(dst))
     top = max([str(pl.get("LSMinimumSystemVersion") or "0")] + [v for _, v in machos], key=minos_check.version_tuple)
     say(f"引擎包 {len(machos)} 个 Mach-O，最低 macOS 要求 {top}（Info.plist 写 {pl.get('LSMinimumSystemVersion')}）")
+    if minos_check.version_tuple(top) > minos_check.version_tuple(minos_check.LUOKE_MIN_MACOS):
+        die(f"引擎包要 macOS {top}，比螺壳声称的最低 {minos_check.LUOKE_MIN_MACOS} 高：先改 tools/minos_check.py 的 LUOKE_MIN_MACOS 或换引擎")
     n = package_licenses(dst, recipe.engine.get("site", ""), os.path.join(paths.engine_dir, "THIRD-PARTY-PACKAGES.txt"))
     say(f"引擎包里 {n} 个 Python 包的许可清单：{os.path.relpath(os.path.join(paths.engine_dir, 'THIRD-PARTY-PACKAGES.txt'), ROOT)}")
     cmd = ["sh", os.path.join(ROOT, "tools", "release_sign.sh"), dst, "--preserve-entitlements"] + (["--notarize"] if a.notarize else [])
@@ -1090,6 +1222,9 @@ def stage_manifest(a, paths: Paths) -> None:
         if bad:
             die(f"{app} 声称最低 macOS {limit}，但这些程序 / 库要更高的系统，不能进清单：\n  " +
                 "\n  ".join(f"{v}  {p}" for p, v in sorted(bad)[:20]) + ("" if len(bad) <= 20 else f"\n  …共 {len(bad)} 个"))
+        low = minos_check.floor_problems(app)
+        if low:      # 单独安装的配件先只提醒：各自的负责人改到 LUOKE_MIN_MACOS 以后再改成停
+            say(f"提醒：{name} 声称的最低 macOS 低于螺壳的 {minos_check.LUOKE_MIN_MACOS}：" + "、".join(f"{r} {v or '没写'}" for r, v in low))
         zip_path = os.path.join(paths.acc_dir, f"{name}-{m['version']}.zip")
         if os.path.exists(zip_path):
             os.remove(zip_path)
@@ -1115,6 +1250,8 @@ def stage_manifest(a, paths: Paths) -> None:
             items["engine"]["min_macos"] = e["min_macos"]     # 引擎包实际要求的 macOS（engine 阶段按包里的 Mach-O 算出）
         r["engine"]["version"] = e["version"]
         r["engine"]["sha256"] = e["sha256"]
+    elif bundled_engine_version(Recipe.load(paths.recipe)):
+        say("配方的引擎是螺壳引擎：打进主控，清单里没有引擎包")
     else:
         say("注意：没有引擎包（没跑 engine），清单里不带它")
     manifest = {"contract": 1, "release": paths.release, "hub_version": HUB_VERSION, "built_at": int(time.time()), "items": items}   # built_at：安装器据此判断"比已装的新"（升级，V1 §6）
@@ -1138,17 +1275,17 @@ def stage_build(a, paths: Paths) -> None:
         die("螺壳记忆要打进主控（V1 §6）：用 --repo luoke-mem=<钉住的提交的检出> 指定，不用并排的工作区（审查 2026-10-17）")
     with open(os.path.join(mem_src, "packaging", "accessory.json"), encoding="utf-8") as f:
         mem_ver = json.load(f)["version"]
-    if not Recipe.load(paths.recipe).version_verified("luoke-mem", mem_ver):
-        die(f"要打进主控的螺壳记忆 {mem_ver} 不在配方的已验证版本里：learn 会被拒")
+    recipe = Recipe.load(paths.recipe)
+    if not recipe.version_verified("luoke-mem", mem_ver):
+        evidence_gate(paths.release, "螺壳记忆", mem_ver, "luoke-mem 的任务")
     # 主窗口和 agent 核心（luoke-core#68）：--repo luoke-agent=<钉住的提交的检出> 给了才带；没给传空的，
     # 不让 build_app.sh 退回并排的工作区（出版机上那份不是钉住的提交）
     agent_src = a.repo_override.get("luoke-agent", "")
     say(f"主窗口和 agent 核心：{agent_src}" if agent_src else "这一版不带主窗口和 agent 核心（没给 --repo luoke-agent=…）")
-    if agent_src:
-        agent_ver = bundled_verified(a.repo_override)["luoke-agent"]["versions"][0]
-        if not Recipe.load(paths.recipe).version_verified("luoke-agent", agent_ver):
-            die(f"要打进主控的 agent 核心 {agent_ver} 不在配方的已验证版本里：主控会拒它，窗口里看不到应用。"
-                "recipe 阶段也要带上 --repo luoke-agent=…")
+    if agent_src and "luoke-agent" not in (recipe.verified or {}):
+        # 版本不用核（主控不核了）；名字要在：主控靠 verified 里的名字认 agent（bundled_verified）
+        die("配方的 verified 里没有 luoke-agent：主控会答「螺壳不认得 luoke-agent」，窗口里看不到应用。"
+            "recipe 阶段也要带上 --repo luoke-agent=…")
     # 螺壳搜索（ADR 0022）：--repo luoke-search=<钉住的提交的检出> 给了才带，放进 Contents/Helpers
     search_src = a.repo_override.get("luoke-search", "")
     if search_src:
@@ -1174,6 +1311,11 @@ def stage_build(a, paths: Paths) -> None:
     env = dict(SH_ENV, LUOKE_RECIPE_FILE=paths.recipe, LUOKE_RELEASE_FILE=paths.manifest, LUOKE_MEM_SRC=mem_src,
                LUOKE_AGENT_SRC=agent_src, LUOKE_SEARCH_SRC=search_src, LUOKE_MAIL_SRC=mail_src, LUOKE_SCAN_SRC=scan_src,
                LUOKE_BUNDLE_ID=BUNDLE_ID, **scan_env)      # build_app.sh 默认是开发版（ai.luoke.core.dev，10-23）
+    recipe = Recipe.load(paths.recipe)
+    engine_ver = bundled_engine_version(recipe)
+    for k in ("LUOKE_ENGINE_PKG", "LUOKE_ENGINE_VERSION"):
+        env.pop(k, None)        # 只认这里给的：环境里碰巧有的不算
+    env.update(bundled_engine_env(a.repo_override.get("luoke-engine", ""), recipe, paths.out))     # 编在 <发布号>/engine.noindex
     if vm_build.enabled(paths.release):
         # 编在一次性 VM 里，拷回来；下面的 minos 和泄漏词照样在宿主机上查（词表不进 VM）
         say(f"在 VM 里编（{vm_build.image_version()}）")
@@ -1184,11 +1326,131 @@ def stage_build(a, paths: Paths) -> None:
         say(f"VM 编完：镜像 {rec['image']}，病毒库 daily {rec.get('clamav_daily', '—')}，构建记录 {os.path.join(out, 'vm-build.json')}")
     else:
         subprocess.run(["sh", os.path.join(ROOT, "app", "build_app.sh"), out], check=True, env=env)
+    if engine_ver:
+        check_bundled_engine(paths.app, engine_ver)
     limit, bad = minos_check.check_app(paths.app)
     if bad:
         die(f"主控 .app 声称最低 macOS {limit}，但这些程序 / 库要更高的系统：\n  " + "\n  ".join(f"{v}  {p}" for p, v in sorted(bad)[:20]))
-    say(f"主控：{paths.app}（所有 Mach-O 的 minos ≤ {limit}）")
+    low = minos_check.floor_problems(paths.app)
+    if low:
+        die(f"主控 .app 或嵌套的 .app 声称的最低 macOS 低于螺壳的 {minos_check.LUOKE_MIN_MACOS}：" + "、".join(f"{r} {v or '没写'}" for r, v in low))
+    said, top = minos_check.gap(paths.app)
+    say(f"主控：{paths.app}（声称最低 macOS {said}，包里 Mach-O 实际最高要 {top}）")
     leak_check(paths.app, "主控 .app")
+
+
+def bundled_engine_env(engine_src: str, recipe: Recipe, out: str) -> dict:
+    """build_app.sh 打螺壳引擎进主控要的环境变量。配方要螺壳引擎就从冻结的源码现编（build_bundled_engine）；
+    配方是 oMLX 时不带，给了 --repo luoke-engine=… 就停（主控只在配方要它时才用打进来的那份）。"""
+    version = bundled_engine_version(recipe)
+    if not version:
+        if engine_src:
+            die("给了 --repo luoke-engine=…，但配方的引擎不是螺壳引擎（luoke-engine-<版本>）：不打进主控")
+        return {}
+    built = build_bundled_engine(engine_src, version, bundled_engine_commit(recipe), out)
+    return {"LUOKE_ENGINE_PKG": built, "LUOKE_ENGINE_VERSION": version}
+
+
+def build_bundled_engine(src: str, version: str, commit: str, out: str) -> str:
+    """螺壳引擎从冻结的源码现编（引擎仓库自己的 tools/package.sh：嵌着色器库、核只读段、单独一个文件跑自检），不用 release 上的包。
+    源码要正好在配方钉的提交、没有改动；编出来的 --version 要等于配方的版本（实验室包的是 <版本>-lab，过不了）。
+    返回放 luoke-engine 和许可文件的目录（build_app.sh 的 LUOKE_ENGINE_PKG）。"""
+    if not src or not os.path.isdir(src):
+        die(f"配方的引擎是螺壳引擎 {version}：用 --repo luoke-engine=<冻结在 {commit[:7]} 的引擎源码> 给源码，出版现编")
+
+    def git_out(*args: str) -> str:
+        r = subprocess.run(["git", "-C", src, *args], capture_output=True, text=True, encoding="utf-8", errors="replace")
+        if r.returncode != 0:
+            die(f"螺壳引擎的源码：git {' '.join(args)}：{(r.stderr or '').strip()}")
+        return r.stdout.strip()
+    head = git_out("rev-parse", "HEAD")
+    if head != commit:
+        die(f"螺壳引擎的源码在 {head[:7]}，配方钉的是 {commit[:7]}")
+    # 冻结时自己写的 .luoke-commit（internal_build.freeze_one）不算改动
+    if git_out("status", "--porcelain", "--untracked-files=all", "--", ".", ":(exclude).luoke-commit"):
+        die("螺壳引擎的源码有改动")
+    stage = os.path.join(out, "engine.noindex")
+    shutil.rmtree(stage, ignore_errors=True)        # 重跑时不拿上一次编的去查
+    os.makedirs(stage)
+    env = {k: v for k, v in SH_ENV.items() if k != "LUOKE_LAB"}       # 正式包：环境里碰巧开着实验室包也不算
+    say(f"螺壳引擎 {version}：按 {commit[:7]} 现编（tools/package.sh）")
+    r = subprocess.run(["sh", os.path.join(src, "tools", "package.sh"), stage], cwd=src, env=env,
+                       capture_output=True, text=True, encoding="utf-8", errors="replace")
+    print(((r.stdout or "")[-1500:] + "\n" + (r.stderr or "")[-1500:]).strip(), flush=True)
+    if r.returncode != 0:
+        die(f"螺壳引擎打包退出码 {r.returncode}")
+    built = os.path.join(stage, engine_dir_name(version))
+    exe = os.path.join(built, "luoke-engine")
+    if os.path.islink(exe) or not os.path.isfile(exe) or not os.access(exe, os.X_OK):
+        die(f"螺壳引擎：编出来的 {engine_dir_name(version)}/ 里没有 luoke-engine")
+    got = engine_version_of(exe)
+    if got != version:
+        die(f"螺壳引擎：编出来的版本是 {got or '（读不出）'}，配方要 {version}")
+    say(f"螺壳引擎 {version} @ {commit[:7]}：sha256 {download.sha256_file(exe)[:12]}…")
+    return built
+
+
+def engine_version_of(exe: str) -> str:
+    """luoke-engine --version（不碰 GPU）。读不出是空串。"""
+    try:
+        r = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return (r.stdout or "").strip() if r.returncode == 0 else ""
+
+
+def check_bundled_engine(app: str, version: str) -> None:
+    """打出来的主控里真有配方要的那一版螺壳引擎：程序在、能跑、--version 是这一版，Info.plist 的 LuokeEngineVersion 也是
+    （主控按它认）。"""
+    exe = os.path.join(app, "Contents", "Helpers", "luoke-engine")
+    with open(os.path.join(app, "Contents", "Info.plist"), "rb") as f:
+        got = plistlib.load(f).get("LuokeEngineVersion")
+    ran = engine_version_of(exe) if os.access(exe, os.X_OK) else ""
+    if got != version or ran != version:
+        die(f"打出来的主控里没有螺壳引擎 {version}（Contents/Helpers/luoke-engine 在不在：{os.path.exists(exe)}，"
+            f"它说自己是：{ran or '—'}，LuokeEngineVersion：{got}）")
+    say(f"螺壳引擎 {version} 已打进主控：Contents/Helpers/luoke-engine")
+
+
+def signature(path: str) -> dict:
+    """codesign -dv 的标识、团队、flags（codesign 把这些写在 stderr）"""
+    shown = subprocess.run(["codesign", "-dv", "--verbose=2", path], capture_output=True, text=True).stderr or ""
+    found = {k: re.search(rf"^{k}=(.+)$", shown, re.M) for k in ("Identifier", "TeamIdentifier")}
+    flags = re.search(r"flags=0x[0-9a-f]+\(([^)]*)\)", shown)
+    return {"id": found["Identifier"].group(1) if found["Identifier"] else "",
+            "team": found["TeamIdentifier"].group(1) if found["TeamIdentifier"] else "",
+            "flags": flags.group(1).split(",") if flags else []}
+
+
+def check_signed_engine(app: str, recipe: Recipe) -> None:
+    """签好（--notarize 时公证、staple 过）以后核螺壳里的引擎：标识还是 ai.luoke.engine、开着 hardened runtime、和螺壳同一个团队、
+    版本是配方要的，再在签好的包里跑一次它的自检（要 GPU：MLX 在签好、开着 hardened runtime 的样子下能起来、算得对）。
+    配方不是螺壳引擎就不查。"""
+    version = bundled_engine_version(recipe)
+    if not version:
+        return
+    exe = os.path.join(app, "Contents", "Helpers", "luoke-engine")
+    outer, inner = signature(app), signature(exe)
+    bad = []
+    if inner["id"] != "ai.luoke.engine":
+        bad.append(f"标识是 {inner['id'] or '—'}")
+    if "runtime" not in inner["flags"]:
+        bad.append("没开 hardened runtime")
+    if not re.fullmatch(r"[A-Z0-9]{10}", inner["team"]) or inner["team"] != outer["team"]:
+        bad.append(f"团队是 {inner['team'] or '—'}，螺壳是 {outer['team'] or '—'}")
+    ran = engine_version_of(exe)
+    if ran != version:
+        bad.append(f"它说自己是 {ran or '—'}，配方要 {version}")
+    if bad:
+        die("签好的螺壳里，引擎不对：" + "；".join(bad))
+    try:
+        r = subprocess.run([exe, "selftest"], capture_output=True, text=True, timeout=600)
+    except (OSError, subprocess.SubprocessError) as e:
+        die(f"签好的螺壳里，引擎的自检起不来：{e}")
+    if r.returncode != 0:
+        print(((r.stdout or "") + (r.stderr or ""))[-1500:], flush=True)
+        die(f"签好的螺壳里，引擎的自检没过（退出码 {r.returncode}）")
+    say(f"签好的螺壳里的引擎 {version}：标识 ai.luoke.engine、hardened runtime、团队 {inner['team']}，自检过了")
 
 
 def leak_check(app: str, what: str) -> None:
@@ -1269,6 +1531,7 @@ def stage_sign(a, paths: Paths) -> None:
     subprocess.run(cmd, check=True, env=SH_ENV)
     check_bundle_id(paths.app)
     check_scan(a, paths.app)
+    check_signed_engine(paths.app, Recipe.load(paths.recipe))
 
 
 def check_scan(a, app: str) -> None:

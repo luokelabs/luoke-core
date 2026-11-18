@@ -379,16 +379,13 @@ private extension View {
     func cssLines(_ size: CGFloat) -> some View { lineSpacing(size * 0.4).padding(.vertical, size * 0.2) }
 }
 
-/// 对照稿的卡片和一组行（.mk、.group）：card 底、圆角 14；阴影是 --card-shadow：浅色两层淡影，深色一圈 6% 的亮边
+/// 应用页的卡片和一组行：工作台的卡片（规范 v2 §2、§6）——card 底、1px border、圆角 12，只用 shadow-xs；层次靠明度，不靠阴影
 private struct AppsCardSurface: ViewModifier {
-    @Environment(\.colorScheme) private var scheme
-    private static let shade = Color(red: 58 / 255, green: 31 / 255, blue: 20 / 255)
     func body(content: Content) -> some View {
         content
-            .background(Color.lkCard).clipShape(.rect(cornerRadius: 14))
-            .shadow(color: Self.shade.opacity(scheme == .dark ? 0 : 0.06), radius: 1, y: 1)
-            .shadow(color: Self.shade.opacity(scheme == .dark ? 0 : 0.10), radius: 6, y: 4)
-            .overlay { if scheme == .dark { RoundedRectangle(cornerRadius: 14).stroke(Color.white.opacity(0.06)) } }
+            .background(Color.lkCard).clipShape(.rect(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.lkBorder))
+            .shadow(color: .black.opacity(0.05), radius: 1, y: 1)
     }
 }
 
@@ -543,7 +540,7 @@ private struct AppActions: View {
             if let c = m.previous[r.id] { Button("回到上一版本（\(c["previous"] as? String ?? "")）") { m.rollback(r) } }
             if r.bundled {
                 if !r.disabled { Button("停用") { m.disable(r) } }
-                Button("删除数据…") { AppsWindow.window?.close(); DeleteData.show(accessory: r.id, name: r.name) }      // 一次只一个窗口
+                Button("删除数据") { AppsWindow.window?.close(); DeleteData.show(accessory: r.id, name: r.name) }      // 一次只一个窗口
             } else {
                 Button("卸载") { AppsWindow.window?.close(); Uninstall.show(preselect: r.id, back: { AppsWindow.show() }) }   // 一次只一个窗口：卸载窗口接替应用窗口
             }

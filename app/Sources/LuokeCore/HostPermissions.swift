@@ -44,8 +44,13 @@ enum HostPermissions {
 enum UserAction {
     static func recent(within seconds: TimeInterval = 10) -> Bool {
         guard NSWorkspace.shared.frontmostApplication?.processIdentifier == getpid() else { return false }
-        return min(CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .leftMouseUp),
-                   CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .keyDown)) < seconds
+        return sinceLast() < seconds
+    }
+
+    /// 离用户上一次点（松开鼠标）、按键过了几秒
+    static func sinceLast() -> TimeInterval {
+        min(CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .leftMouseUp),
+            CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .keyDown))
     }
 }
 
