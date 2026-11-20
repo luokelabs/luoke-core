@@ -147,7 +147,7 @@ def _bundled_names(app: str) -> list:
 
 
 def _macos_at_least(need: Optional[str]) -> bool:
-    """它要的系统比主控声称的新（外层 14.0，程序可以更高）：这台 Mac 不够就当没带，本体也不起它。"""
+    """它要的系统比主控声称的新（程序可以比外层声称的更高）：这台 Mac 不够就当没带，本体也不起它。"""
     have = _macos_version()
     return not need or not have or _version_tuple(have) >= _version_tuple(need)
 

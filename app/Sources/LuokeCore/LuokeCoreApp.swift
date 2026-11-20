@@ -7,25 +7,18 @@ import UserNotifications
 
 /// 入口。SwiftUI 启动时会挑一个场景当初始窗口显示（AppWindowsController.showInitialWindow，在交给 AppDelegate 之前）；
 /// 螺壳唯一的场景是凑数的 Settings，于是每次启动都多出一个空的「“螺壳”设置」窗口（11-17 查到，开发实例上每次都有）。
-/// macOS 15 起可以让它启动时不显示（.defaultLaunchBehavior(.suppressed)），但 SceneBuilder 里不能按 #available 分支，
-/// 所以按系统版本选两个 App 之一；macOS 14 上没有这个修饰符，靠 PlaceholderSettings 出现即关
+/// 所以启动时不显示它（.defaultLaunchBehavior(.suppressed)）；万一还是出现了，PlaceholderSettings 出现即关
 @main
 enum LuokeMain {
     static func main() {
         LuokeScenes.runHelperModes()
-        if #available(macOS 15, *) { LuokeCoreApp.main() } else { LuokeCoreAppMacOS14.main() }
+        LuokeCoreApp.main()
     }
 }
 
-@available(macOS 15, *)
 struct LuokeCoreApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
     var body: some Scene { LuokeScenes.placeholder.defaultLaunchBehavior(.suppressed) }
-}
-
-struct LuokeCoreAppMacOS14: App {
-    @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
-    var body: some Scene { LuokeScenes.placeholder }
 }
 
 enum LuokeScenes {
@@ -56,8 +49,8 @@ enum LuokeScenes {
     }
 }
 
-/// 凑数的 Settings 场景万一还是出现了（macOS 14 上启动时没法不显示它；以后 SwiftUI 再换打开的路），一出现就关掉、
-/// 不参与窗口恢复，并在 hub.log 记下调用栈。macOS 15 起正常启动不会走到这里（LuokeMain）
+/// 凑数的 Settings 场景万一还是出现了（以后 SwiftUI 再换打开的路），一出现就关掉、
+/// 不参与窗口恢复，并在 hub.log 记下调用栈。正常启动不会走到这里（LuokeMain）
 enum PlaceholderSettings {
     /// SwiftUI 给 Settings 场景窗口的标识（defaults 里存位置的键也是它）
     static let id = "com_apple_SwiftUI_Settings_window"
@@ -240,13 +233,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         return false
     }
 
-    /// luoke://memory：各工具打开记忆界面（主控没在跑时系统会拉起主控，再把链接交过来）
+    /// luoke://memory：各工具打开记忆界面；luoke://app/<应用>/<页>：打开主窗口里某个应用的页
+    /// （主控没在跑时系统会拉起主控，再把链接交过来）
     func application(_ application: NSApplication, open urls: [URL]) {
         if Installer.isInstallerLaunch() || !Installer.isCanonicalCopy { return }
-        for u in urls { _ = Memory.handle(u) }
+        for u in urls where !Memory.handle(u) { _ = AppLink.handle(u) }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        // 下面在主线程上等各进程收尾（主控要等空闲任务，最多十几秒）：先把窗口和菜单栏图标收掉，
+        // 不然它们留在那儿、还能点，看不出在退出（core-private#232）
+        NSApp.windows.forEach { $0.orderOut(nil) }
+        MenuBar.shared.remove()
+        CATransaction.flush()
         BundledApps.all.forEach { $0.stop() }
         MainWindow.stop()
         HubModel.shared.stopHub()

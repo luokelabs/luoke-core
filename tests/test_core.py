@@ -1,6 +1,7 @@
 """不碰引擎的单元测试：配方、派发规则、请求白名单、清单。  python3 -m unittest discover -s tests"""
 import base64
 import hashlib
+import inspect
 import json
 import os
 import plistlib
@@ -3437,6 +3438,25 @@ class EngineStartRecoveryTest(unittest.TestCase):
         h.engine_missing = lambda: False
         return h
 
+    def test_engine_gone_while_stopping_is_not_a_crash(self):
+        """core-private#232：退出时要等空闲任务收尾（最多十几秒），这期间引擎先没了，采样线程当成崩溃重启、又加载了模型。
+        先记下在停，再等任务"""
+        h = self.hub()
+        h.engine.alive = lambda: False
+        started = []
+        h.engine.start = lambda wait_models=None, timeout=180: started.append(1) or []
+        h.engine.stop = lambda: None
+        seen = {}
+
+        def wrapping_up():
+            h._check_engine()       # 等任务收尾时采样线程跑了一轮
+            seen["stopping"] = h.stop_event.is_set()
+        h.jobs.stop = wrapping_up
+        h.stop()
+        self.assertTrue(seen["stopping"])
+        self.assertEqual(started, [])
+        self.assertEqual(list(h.engine_crashes), [])
+
     def test_hub_survives_an_engine_that_will_not_start(self):
         from luoke_core.engine import EngineError
         h = self.hub()
@@ -3823,6 +3843,178 @@ class ReleaseToolsTest(unittest.TestCase):
                         unittest.mock.patch.object(self.rel.subprocess, "run", built):
                     with self.assertRaises(SystemExit if stops else RuntimeError, msg=(tag, verified, agent)):
                         self.rel.stage_build(a, paths)
+
+    def test_agent_hello_eval_summary(self):
+        """luoke-agent 的 hello 评测（bench/run_hello.py）：每遍都算；硬性 = 评测程序的 passed 加跑满题集；说出来的不是中文由 ceilings 卡住"""
+        rel = self._tool("release")
+        def result(texts, hard=(), partial=False):
+            runs = [{"text": t, "hard": list(hard) if i == 0 else []} for i, t in enumerate(texts)]
+            fails = [f"c1：{h}" for h in hard]
+            return {"task": "luoke-agent.hello", "model": "m", "set_sha256": "ab", "prompt_sha256": "cd", "partial": partial,
+                    "seconds": 12.0, "waited_seconds": 0, "results": [{"id": "c1", "kind": "normal", "runs": runs}],
+                    "cases": 1, "of": 1, "runs_per_case": len(runs),
+                    "score": {"hard_failures": fails, "passed": not fails, "runs": len(runs), "soft": {"said": 1.0, "heavy_quiet": 0.25}}}
+        spec = rel.load_evals()["luoke-agent.hello"]
+        self.assertEqual((spec["accessory"], spec["summary"], spec["floor"], spec["ceilings"]), ("luoke-agent", "agent-one-liner", 0, {"not_chinese": 0}))
+        self.assertIn(0, spec["ok_exit_codes"]); self.assertIn(1, spec["ok_exit_codes"])     # 1 = 跑完了、硬性没过：照常记证据
+        self.assertIsNotNone(Recipe.load(RECIPE).task("luoke-agent.hello"))
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "r.json")
+            def summ(res):
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(res, f, ensure_ascii=False)
+                return rel.summarize("agent-one-liner", path, "")
+            s = summ(result(["嘿，那 3 封会议邀请我都放进日历啦。", "", "Safari 的缓存清掉了 2 GB。"]))
+            self.assertEqual((s["hard_ok"], s["score"], s["score_max"], s["evalset_sha256"]), (True, 3, 3, "ab"))
+            self.assertEqual((s["detail"]["not_chinese"], s["detail"]["said"], s["detail"]["prompt_sha256"]), (0, 2, "cd"))
+            self.assertEqual(rel.judge(s, None, spec)["verdict"], "pass")
+            s = summ(result(["I archived 3 newsletters for you.", "嘿，好啦。"]))
+            self.assertEqual((s["hard_ok"], s["detail"]["not_chinese"]), (True, 1))
+            self.assertEqual(rel.judge(s, None, spec)["verdict"], "fail")                 # 评测程序没判，评测表照样卡住
+            s = summ(result(["嘿，那 3 封会议邀请我都放进日历啦。", "嘿，好啦。"], hard=["length"]))
+            self.assertEqual((s["hard_ok"], s["score"], s["score_max"]), (False, 1, 2))
+            self.assertEqual(rel.judge(s, None, spec)["verdict"], "fail")
+            s = summ(result(["嘿，好啦。"], partial=True))
+            self.assertFalse(s["hard_ok"])                                                # 只跑了前几道：不能算证据
+            s = summ(dict(result([]), of=38, runs_per_case=3))
+            self.assertEqual((s["hard_ok"], s["n"]), (False, 0))                          # 一遍都没有：不算过
+            s = summ(dict(result(["嘿，好啦。", "嘿，好啦。"]), of=38, runs_per_case=3))
+            self.assertEqual((s["hard_ok"], s["detail"]["runs_expected"]), (False, 114))  # 遍数和题数 × 每题几遍对不上
+            res = result(["嘿，好啦。"])
+            del res["runs_per_case"]
+            self.assertFalse(summ(res)["hard_ok"])
+            self.assertNotIn("date", summ(result(["嘿，好啦。"])))                       # 评测程序不写日期：不拿 null 盖掉记录的日期
+        for t in ("Slack、Zoom、Notion 都有新 PR", "PR #12 merged 了", "Safari 的缓存清掉了 2 GB。", "嘿，一口气吞掉 6.4GB 缓存啦！",
+                  "Visual Studio Code Helper 又占了 3 GB", "npm、git 都装好了", "iPhone 和 iPad 都连上了", "900 MB 的 dmg 删掉啦"):
+            self.assertFalse(rel.not_chinese(t), t)
+        for t in ("I archived 3 newsletters for you.", "Your Mac cleaned up 2 GB 了", "Mac 今天 is very busy", "hey, all good here 哦", "OK!"):
+            self.assertTrue(rel.not_chinese(t), t)
+        self.assertNotIn("date", inspect.getsource(rel.summarize_agent_one_liner).split('"evalset_sha256"')[1])
+        self.assertEqual(rel.keep_recorded_date({"score": 1, "date": None}), {"score": 1})
+        self.assertEqual(rel.keep_recorded_date({"score": 1, "date": "2026-11-19"})["date"], "2026-11-19")
+        self.assertIn("summ = keep_recorded_date(summ)", inspect.getsource(rel.stage_eval))
+        rec = {"date": "2026-11-19", **rel.keep_recorded_date({"score": 1, "date": None})}      # stage_eval 就是这样拼证据的
+        self.assertEqual(rec["date"], "2026-11-19")
+
+    def test_unreadable_result_stops_only_where_the_tier_was_on(self):
+        """读不到评测结果：上一版开着的格子在台账那一步停下（不悄悄关掉一档照样出版），原因列在差异报告里；
+        上一版关着的、新任务（hello）记没过、照常出版。这种记录不当下一版的基线，也不沿用。"""
+        rel = self._tool("release")
+        ib = self._tool("internal_build")
+        evals = rel.load_evals()
+        root = tempfile.mkdtemp()
+        os.makedirs(os.path.join(root, "releases", "internal-1119"))
+        template = {"assignment": {"16": {}, "32": {}},
+                    "tasks": {"luoke-scan.explain": {"tiers": ["16", "32"]}, "luoke-agent.hello": {"tiers": ["16"]}}}
+        bad = {"hard_ok": False, "score": 0, "score_max": 0, "n": 0, "detail": {"error": "result_unreadable", "message": "FileNotFoundError: x"}}
+
+        def rec(task, tier, **kw):
+            return dict({"task": task, "model": "m", "tiers": [tier], "params": {}, "evalset": {"sha256": "e"}}, **kw)
+
+        def ledger(state16):
+            with open(os.path.join(root, "releases", "internal-1119", "support.json"), "w") as f:
+                json.dump({"luoke-scan.explain": {"16": {"state": state16, "why": "x", "runs": [True]},
+                                                  "32": {"state": "off", "why": "x", "runs": []}}}, f)
+        cur = {("luoke-scan.explain", "k", "16"): rec("luoke-scan.explain", "16", **bad),
+               ("luoke-agent.hello", "k", "16"): rec("luoke-agent.hello", "16", **bad)}
+        with unittest.mock.patch.object(rel, "ROOT", root):
+            ledger("on")
+            with self.assertRaises(SystemExit):                                           # 上一版开着：停
+                rel.ledger_for("internal-1120", "internal-1119", cur, template, evals)
+            with self.assertRaises(SystemExit):
+                rel.diff_report("internal-1120", "internal-1119", cur, {}, evals, template)
+            self.assertEqual([(t, g) for t, g, _ in rel.unreadable_on_cells(cur, {"luoke-scan.explain": {"16": {"state": "on"}}}, evals)],
+                             [("luoke-scan.explain", "16")])
+            ledger("off")                                                                  # 上一版关着、新任务：记没过、照常出版
+            md, verdict, led = rel.diff_report("internal-1120", "internal-1119", cur, {}, evals, template)
+        self.assertEqual(verdict, "pass")
+        self.assertEqual((led["luoke-scan.explain"]["16"]["state"], led["luoke-agent.hello"]["16"]["state"]), ("off", "off"))
+        self.assertIn("读不到评测结果（FileNotFoundError: x）", md)
+        # 这一版读不到结果的记录，下一版不当基线（上次一栏是 —，不比总分），也不沿用
+        good = rec("luoke-scan.explain", "16", hard_ok=True, score=5, score_max=10)
+        self.assertEqual(rel.judge(good, rec("luoke-scan.explain", "16", **bad), evals["luoke-scan.explain"])["reasons"], [])
+        nxt = {("luoke-scan.explain", "k", "16"): good}
+        with unittest.mock.patch.object(rel, "ROOT", root):
+            md, _v, _l = rel.diff_report("internal-1121", "internal-1119", nxt, cur, evals, template)
+        self.assertIn("| 5/10 | — |", md)
+        self.assertFalse(ib.reusable(rec("luoke-scan.explain", "16", **bad), evals["luoke-scan.explain"], {}, {}, None))
+
+    def test_unreadable_eval_result_is_a_failed_cell(self):
+        """评测程序退出码在 ok_exit_codes 里（hello、扫描的 1）但结果文件没写出来、不是 JSON、缺字段：这一档记为没过，不让整版停在「评测没跑完」"""
+        rel = self._tool("release")
+        evals = rel.load_evals()
+        with tempfile.TemporaryDirectory() as d:
+            missing = os.path.join(d, "none.json")
+            garbage = os.path.join(d, "garbage.json")
+            with open(garbage, "w") as f:
+                f.write("{not json")
+            no_score = os.path.join(d, "no_score.json")
+            with open(no_score, "w") as f:
+                json.dump({"results": []}, f)
+            for task in ("luoke-agent.hello", "luoke-scan.explain", "luoke-mem.topics"):
+                kind = evals[task]["summary"]
+                for path in (missing, garbage, no_score):
+                    s = rel.summarize_or_fail(kind, path, "")
+                    self.assertEqual((s["hard_ok"], s["score"], s["detail"]["error"]), (False, 0, "result_unreadable"), (task, path))
+                    self.assertFalse(rel.passed(dict(s, task=task), evals))
+                    self.assertEqual(rel.judge(s, {"hard_ok": True, "score": 100, "evalset": {}}, evals[task])["verdict"], "fail")
+            with self.assertRaises(RuntimeError):
+                rel.summarize_or_fail("no-such-kind", missing, "")                          # 汇总方式写错照旧停
+        src = inspect.getsource(rel.stage_eval)
+        self.assertIn("summarize_or_fail(", src)
+        self.assertNotIn(" summarize(", src)
+
+    def test_task_missing_from_ledger_ships_off(self):
+        """--no-eval 整版拷上一版的台账；上一版之后才加的任务（hello）台账里没有，配方里它哪一档都不开，不照模板的档开着。
+        它的配件在已验证里（agent 核心照源码补），close_unevaluated_tasks 也不会关它，只能靠这一条。"""
+        ib = self._tool("internal_build")
+        rel = self._tool("release")
+        sup = self._tool("support")
+        root = tempfile.mkdtemp()
+        ev = os.path.join(root, "releases", "internal-1119", "evidence")
+        os.makedirs(ev)
+        json.dump({"task": "luoke-mem.topics", "accessory": "luoke-mem", "tier_run": "16", "score": 9, "score_max": 10, "hard_ok": True,
+                   "combo": {"key": "k", "model": "m", "base": "m", "tiers": ["16"], "params": {}}},
+                  open(os.path.join(ev, "luoke-mem.topics.k.16.json"), "w"))
+        json.dump({"luoke-mem.topics": {"16": {"state": "on", "why": "x", "runs": [True]}, "32": {"state": "off", "why": "x", "runs": []}}},
+                  open(os.path.join(root, "releases", "internal-1119", "support.json"), "w"))
+        with unittest.mock.patch.object(ib, "ROOT", root), unittest.mock.patch.object(ib, "log", lambda m: None):
+            ib.reuse_all("internal-1119-2", "internal-1119")
+        led = sup.load(os.path.join(root, "releases", "internal-1119-2"))
+        self.assertNotIn("luoke-agent.hello", led)
+        with open(RECIPE, encoding="utf-8") as f:
+            r = json.load(f)
+        self.assertEqual(r["tasks"]["luoke-agent.hello"]["tiers"], ["16", "32", "128"])   # 模板里写了三档
+        r["tasks"]["luoke-test.never"] = {"accessory": "luoke-test", "kind": "generate", "tiers": [], "params": {"*": {}}}
+        missing = rel.apply_ledger(r, led)
+        self.assertIn("luoke-agent.hello", missing)
+        self.assertNotIn("luoke-test.never", missing)                                     # 模板里本来就不开的不算
+        self.assertEqual(r["tasks"]["luoke-agent.hello"]["tiers"], [])
+        self.assertEqual(r["tasks"]["luoke-mem.topics"]["tiers"], ["16"])                # 台账里有的照台账
+        rel.close_unevaluated_tasks(r, {"luoke-mem": {"versions": ["1"]}, "luoke-agent": {"versions": ["0.0.97"]}})
+        self.assertEqual(r["tasks"]["luoke-agent.hello"]["tiers"], [])
+        self.assertIn("apply_ledger(r, led)", inspect.getsource(rel.stage_recipe))
+
+    def test_hello_held_until_the_hold_is_removed(self):
+        """hello 在评测表里三档都 hold 着：上一版发布后补满 3 遍都过、这一版也过了，照样关着；删掉 hold 才照规矩开。
+        hold 着照旧在发布前评（不挪到发布后），但不复测。"""
+        ib = self._tool("internal_build")
+        sup = self._tool("support")
+        evals = self.rel.load_evals()
+        holds = evals["luoke-agent.hello"].get("held_unsupported") or {}
+        self.assertEqual(sorted(holds, key=int), ["16", "32", "128"])
+        task = "luoke-agent.hello"
+        prev = {task: {t: {"state": "off", "why": "x", "runs": [True, True, True]} for t in holds}}
+        runs = {(task, t): [True] for t in holds}
+        tiers = {task: list(holds)}
+        self.assertEqual(sup.on_tiers(sup.build("beta2-rc3", prev, runs, {task: holds}, tiers), task), [])
+        self.assertEqual(sup.on_tiers(sup.build("beta2-rc3", prev, {}, {task: holds}, tiers), task), [])     # 这一版没评：也关着
+        self.assertEqual(sup.on_tiers(sup.build("beta2-rc3", prev, runs, {}, tiers), task), ["16", "32", "128"])   # 没有 hold 就开了
+        # hold 着的格子一版只评一遍：发布前后都不复测，凑不到 3 遍，开不了
+        for state in (None, "off"):
+            self.assertEqual(sup.needs_repeat(state, True, [True]), 0)
+            self.assertEqual(sup.decide(state, True, [True])[0], "off")
+        self.assertFalse(ib.closed_cant_open(task, "16", prev, evals))                    # 照旧在发布前评一遍
 
     def test_transcribe_and_tidy_eval_summaries(self):
         """luoke-ime 的转写评测（evals/transcribe）：总分是字准确率，硬性条目由评测程序判（按住不说话不出字），延迟看终稿；每档各评一遍"""
@@ -7109,6 +7301,95 @@ class StreamChatCancelTest(unittest.TestCase):
                 self.assertEqual(memory_refused(info), mem, mode)
         finally:
             srv.shutdown()
+
+
+class LoadRoomGateTest(unittest.TestCase):
+    """任务参数 load_free_gb：为这个任务加载底座之前，空闲加文件缓存不够就不加载（16 GB 测试机 2026-11-17 实测的门）。"""
+    VM_STAT = ("Mach Virtual Memory Statistics: (page size of 16384 bytes)\n"
+               "Pages free:                              327680.\n"
+               "Pages wired down:                        104858.\n"
+               "File-backed pages:                       196608.\n"
+               "Swapouts:                                     0.\n")
+
+    def test_recipe_checks_load_free_gb(self):
+        with open(RECIPE, encoding="utf-8") as f:
+            base = json.load(f)
+        self.assertEqual(Recipe(base).params("luoke-agent.hello", "16")["load_free_gb"], 10)
+        for ok in (0, 10, 9.5):
+            r = json.loads(json.dumps(base))
+            r["tasks"]["luoke-agent.hello"]["params"]["16"]["load_free_gb"] = ok
+            Recipe(r)
+        for bad in (-1, "10", True, float("nan"), float("inf"), [10]):
+            r = json.loads(json.dumps(base))
+            r["tasks"]["luoke-agent.hello"]["params"]["*"]["load_free_gb"] = bad
+            with self.assertRaises(RecipeError, msg=repr(bad)):
+                Recipe(r)
+
+    def test_free_plus_file_backed_from_vm_stat(self):
+        with unittest.mock.patch.object(machine, "_run", side_effect=lambda cmd, timeout=5: self.VM_STAT if "vm_stat" in cmd[0] else ""):
+            s = machine.memory_sample()
+        self.assertEqual((s["free_gb"], s["file_backed_gb"]), (5.0, 3.0))
+        self.assertEqual(machine.load_room_gb(s), 8.0)
+        self.assertIsNone(machine.load_room_gb({"free_gb": 5.0, "file_backed_gb": None}))    # 读不到不猜
+
+    def hub(self, mem_gb):
+        from luoke_core.hub import Hub
+        d = tempfile.mkdtemp(); self.addCleanup(shutil.rmtree, d, True)
+        h = Hub(Recipe.load(RECIPE), d, d, lab=True, accessory_dirs=[d], mem_gb=mem_gb, smoke=False)
+        h.base_id = "base-id"
+        return h
+
+    def test_gate_applies_only_where_the_recipe_asks_and_only_before_a_load(self):
+        h16, h32 = self.hub(16), self.hub(32)
+        hello16, hello32 = h16.recipe.params("luoke-agent.hello", "16"), h32.recipe.params("luoke-agent.hello", "32")
+        self.assertEqual(hello16.get("load_free_gb"), 10)
+        self.assertNotIn("load_free_gb", hello32)
+        with unittest.mock.patch.object(machine, "load_room_gb", return_value=8.4):
+            self.assertFalse(h16.load_room_ok("luoke-agent.hello", hello16))
+            self.assertTrue(h32.load_room_ok("luoke-agent.hello", hello32))                  # 32 GB 档没写
+            self.assertTrue(h16.load_room_ok("luoke-mail.triage", h16.recipe.params("luoke-mail.triage", "16")))   # 别的任务没写
+            h16.engine.loaded = "base-id"
+            self.assertTrue(h16.load_room_ok("luoke-agent.hello", hello16))                  # 底座已经在内存里：不用加载
+            h16.engine.loaded, h16.engine.loading = None, True
+            self.assertTrue(h16.load_room_ok("luoke-agent.hello", hello16))                  # 正在加载：已经在加载了
+            h16.engine.loading = False
+        with unittest.mock.patch.object(machine, "load_room_gb", return_value=10.5):
+            self.assertTrue(h16.load_room_ok("luoke-agent.hello", hello16))
+        with unittest.mock.patch.object(machine, "load_room_gb", return_value=None):
+            self.assertTrue(h16.load_room_ok("luoke-agent.hello", hello16))                  # 读不到 vm_stat 不挡
+
+    def test_background_request_is_paused_without_loading(self):
+        import threading as _t
+        from luoke_core.hub import serve
+        from luoke_core.client import HubClient, HubError
+        h = self.hub(16)
+        os.makedirs(h.model_dir_of(h.base_name))
+        h.engine_missing = lambda: False
+        h.engine.alive = lambda: True
+        h.engine.serving = lambda: True
+        h.engine.owns_port = lambda: True
+        h.phase = "running"
+        h.fits_memory = lambda name: True
+        h.dispatcher.on_ac = True
+        loads, streams = [], []
+        h.engine.load = lambda model: loads.append(model) or 0.5
+        h.engine.stream_chat = lambda *a, **k: streams.append(1) or {"status": 200, "error": None, "detail": None, "first_token_secs": 0.1, "usage": None}
+        sd = tempfile.mkdtemp(prefix="lk"); self.addCleanup(shutil.rmtree, sd, True); sock = os.path.join(sd, "h.sock")
+        srv = serve(h, sock)
+        _t.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            c = HubClient("luoke-agent/0.1.0", sock)
+            with unittest.mock.patch.object(machine, "load_room_gb", return_value=8.4):
+                with self.assertRaises(HubError) as cm:
+                    list(c.chat("luoke-agent.hello", {"messages": [{"role": "user", "content": "x"}], "luoke_items": 1},
+                                priority="background", allow_battery=True))
+            self.assertEqual(cm.exception.code, "paused")
+            self.assertEqual(cm.exception.extra.get("reason"), "memory")
+            self.assertTrue(cm.exception.retry_after)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+        self.assertEqual((loads, streams), ([], []))
 
 
 class BatteryNoLargeModelTest(unittest.TestCase):

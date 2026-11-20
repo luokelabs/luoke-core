@@ -16,7 +16,7 @@ How the family fits together: [luokelabs/luoke](https://github.com/luokelabs/luo
 
 **Closed beta (beta1).** The external interface (the v1 contract) is frozen; see [docs/V1.md](docs/V1.md) §2 and §8.
 
-- A Mac with Apple silicon, macOS 26.2 or later. The inference engine needs 26.2; Luoke itself runs on 14 and later, but can't do anything without the engine.
+- A Mac with Apple silicon, macOS 26.2 or later.
 - 16 GB of memory or more, 32 GB or more recommended. There are three tiers by memory (16 GB, 32 GB, 128 GB), and the recipe decides each tier's models and which tasks are on.
 - Disk: about 7 GB for models and engine (16 / 32 GB tiers), or about 28 GB (larger tiers).
 

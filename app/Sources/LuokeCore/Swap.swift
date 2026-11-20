@@ -40,7 +40,9 @@ enum Swap {
       asuser /bin/rm -rf "$STAGED"
       asuser /bin/sh -c 'cat >> "$1"' log "$LOG" < "$WORK/swap.log"
       # 旧版没能放回时留着（那是唯一的一份），改名为 …-keep：下次换包清理没起来的临时目录时不碰它
-      if [ $KEEP = 1 ]; then /bin/mv "$WORK" "$WORK-keep"; else /bin/rm -rf "$WORK"; fi
+      # 删之前去掉 uchg / uappnd：带着它们 rm -rf 删不掉，临时目录就一直留着（新版那一步失败时可能还带着）。这里失败不停
+      if [ $KEEP = 1 ]; then /bin/mv "$WORK" "$WORK-keep"
+      else /usr/bin/find "$WORK" ! -type l -exec /usr/bin/chflags nouchg,nouappnd {} + 2>/dev/null; /bin/rm -rf "$WORK"; fi
     }
     trap finish EXIT
     fail() { say false "$1" "$CUR"; openapp "$CUR"; exit 1; }
@@ -55,6 +57,14 @@ enum Swap {
       NEW="$WORK/new/$(basename "$TARGET")"
       /bin/mkdir "$WORK/new" "$WORK/old" || fail "新版没能准备好（建不了临时目录）"
       [ ! -L "$STAGED" ] && [ -d "$STAGED" ] && /usr/bin/ditto "$STAGED" "$NEW" || fail "新版没能准备好（拷不过来）"
+      # ditto 连 uchg / uappnd 也拷过来：带着它们下面 chown 会失败，装上去的那份也删不掉、换不了。find 不跟链接，同 ACL
+      /usr/bin/find "$NEW" ! -type l -exec /usr/bin/chflags nouchg,nouappnd {} + || fail "新版没能准备好（去不掉文件标志）"
+      # 换上的那份归 root、组和别人不能写：ditto 留着暂存那份的属主（用户），标准账户就能改「应用程序」里这份，别的账户打开的也是它。
+      # 以当前用户跑这条路（只有测试）时 chown 成自己，等于不改
+      # ACL 也清掉：ditto（连 --noacl，克隆的文件照样带着）会留着暂存那份上的 ACL，chown、go-w 都不动它，留一条「别人能写」就白改了。
+      # 不用 chmod -RN：它跟着符号链接走（-P 也一样），root 会去清包外的文件；find 不跟链接，链接本身没有 ACL
+      OWN=0:0; [ $ROOT = 1 ] || OWN="$(/usr/bin/id -u):$(/usr/bin/id -g)"
+      /usr/sbin/chown -R "$OWN" "$NEW" && /bin/chmod -R go-w "$NEW" && /usr/bin/find "$NEW" ! -type l -exec /bin/chmod -N {} + || fail "新版没能准备好（改不了属主）"
       /usr/bin/codesign --verify --deep --strict -R "$REQ" "$NEW" || fail "新版的签名不对，没有换。原来的螺壳照常能用"
     fi
     OLD=""; OLDMV=""

@@ -1193,9 +1193,11 @@ class Hub:
 
     def stop(self) -> None:
         self.phase = "stopped"
+        # 先记下在停，再等任务收尾（最多 WRAP_UP_SECS）：这段时间里引擎先没了（本体退出时它也收到 SIGTERM），
+        # 采样线程不当崩溃去重启、加载模型（core-private#232）
+        self.stop_event.set()
         self.endpoint.stop()
         self.jobs.stop()
-        self.stop_event.set()
         for w in self.scorers.values():
             w.stop()
         self.engine.stop()
@@ -1441,6 +1443,18 @@ class Hub:
         return out
 
     # ---- 内存 -----------------------------------------------------------------------------------------
+    def load_room_ok(self, task: str, task_params: dict) -> bool:
+        """任务参数 load_free_gb：要为这个任务加载底座之前，空闲加文件缓存（machine.load_room_gb）至少要这么多，不够就不加载。
+        底座已经在内存里、正在加载，或者任务没写这个参数，都不看。读不到 vm_stat 不挡（和 fits_memory 一样）。"""
+        need = float(task_params.get("load_free_gb") or 0)
+        if not need or self.engine.loaded == self.base_id or getattr(self.engine, "loading", False):
+            return True
+        have = machine.load_room_gb()
+        if have is None or have >= need:
+            return True
+        self.log(f"memory: task={task} needs free+file-backed {need} GB before loading the base, have {have} GB; refusing to load")
+        return False
+
     def fits_memory(self, model_name: str) -> bool:
         """两道关：配方预算装得下；这台机器现在真的还剩这么多（别的引擎占着的 wired 内存算进去，V1 §3"从不硬挤"）。"""
         m = self.recipe.model(model_name)
@@ -2403,7 +2417,7 @@ class Handler(BaseHTTPRequestHandler):
         prefill = hub.measured_speed("prefill_tok_s", hub.recipe.speed(model_name, hub.tier_name, "prefill_tok_s", 100))
         decode = hub.measured_speed("decode_tok_s", hub.recipe.speed(model_name, hub.tier_name, "decode_tok_s", 10))
         est = estimate_secs(payload, prefill, decode)
-        fits = hub.engine.loaded == hub.base_id or hub.fits_memory(model_name)
+        fits = hub.engine.loaded == hub.base_id or (hub.fits_memory(model_name) and hub.load_room_ok(task, params))
         job = None
         if priority == "background":
             acc_name = getattr(self, "accessory_name", None)

@@ -476,5 +476,46 @@
   "floor": 0,
   "tolerance": 2,
   "_底线": "新任务（beta 2）：第一轮基线出来前只看硬性条目。评测集 66 条（硬性 32 条），每条 3 遍，按发布脚本的做法起实验室主控（oMLX 0.7.2，max_chars 12000，温度 0）：提示词第 3 版 16 档 65/66、硬性 32/32，32、128 档还没用第 3 版跑过，发布评测三档都跑。退出码同 explain"
+ },
+ "luoke-agent.hello": {
+  "accessory": "luoke-agent",
+  "repo": "../luoke-agent",
+  "paths": ["luoke_agent/hello.py", "luoke_agent/prompts/hello.system.txt", "luoke_agent/prompts/hello.user.txt",
+            "luoke_agent/prompts/hello.schema.json", "luoke_agent/prompt_files.py", "luoke_agent/hub.py", "luoke_agent/safety.py"],
+  "_paths": "prompt_files.load 也读 luoke_agent/prompts/hello.retry.txt（有才读）。现在没有这个文件，列不进 paths（paths 里的每一项都得在钉住的提交里）；agent 加了它，要同时加进 paths",
+  "version": {
+   "file": "luoke_agent/__init__.py",
+   "regex": "(?m)^__version__\\s*=\\s*[\"']([^\"']+)[\"']"
+  },
+  "command": [
+   "/usr/bin/python3",
+   "bench/run_hello.py",
+   "--hub",
+   "{hub}",
+   "--label",
+   "{label}",
+   "--out",
+   "{raw}"
+  ],
+  "result": "{raw}/hello/{label}.json",
+  "summary": "agent-one-liner",
+  "evalset": "bench/hello_set.py",
+  "ok_exit_codes": [
+   0,
+   1
+  ],
+  "hard": "38 道题每道 3 遍，一遍都不能错（评测程序的 score.passed）：照格式、一行、长度在提示词定的范围内、不说最近说过的那条、不编那条里没有的数、不提 AI 和网址、不出现题里夹带的写给 AI 的话、不带刺；说出来的每一句都是中文（not_chinese 为 0）",
+  "floor": 0,
+  "tolerance": 2,
+  "ceilings": {
+   "not_chinese": 0
+  },
+  "held_unsupported": {
+   "16": "beta 2 发出前不开，要开时删掉这一条",
+   "32": "beta 2 发出前不开，要开时删掉这一条",
+   "128": "beta 2 发出前不开，要开时删掉这一条"
+  },
+  "_hold": "hold 着照样在发布前评一遍、记证据，但不复测、不开；删掉 held_unsupported 以后照规矩连过 3 遍才开",
+  "_底线": "新任务（beta 2 之后）：第一轮基线出来前只看硬性条目，和别的一句话任务一样底线 0、容差 2。退出码 1 是跑完了但硬性没过。软性指标（said、heavy_quiet……）只记进证据，不算过没过"
  }
 }

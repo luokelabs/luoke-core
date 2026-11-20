@@ -233,6 +233,11 @@ enum MainWindow {
     /// 应用自己的页（邮件助手……）画在主窗口里，不再开浏览器
     static func openApp(_ accessory: String) { presenter?.openToolPage(app: accessory, page: nil, args: [:]) }
 
+    /// 应用的某一页（luoke://app 链接）：page 为 nil 是它的第一页，args 原样交给那一页
+    static func openToolPage(app: String, page: String?, args: [String: String]) {
+        presenter?.openToolPage(app: app, page: page, args: args)
+    }
+
     /// 点了的通知是 agent 核心发的：打开主窗口，简报的通知在「今天」最上面打开简报，别的回「今天」，答 true；不是的答 false
     static func notificationClicked(_ info: [AnyHashable: Any]) -> Bool {
         #if canImport(LuokeWindow)
@@ -579,15 +584,18 @@ final class AgentCore: NSObject, NSWindowDelegate, WindowHost {
         w.title = AppInfo.appName
         // 标题栏归 LuokeWindow：隐藏标题、透明，加一个空的统一工具栏，红黄绿在 52 高的顶行正中，带字的 logo 在它右边（agent-private#120）
         MainWindowChrome.apply(to: w)
-        w.contentMinSize = NSSize(width: 860, height: 600)
         w.contentView = NSHostingView(rootView: MainWindowView(model: model))
         w.isReleasedWhenClosed = false
         w.delegate = self
         w.center()
         w.setFrameAutosaveName("LuokeMainWindow")
+        MainWindowHost.enforce(on: w)
         window = w
         return w
     }
+
+    /// 最小 860×600 在这里卡（MainWindowHost：contentMinSize 会被 NSHostingView 改写）
+    func windowWillResize(_ sender: NSWindow, to frameSize: NSSize) -> NSSize { MainWindowHost.clamp(frameSize, in: sender) }
 
     func windowWillClose(_ notification: Notification) {
         windowOpen = false                         // 关窗时还会来一次 resignKey，之后都按关了算
@@ -974,6 +982,10 @@ final class AgentCore: NSObject, NSWindowDelegate, WindowHost {
                         UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: Updater.lastKey)
                         HubModel.shared.updateFound = f
                         self.model.show(f.map { "有新版本 \($0.tag)" } ?? "已是最新")
+                    case .failure(Updater.Failure.needsMacOS(let tag, let v)):
+                        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: Updater.lastKey)
+                        HubModel.shared.updateFound = nil
+                        self.model.show(Updater.Failure.needsMacOS(tag: tag, macOS: v).localizedDescription)
                     case .failure(let e):
                         self.model.show("没查成：" + e.localizedDescription)
                     }

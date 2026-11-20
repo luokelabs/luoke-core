@@ -696,6 +696,33 @@
     "top_p": 1
    },
    "_说明": "2026-11-05 加（让语音输入的「整理」也开始做）：语音终稿出来以后，用底座去口头禅、理顺改口，数字写法也在这一步；提示词归输入法，放在 messages 里，输出用 response_format 的 json_schema {\"text\": string}；用户松了键在等上屏，按 user-waiting 发。item_tokens 1024 够一次听写最长 120 秒（约 600 字）。16 档上底座和转写二选一，整理会把转写挤下去、换上底座，默认开不开等实测；评测集归 luoke-ime（evals/tidy），进评测表之前各档答 unsupported"
+  },
+  "luoke-agent.hello": {
+   "accessory": "luoke-agent",
+   "kind": "generate",
+   "main": false,
+   "tiers": [
+    "16",
+    "32",
+    "128"
+   ],
+   "params": {
+    "*": {
+     "item_tokens": 60,
+     "fixed_tokens": 200,
+     "batch": 1,
+     "think": false,
+     "max_chars": 2000
+    },
+    "16": {
+     "load_free_gb": 10
+    }
+   },
+   "base_params": {
+    "temperature": 0.7,
+    "top_p": 1
+   },
+   "_说明": "主窗口「今天」最上面吉祥物的一句：从今天的事里挑一件说，一天至多做成一次，只走 background。提示词和评测集在 luoke-agent（prompts/hello.*、bench/hello_set.py）。温度 0.7：每天要换着说。16 GB 测试机实测（M2、9B 4-bit）：输出最多 54 token、一次 6–9 秒；峰值在加载底座那一下（引擎 7.8 GB），机器上别的应用多占到空闲加文件缓存不足 10 GB 时加载会把压力顶到 warn，所以 16 GB 档加载前要 load_free_gb。不够时后台答 paused，agent 照 retry_after 再来，这期间显示模板句。"
   }
  },
  "verified": {

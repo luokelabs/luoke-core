@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from typing import Optional
 
@@ -59,6 +60,10 @@ class Recipe:
                 raise RecipeError(f"任务 {name} 的 accessory 和任务名前缀不一致")
             if "params" not in t:
                 raise RecipeError(f"任务 {name} 没有任务参数")
+            for scope, p in (t["params"] or {}).items():      # 加载底座前要的空闲 + 文件缓存（GB）：写了就得是不小于 0 的数
+                v = p.get("load_free_gb") if isinstance(p, dict) else None
+                if v is not None and (isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v < 0):
+                    raise RecipeError(f"任务 {name} 的 {scope} 档 load_free_gb 要是不小于 0 的数：{v!r}")
         for name, m in self.models.items():
             for k in ("dir", "kind", "wired_gb"):
                 if k not in m:

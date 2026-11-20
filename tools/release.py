@@ -289,6 +289,42 @@ def summarize_embed_parity(result: dict) -> dict:
             "evalset_sha256": result.get("vectors_sha256")}
 
 
+_CJK = re.compile(r"[㐀-鿿豈-﫿]")
+_LATIN_WORD = re.compile(r"[A-Za-z]+(?:['’][A-Za-z]+)?")
+
+
+def not_chinese(text: str) -> bool:
+    """说出来的一句不是中文：一个汉字都没有，或者英文的普通词（全小写、两个字母以上）比汉字多。
+    应用名、产品名（Slack、iPhone、Visual Studio Code）、缩写和单位（PR、GB）不算普通词，中文句子里夹多少都行；
+    英文写的句子里 you、is、cleaned 这类小写词一多就算不是中文。"""
+    cjk = len(_CJK.findall(text))
+    plain = sum(1 for w in _LATIN_WORD.findall(text) if len(w) > 1 and w.islower())
+    return cjk == 0 or plain > cjk
+
+
+def summarize_agent_one_liner(result: dict) -> dict:
+    """luoke-agent bench/run_<任务>.py（run_hello 起）：每道题跑几遍（runs_per_case），每一遍都算。
+    硬性条目 = 评测程序判的 score.passed（格式、长度、多行、夹带指令的记号、禁用词、编的数……一遍都不能错）、跑满了整个题集；
+    说出来的每一句都得是中文，不是中文的遍数记在 detail.not_chinese，评测表用 ceilings 卡住。总分 = 没有任何硬性问题的遍数。
+    软性指标（说了的比例、沉重的事不说的比例……）照抄进 detail，不进过没过。"""
+    s = result["score"]
+    rows = [r for c in result.get("results") or [] for r in c.get("runs") or []]
+    clean = sum(1 for r in rows if not r.get("hard"))
+    said = [r for r in rows if (r.get("text") or "").strip()]
+    try:
+        expected = int(result["of"]) * int(result["runs_per_case"])
+    except (KeyError, TypeError, ValueError):
+        expected = None
+    full = bool(rows) and len(rows) == expected        # 一遍都没有、或者遍数和「题数 × 每题几遍」对不上：不算跑满
+    return {"hard_ok": bool(s.get("passed")) and not result.get("partial") and full, "score": clean, "score_max": len(rows), "n": len(rows),
+            "latency": {"seconds": result.get("seconds"), "waited_seconds": result.get("waited_seconds")},
+            "detail": {"hard_failures": len(s.get("hard_failures") or []), "hard_failure_lines": (s.get("hard_failures") or [])[:20],
+                       "not_chinese": sum(1 for r in said if not_chinese(r["text"])), "said": len(said),
+                       "partial": bool(result.get("partial")), "runs_expected": expected, "soft": s.get("soft"),
+                       "model_reported": result.get("model"), **prompt_detail(result)},
+            "evalset_sha256": result.get("set_sha256")}
+
+
 # 评测程序没跑完、原因是主控 / 引擎说内存放不下：这一档不支持，不是评测出了毛病
 # 评测看门狗（10-20 定，internal-1020 在 16 GB 测试机上被内存守卫拒了 95 分钟、原地重试）：生成任务连续这么久
 # 实验室主控日志里没有一条这个任务 outcome=ok 的请求，就停掉评测程序，记这一档没过，接着往下评。
@@ -448,6 +484,9 @@ def apply_known_issues(summ: dict, spec: dict, tier: str, result_path: Optional[
 
 
 def summarize(kind: str, result_path: Optional[str], stdout: str) -> dict:
+    if kind == "agent-one-liner":
+        with open(result_path, encoding="utf-8") as f:
+            return summarize_agent_one_liner(json.load(f))
     if kind == "mail-triage":
         with open(result_path, encoding="utf-8") as f:
             return summarize_mail_triage(json.load(f))
@@ -480,13 +519,54 @@ def summarize(kind: str, result_path: Optional[str], stdout: str) -> dict:
     raise RuntimeError(f"不认识的汇总方式 {kind}")
 
 
+def summarize_or_fail(kind: str, result_path: Optional[str], stdout: str) -> dict:
+    """summarize，但结果文件没写出来、不是 JSON、缺字段时评测这一步不停：记成这一档没过（硬性条目没过、总分 0），原因写进 detail。
+    评测程序用退出码 1 表示「跑完了、硬性没过」的，中途出了别的错也是退出码 1、不写结果文件；原来这里抛 FileNotFoundError /
+    KeyError，出版停在「评测没跑完」。上一版开着的格子读不到结果，台账那一步照旧停（unreadable_on_cells）；
+    关着的、新任务记没过，照常出版。汇总方式写错（不认识的 kind）照旧停。"""
+    try:
+        return summarize(kind, result_path, stdout)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, IndexError) as e:
+        return {"hard_ok": False, "score": 0, "score_max": 0, "n": 0, "latency": {},
+                "detail": {"error": "result_unreadable", "message": f"{type(e).__name__}: {e}"[:300]}}
+
+
+def keep_recorded_date(summ: dict) -> dict:
+    """评测程序没写日期（汇总里 date 是 None）：去掉这一项，证据留评测这一步记的日期，不盖成 null。"""
+    return {k: v for k, v in summ.items() if not (k == "date" and v is None)}
+
+
+def unreadable(d: Optional[dict]) -> bool:
+    """这条证据是「读不到评测结果」记的没过（summarize_or_fail）：不是模型答得不好，是评测程序或汇总出了毛病。
+    这种记录不当下一版比总分的基线，也不沿用（internal_build.reusable）。"""
+    return bool(d) and (d.get("detail") or {}).get("error") == "result_unreadable"
+
+
+def unreadable_on_cells(cur: dict, prev_led: dict, evals: dict) -> list:
+    """[(任务, 档, 原因)]：这一版读不到评测结果、上一版台账里开着（没 hold）的格子。照「失败一遍就关」会悄悄把开着的档关掉、
+    照样出版，所以这种格子要停下（ledger_for）：评测程序坏了要修好重跑。上一版关着的、新任务照旧记没过、不挡出版。"""
+    out = []
+    for (task, _key, _tier), d in sorted(cur.items()):
+        if not unreadable(d):
+            continue
+        holds = evals.get(task, {}).get("held_unsupported") or {}
+        for tier in d.get("tiers") or []:
+            if ((prev_led.get(task) or {}).get(str(tier)) or {}).get("state") == "on" and str(tier) not in holds:
+                out.append((task, str(tier), (d.get("detail") or {}).get("message", "")))
+    return out
+
+
 def judge(cur: dict, prev: Optional[dict], spec: dict) -> dict:
     """一条任务×组合的结论：pass / regression（看过报告可放行）/ fail（不能发）。"""
     reasons = []
     verdict = "pass"
+    if unreadable(prev):
+        prev = None          # 上一版这一格读不到结果：没有可比的总分
     if not cur.get("hard_ok"):
         verdict = "fail"
         reasons.append("硬性条目没过" + ("（上次过了，回退）" if prev and prev.get("hard_ok") else ""))
+    if unreadable(cur):
+        reasons.append(f"读不到评测结果（{(cur.get('detail') or {}).get('message', '')}）")
     floor = spec.get("floor")
     if floor is not None and cur["score"] < floor:
         verdict = "fail"
@@ -528,6 +608,10 @@ def task_tiers(template: dict) -> dict:
 def ledger_for(release: str, prev_release: Optional[str], cur: dict, template: dict, evals: dict) -> tuple:
     """(上一版台账, 这一版台账)。规则全在 tools/support.py。"""
     prev = support.previous(prev_release, ROOT)
+    bad = unreadable_on_cells(cur, prev, evals)
+    if bad:
+        die("读不到评测结果、上一版开着的格子（评测程序或汇总坏了，照「失败一遍就关」会悄悄关掉这一档）：" +
+            "；".join(f"{task} {tier} GB 档（{why}）" for task, tier, why in bad) + "。修好评测程序后重跑这几格")
     holds = {task: spec.get("held_unsupported") or {} for task, spec in evals.items()}
     runs = support.runs_by_cell(cur, lambda d: passed(d, evals))
     return prev, support.build(release, prev, runs, holds, task_tiers(template))
@@ -546,6 +630,8 @@ def diff_report(release: str, prev_release: Optional[str], cur: dict, prev: dict
     for (task, key, tier), c in sorted(cur.items()):
         model = c["model"]
         p = prev.get((task, key, tier)) or next((v for (t, _k, _tier), v in prev.items() if t == task and v["model"] == model and _tier == tier), None)
+        if unreadable(p):
+            p = None          # 上一版这一格读不到结果：不当基线
         j = judge(c, p, evals.get(task, {}))
         verdict = "regression" if j["verdict"] == "regression" else "pass"     # 没过（fail）的由台账关掉这一档，不挡出版
         worst = max(worst, verdict, key=lambda v: rank[v])
@@ -752,8 +838,12 @@ def stage_eval(a, paths: Paths, recipe: Recipe) -> None:
                     if not r.stalled:
                         say(f"{c['task']}：这一档内存放不下（引擎拒绝），记为没过")
                 else:
-                    summ = summarize(spec["summary"], result_path, r.stdout or "")
-                    apply_known_issues(summ, spec, tier, result_path)
+                    summ = summarize_or_fail(spec["summary"], result_path, r.stdout or "")
+                    if (summ.get("detail") or {}).get("error") == "result_unreadable":
+                        say(f"{c['task']}：读不到评测结果（{summ['detail']['message']}），这一档记为没过")
+                    else:
+                        apply_known_issues(summ, spec, tier, result_path)
+                summ = keep_recorded_date(summ)
                 evalset = spec["evalset"].format(**subs)
                 evalset_path = evalset if os.path.isabs(evalset) else os.path.join(repo, evalset)
                 rec = {"release": paths.release, "task": c["task"], "accessory": spec["accessory"],
@@ -984,6 +1074,22 @@ def evidence_conclusion(d: dict) -> str:
             + f"（{d['machine'].get('chip', '')}，{d['date']}）")
 
 
+def apply_ledger(r: dict, led: dict) -> list:
+    """配方里任务的 tiers 照支持台账写；台账里没有的任务（新加的任务碰上 --no-eval：台账是从上一版整版拷来的）
+    哪一档都不开，不照模板里写的档开着。返回这样关掉的任务名（模板里本来就一档不开的不算）。"""
+    missing = []
+    for task, t in (r.get("tasks") or {}).items():
+        if task in led:
+            t["tiers"] = support.on_tiers(led, task)
+            t["_tiers"] = "支持台账：" + "；".join(f"{tier} GB {c['state']}（{c['why']}）" for tier, c in sorted(led[task].items(), key=lambda kv: int(kv[0])))
+            continue
+        if t.get("tiers") != []:
+            missing.append(task)
+        t["tiers"] = []
+        t["_tiers"] = "支持台账里没有这个任务（没评过）：哪一档都不开"
+    return missing
+
+
 def stage_recipe(a, paths: Paths) -> None:
     with open(a.template, encoding="utf-8") as f:
         r = json.load(f)
@@ -1025,10 +1131,9 @@ def stage_recipe(a, paths: Paths) -> None:
     if led is None:
         _prev, led = ledger_for(paths.release, previous_release(paths.release, a.prev), cur, r, load_evals())
         support.save(paths.rec, led)
-    for task, t in r["tasks"].items():
-        if task in led:
-            t["tiers"] = support.on_tiers(led, task)
-            t["_tiers"] = "支持台账：" + "；".join(f"{tier} GB {c['state']}（{c['why']}）" for tier, c in sorted(led[task].items(), key=lambda kv: int(kv[0])))
+    missing = apply_ledger(r, led)
+    if missing:
+        say("支持台账里没有、这一版哪一档都不开的任务：" + "、".join(missing))
     closed = close_unevaluated_tasks(r, verified)
     if closed:
         say("这一版没有评测证据的配件，任务哪一档都不开：" + "、".join(closed))

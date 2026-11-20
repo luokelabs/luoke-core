@@ -92,8 +92,8 @@ def pressure_level() -> str:
 
 
 def memory_sample() -> dict:
-    """vm_stat 的 wired、swapouts、free 页数（换算 GB），以及 memory_pressure 的空闲百分比（只作参考）。"""
-    rec = {"wired_gb": None, "swapouts_gb": None, "free_gb": None, "free_pct": None}
+    """vm_stat 的 wired、swapouts、free、file-backed 页数（换算 GB），以及 memory_pressure 的空闲百分比（只作参考）。"""
+    rec = {"wired_gb": None, "swapouts_gb": None, "free_gb": None, "file_backed_gb": None, "free_pct": None}
     vm = _run(["/usr/bin/vm_stat"])
     for line in vm.splitlines():
         k, _, v = line.partition(":")
@@ -106,11 +106,24 @@ def memory_sample() -> dict:
             rec["swapouts_gb"] = round(int(v) * PAGE / 2 ** 30, 2)
         elif k.strip() == "Pages free":
             rec["free_gb"] = round(int(v) * PAGE / 2 ** 30, 2)
+        elif k.strip() == "File-backed pages":
+            rec["file_backed_gb"] = round(int(v) * PAGE / 2 ** 30, 2)
     mp = _run(["/usr/bin/memory_pressure"])
     m = re.search(r"free percentage:\s*(\d+)%", mp)
     if m:
         rec["free_pct"] = int(m.group(1))
     return rec
+
+
+def load_room_gb(sample: Optional[dict] = None) -> Optional[float]:
+    """加载底座时能腾出来的内存：空闲加文件缓存（vm_stat 的 free + file-backed）。读不到答 None。
+    16 GB 测试机实测：加载 9B 时内核把刚读进来的权重压进压缩区，别的应用的匿名内存不让；这个数不足约 10 GB 时加载会把压力顶到 warn。
+    wired 和内核的空闲百分比在加载前看不出这种情况。"""
+    s = sample if sample is not None else memory_sample()
+    free, files = s.get("free_gb"), s.get("file_backed_gb")
+    if free is None or files is None:
+        return None
+    return round(free + files, 2)
 
 
 _ENGINE_NAMES = ("omlx-server", "omlx", "ollama", "llama-server", "llama-cli", "lmstudio", "LM Studio", "mlx_lm.server",

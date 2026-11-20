@@ -26,6 +26,13 @@ final class MenuBar: NSObject, NSMenuDelegate {
         statusChanged()
     }
 
+    /// 退出时先拿掉图标（之后还要等各进程收尾）
+    func remove() {
+        subs.removeAll()
+        if let it = item { NSStatusBar.system.removeStatusItem(it) }
+        item = nil
+    }
+
     private func statusChanged() {
         setIcon(model.lightState)
         if menuOpen { rebuild() }

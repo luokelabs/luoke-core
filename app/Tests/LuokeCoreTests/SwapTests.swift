@@ -140,11 +140,13 @@ final class SwapTests: XCTestCase {
         XCTAssertTrue(outside.contains(" \"$d\" '\(env.path)/logs/swap.log' </dev/null >\"$d/swap.log\" 2>&1 &\n"), outside)
         XCTAssertFalse(cmd.contains(">> '"), cmd)                  // 脚本外没有往用户路径的重定向
         XCTAssertTrue(outside.hasSuffix("/bin/rm -rf \"$d\"; exit 71; fi"), outside)
-        // 换上的是拷进临时目录、核过签名的那一份；结果、日志以用户身份写；不再 chown
+        // 换上的是拷进临时目录、核过签名的那一份；结果、日志以用户身份写；唯一的 chown 是给临时目录里那份新版的（不再 chown 结果文件）
         XCTAssertTrue(Swap.script.contains(#"/usr/bin/codesign --verify --deep --strict -R "$REQ" "$NEW""#))
         XCTAssertTrue(Swap.script.contains(#"asuser /bin/sh -c 'cat > "$1"' say "$RESULT""#))
         XCTAssertTrue(Swap.script.contains(#"asuser /bin/sh -c 'cat >> "$1"' log "$LOG" < "$WORK/swap.log""#))
-        XCTAssertFalse(Swap.script.contains("chown"))
+        XCTAssertEqual(Swap.script.components(separatedBy: "/usr/sbin/chown").count - 1, 1)
+        XCTAssertFalse(Swap.script.contains(#"chown "$USERID""#))
+        XCTAssertTrue(Swap.script.contains(#"/usr/sbin/chown -R "$OWN" "$NEW""#))
         // 以用户身份跑的：直接追加到日志，也不用 nohup
         let user = Swap.command(admin: false, waitPID: 123, current: nil, staged: env, target: env, previous: env, result: env, uid: 501,
                                 requirement: "=x", log: env.appendingPathComponent("logs/swap.log"))
@@ -214,6 +216,161 @@ final class SwapTests: XCTestCase {
         XCTAssertTrue(r.log.contains("== ") && r.log.contains("done"), r.log)
         let (rc, out) = try run("/usr/bin/codesign", ["--verify", "--deep", "--strict", l.target.path])
         XCTAssertEqual(rc, 0, out)
+    }
+
+    /// 换上的那份归 root（以 root 跑时 0:0），组和别人不能写：拷进临时目录之后、核签名之前改。
+    /// 之前 ditto 留着暂存那份的属主，「应用程序」里的螺壳归标准账户自己，它能改、别的账户打开的也是它（真机实测）
+    func testRootPathMakesTheCopyRootOwnedBeforeVerifying() throws {
+        let s = Swap.script
+        let ditto = try XCTUnwrap(s.range(of: #"/usr/bin/ditto "$STAGED" "$NEW""#))
+        let chown = try XCTUnwrap(s.range(of: #"/usr/sbin/chown -R "$OWN" "$NEW" && /bin/chmod -R go-w "$NEW" && /usr/bin/find "$NEW" ! -type l -exec /bin/chmod -N {} + || fail"#))
+        XCTAssertFalse(s.contains("/bin/chmod -RN"))      // 跟着链接走，root 会清包外的
+        let verify = try XCTUnwrap(s.range(of: #"/usr/bin/codesign --verify --deep --strict -R "$REQ" "$NEW""#))
+        XCTAssertLessThan(ditto.lowerBound, chown.lowerBound)
+        XCTAssertLessThan(chown.lowerBound, verify.lowerBound)
+        XCTAssertTrue(s.contains(#"OWN=0:0; [ $ROOT = 1 ] || OWN="#))
+        // 用户那条路（没有临时目录）不改属主：这一步在 [ -n "$WORK" ] 那一段里
+        let work = try XCTUnwrap(s.range(of: #"if [ -n "$WORK" ]; then"#))
+        let end = try XCTUnwrap(s.range(of: "\nfi\n", range: chown.upperBound..<s.endIndex))
+        XCTAssertLessThan(work.lowerBound, chown.lowerBound)
+        XCTAssertLessThan(chown.upperBound, end.lowerBound)
+    }
+
+    /// 暂存那份里组、别人能写的文件和目录：换上去以后都不能写，可执行的照旧可执行，签名照旧对
+    func testRootPathDropsGroupAndOtherWrite() throws {
+        let l = try layout()
+        try makeApp(l.target, marker: "old")
+        try makeApp(l.staged, marker: "new")
+        let fm = FileManager.default
+        try fm.setAttributes([.posixPermissions: 0o666], ofItemAtPath: l.staged.appendingPathComponent("Contents/Resources/marker").path)
+        try fm.setAttributes([.posixPermissions: 0o777], ofItemAtPath: l.staged.appendingPathComponent("Contents/Resources").path)
+        try fm.setAttributes([.posixPermissions: 0o777], ofItemAtPath: l.staged.appendingPathComponent("Contents/MacOS/t").path)
+        let r = try swap(l, current: l.target, admin: true)
+        XCTAssertTrue(r.ok, r.why + "\n" + r.log)
+        func mode(_ rel: String) throws -> Int {
+            try XCTUnwrap(fm.attributesOfItem(atPath: l.target.appendingPathComponent(rel).path)[.posixPermissions] as? Int)
+        }
+        XCTAssertEqual(try mode("Contents/Resources/marker"), 0o644)
+        XCTAssertEqual(try mode("Contents/Resources"), 0o755)
+        XCTAssertEqual(try mode("Contents/MacOS/t"), 0o755)
+        XCTAssertEqual(try mode(""), 0o755)
+        XCTAssertEqual(try XCTUnwrap(fm.attributesOfItem(atPath: l.target.path)[.ownerAccountID] as? NSNumber).uint32Value, getuid())
+        let (rc, out) = try run("/usr/bin/codesign", ["--verify", "--deep", "--strict", l.target.path])
+        XCTAssertEqual(rc, 0, out)
+    }
+
+    /// ls -led 第一行之后的 ACL 条目（没有就是空）
+    private func acl(_ path: String) throws -> String {
+        let (rc, out) = try run("/bin/ls", ["-led", path])
+        XCTAssertEqual(rc, 0, out)
+        return out.split(separator: "\n").dropFirst().joined(separator: "\n")
+    }
+
+    private func addACL(_ path: String) throws {
+        let (rc, out) = try run("/bin/chmod", ["+a", "everyone allow write", path])
+        XCTAssertEqual(rc, 0, out)
+        XCTAssertFalse(try acl(path).isEmpty)          // 目录上 write 显示成 add_file
+    }
+
+    /// 暂存那份的目录和文件上带 ACL（「别人能写」）：换上去以后 ls -le 一条都没有，签名照旧对
+    func testRootPathClearsACLs() throws {
+        let l = try layout()
+        try makeApp(l.target, marker: "old")
+        try makeApp(l.staged, marker: "new")
+        try addACL(l.staged.appendingPathComponent("Contents/Resources").path)
+        try addACL(l.staged.appendingPathComponent("Contents/Resources/marker").path)
+        let r = try swap(l, current: l.target, admin: true)
+        XCTAssertTrue(r.ok, r.why + "\n" + r.log)
+        XCTAssertEqual(marker(l.target), "new")
+        for rel in ["", "Contents", "Contents/Resources", "Contents/Resources/marker", "Contents/MacOS/t"] {
+            XCTAssertEqual(try acl(l.target.appendingPathComponent(rel).path), "", rel)
+        }
+        let (rc, out) = try run("/usr/bin/codesign", ["--verify", "--deep", "--strict", l.target.path])
+        XCTAssertEqual(rc, 0, out)
+    }
+
+    /// 改属主、权限、ACL、文件标志都在核签名之前：包里指向包外的链接一个都不跟过去，
+    /// 包外文件和目录的属主、权限、ACL 原样留着（这样的包核签名不过，不换）
+    func testNormalizingDoesNotFollowLinksOutOfTheBundle() throws {
+        let l = try layout()
+        try makeApp(l.target, marker: "old")
+        try makeApp(l.staged, marker: "new")
+        let fm = FileManager.default
+        let outside = l.home.appendingPathComponent("outside.txt")
+        let outDir = l.home.appendingPathComponent("outside-dir")
+        try fm.createDirectory(at: outDir, withIntermediateDirectories: true)
+        let inner = outDir.appendingPathComponent("inner.txt")
+        for f in [outside, inner] { try "x".write(to: f, atomically: true, encoding: .utf8) }
+        try addACL(outside.path)
+        try fm.setAttributes([.posixPermissions: 0o666], ofItemAtPath: outside.path)
+        try fm.setAttributes([.posixPermissions: 0o666], ofItemAtPath: inner.path)
+        try fm.setAttributes([.posixPermissions: 0o777], ofItemAtPath: outDir.path)
+        func stat(_ u: URL) throws -> (owner: UInt32, mode: Int) {
+            let a = try fm.attributesOfItem(atPath: u.path)
+            return (try XCTUnwrap(a[.ownerAccountID] as? NSNumber).uint32Value, try XCTUnwrap(a[.posixPermissions] as? Int))
+        }
+        let before = try [outside, outDir, inner].map(stat)
+        try fm.createSymbolicLink(atPath: l.staged.appendingPathComponent("Contents/Resources/link").path, withDestinationPath: outside.path)
+        try fm.createSymbolicLink(atPath: l.staged.appendingPathComponent("Contents/Resources/dirlink").path, withDestinationPath: outDir.path)
+        let r = try swap(l, current: l.target, admin: true)
+        XCTAssertFalse(r.ok)
+        XCTAssertEqual(marker(l.target), "old")
+        XCTAssertTrue(try acl(outside.path).contains("allow write"))
+        let after = try [outside, outDir, inner].map(stat)
+        XCTAssertEqual(after.map(\.mode), [0o666, 0o777, 0o666])
+        XCTAssertEqual(after.map(\.owner), before.map(\.owner))
+    }
+
+    /// 暂存那份里的文件带 uchg / uappnd：换上去以后没有这些标志，root 的临时目录也删掉了（以前 chown 失败、临时目录删不掉）
+    func testRootPathClearsFileFlags() throws {
+        let l = try layout()
+        try makeApp(l.target, marker: "old")
+        try makeApp(l.staged, marker: "new")
+        let fm = FileManager.default
+        let marked = l.staged.appendingPathComponent("Contents/Resources/marker").path
+        let exe = l.staged.appendingPathComponent("Contents/MacOS/t").path
+        try fm.setAttributes([.immutable: true], ofItemAtPath: marked)
+        try fm.setAttributes([.appendOnly: true], ofItemAtPath: exe)
+        defer {   // 换不成时暂存那份还带着标志，删不掉测试目录
+            for p in [marked, exe, l.target.appendingPathComponent("Contents/Resources/marker").path, l.target.appendingPathComponent("Contents/MacOS/t").path] {
+                try? fm.setAttributes([.immutable: false, .appendOnly: false], ofItemAtPath: p)
+            }
+        }
+        XCTAssertEqual(try fm.attributesOfItem(atPath: marked)[.immutable] as? Bool, true)
+        let r = try swap(l, current: l.target, admin: true)
+        XCTAssertTrue(r.ok, r.why + "\n" + r.log)
+        XCTAssertEqual(marker(l.target), "new")
+        for rel in ["Contents/Resources/marker", "Contents/MacOS/t"] {
+            let a = try fm.attributesOfItem(atPath: l.target.appendingPathComponent(rel).path)
+            XCTAssertEqual(a[.immutable] as? Bool, false, rel)
+            XCTAssertEqual(a[.appendOnly] as? Bool, false, rel)
+        }
+        let work = try XCTUnwrap(workDir(r.log))
+        XCTAssertFalse(fm.fileExists(atPath: work), work)
+        XCTAssertFalse(fm.fileExists(atPath: work + "-keep"))
+    }
+
+    /// 装着的那份不是自己的（经授权框换上的归 root，或别的账户装的）：要授权。以用户身份挪不动别人的目录
+    func testNeedsAdminWhenTheInstalledCopyIsNotOurs() throws {
+        let l = try layout()
+        XCTAssertFalse(Installer.needsAdmin(target: l.target, current: nil, uid: getuid()))          // 还没装：目录写得进去就不用
+        try makeApp(l.target, marker: "old")
+        XCTAssertFalse(Installer.needsAdmin(target: l.target, current: l.target, uid: getuid()))     // 自己的
+        XCTAssertTrue(Installer.needsAdmin(target: l.target, current: l.target, uid: getuid() + 1))  // 别人的（root 的同理）
+        XCTAssertTrue(Installer.needsAdmin(target: URL(fileURLWithPath: "/System/螺壳.app"), current: nil, uid: getuid()))   // 目录写不进去
+    }
+
+    /// 目标位置上还没有，实际装着的是旧名字的那份：看的是它归谁、它所在的目录能不能写
+    func testNeedsAdminLooksAtTheInstalledCopyUnderItsOldName() throws {
+        let l = try layout()
+        let other = dir.appendingPathComponent("Other")
+        try FileManager.default.createDirectory(at: other, withIntermediateDirectories: true)
+        let old = other.appendingPathComponent("螺壳主控.app")
+        try makeApp(old, marker: "old")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: l.target.path))
+        XCTAssertFalse(Installer.needsAdmin(target: l.target, current: old, uid: getuid()))          // 自己的
+        XCTAssertTrue(Installer.needsAdmin(target: l.target, current: old, uid: getuid() + 1))       // 别人的
+        XCTAssertTrue(Installer.needsAdmin(target: l.target, current: URL(fileURLWithPath: "/System/螺壳主控.app"), uid: getuid()))   // 所在目录写不进去
     }
 
     /// 攻击：核过签名以后、等旧版退出的时候，同账户的程序把暂存的新版换成自己的程序。root 那一侧核拷过来的那份，不换

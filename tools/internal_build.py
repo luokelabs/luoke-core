@@ -755,7 +755,9 @@ def eval_paths(spec: dict) -> Optional[list]:
 def reusable(old: dict, spec: dict, src: dict, pins: dict, recipe, ignore_hub: bool = False) -> bool:
     """上一版的这条证据能不能沿用（审查 2026-10-17：之前只看配件自己的 diff 和配方里的引擎版本字符串）。全部满足才沿用：
     配件自己没改（评测表这一条写了 paths 的只看这些路径）、主控代码没改（luoke_core/）、实际跑的引擎是配方的版本、评测表这一条没改、题集和语料的哈希没变、依赖的配件没改。
-    缺任何一个字段（旧版证据）就不沿用。"""
+    缺任何一个字段（旧版证据）就不沿用。读不到评测结果记的没过（release.unreadable）也不沿用、续跑时重评：那是评测程序的毛病，不是这一版的结果。"""
+    if release.unreadable(old):
+        return False
     acc = spec["accessory"]
     if not unchanged_since(src[acc], old.get("accessory_commit"), pins[acc], eval_paths(spec)):
         return False

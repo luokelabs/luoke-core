@@ -66,8 +66,10 @@ enum Updater {
     enum Failure: Error, LocalizedError {
         case notFound(String), unreachable(String), unverified(String), other(String)
         case keep(String)      // 只在内部用：没装上，但下好的安装包留着（换包脚本没起来、授权取消了）
+        case needsMacOS(tag: String, macOS: String)     // 最新一版要的系统比这台 Mac 新：不下载、不换包（换上以后系统拒开，螺壳没机会说明）
         var errorDescription: String? {
             switch self {
+            case .needsMacOS(let tag, let v): return "\(tag) 需要 macOS \(v) 或更新，这台 Mac 是 macOS \(Updater.thisMacOS)"
             case .notFound(let s): return "服务器上找不到 \(s)（这个版本可能还没发布完，或者地址失效了）"
             case .unreachable(let s): return "更新服务器没有答复（\(s.trimmingCharacters(in: CharacterSet(charactersIn: "。.")))）"
             case .unverified(let s): return "下下来了但核对不过：\(s)。没有装，原来的螺壳不动"
@@ -140,12 +142,27 @@ enum Updater {
             guard let d = data else { throw failure ?? Failure.notFound("release.json") }
             guard let m = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { throw Failure.other("\(tag) 的发布清单看不懂") }
             if ((m["built_at"] as? NSNumber)?.doubleValue ?? 0) > myBuiltAt {
+                if let need = requiredMacOS(m), !Manifests.macOSSatisfies(need) { throw Failure.needsMacOS(tag: tag, macOS: need) }
                 return Found(tag: tag, page: r["html_url"] as? String ?? "https://github.com/\(repo)/releases/tag/\(tag)", manifest: m,
                              notes: r["body"] as? String ?? "", mirrored: fromMirror)
             }
             return nil            // 最新的一版不比自己新：不往更旧的找
         }
         return nil
+    }
+
+    /// 这一版要的最低 macOS：清单里螺壳本身（hub）和引擎包（engine）的 min_macos 取高的。引擎跟着螺壳一起换，
+    /// 它要的系统不够，升上去也用不了。都没写就 nil（不拦）
+    static func requiredMacOS(_ manifest: [String: Any]) -> String? {
+        let items = manifest["items"] as? [String: Any] ?? [:]
+        let vs = ["hub", "engine"].compactMap { ((items[$0] as? [String: Any])?["min_macos"] as? String).flatMap { $0.isEmpty ? nil : $0 } }
+        let num = { (s: String) in s.split(separator: ".").map { Int($0) ?? 0 } }
+        return vs.max { num($0).lexicographicallyPrecedes(num($1)) }
+    }
+
+    static var thisMacOS: String {
+        let v = ProcessInfo.processInfo.operatingSystemVersion
+        return v.patchVersion > 0 ? "\(v.majorVersion).\(v.minorVersion).\(v.patchVersion)" : "\(v.majorVersion).\(v.minorVersion)"
     }
 
     /// 某一版发布页的「更新说明」（升级页用，brand #15：和检查更新窗口用同一份）。会阻塞（网络），连不上就空
@@ -342,7 +359,9 @@ enum Updater {
         DispatchQueue.global().async {
             // 查成了才记"今天查过"（luoke-top 10-23 核查：之前先记再查，离线那一刻查不成就要等 24 小时）；没查成，下一个钟头再试
             let r: Found?
-            do { r = try check() } catch { return }
+            do { r = try check() }
+            catch Failure.needsMacOS { r = nil }        // 查成了，只是这台 Mac 升不了：不提示，照常记"查过"
+            catch { return }
             UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: lastKey)
             if let f = r { DispatchQueue.main.async { found(f) } }
         }
@@ -485,7 +504,8 @@ final class UpdateModel: ObservableObject {
                 case .success(let f?): self.found = f; self.phase = .found
                 case .success(nil): self.phase = .latest
                 case .failure(let e):
-                    if case Updater.Failure.unreachable = e { self.phase = .offline(e.localizedDescription) }
+                    if case Updater.Failure.needsMacOS = e { self.phase = .info(e.localizedDescription) }
+                    else if case Updater.Failure.unreachable = e { self.phase = .offline(e.localizedDescription) }
                     else { self.phase = .checkFailed(e.localizedDescription) }
                 }
             }

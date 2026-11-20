@@ -83,7 +83,7 @@ enum Spawn {
         posix_spawn_file_actions_init(&actions)
         defer { posix_spawn_file_actions_destroy(&actions) }
         for (from, to) in fds { posix_spawn_file_actions_adddup2(&actions, from, to) }
-        posix_spawn_file_actions_addchdir_np(&actions, cwd)
+        posix_spawn_file_actions_addchdir(&actions, cwd)
         var attr: posix_spawnattr_t?
         posix_spawnattr_init(&attr)
         defer { posix_spawnattr_destroy(&attr) }

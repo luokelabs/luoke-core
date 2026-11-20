@@ -244,7 +244,20 @@ enum Installer {
         if moved { LoginItem.repoint() }
     }
     /// 换到 target 要不要管理员授权
-    static var needsAdmin: Bool { !writable(target.deletingLastPathComponent()) }
+    static var needsAdmin: Bool { needsAdmin(target: target, current: installed, uid: getuid()) }
+    /// 目录写不进去，或者要挪的那几份有不是自己的：标准账户经授权框换上的归 root，别的账户装的归那个账户。
+    /// 不是自己的目录挪不到别的目录下（要改它的 ..），以用户身份换包会停在「搬不动已装的螺壳」。
+    /// 要挪的是目标位置上那份和实际装着的那份（current，可能是旧名字、在别的目录）
+    static func needsAdmin(target: URL, current: URL?, uid: uid_t) -> Bool {
+        for dir in Set([target, current].compactMap { $0?.deletingLastPathComponent().standardizedFileURL }) where !writable(dir) {
+            return true
+        }
+        for app in [target, current].compactMap({ $0 }) {
+            guard let owner = (try? FileManager.default.attributesOfItem(atPath: app.path))?[.ownerAccountID] as? NSNumber else { continue }
+            if owner.uint32Value != uid { return true }
+        }
+        return false
+    }
     /// 两处的「螺壳」都被别的应用占着（bundle id 不一样）：不覆盖、不认
     static var targetTaken: Bool { FileManager.default.fileExists(atPath: target.path) && !isOurs(target) }
     static var takenMessage: String {
