@@ -5479,6 +5479,13 @@ class ReleaseToolsTest(unittest.TestCase):
                 self.assertIn(part, script)
             self.assertEqual(st["running"]["pins"], pins)
             self.assertEqual(ready, ["a" * 40])            # 钉住的公开 core 认不认得候选版
+            # 11-24：有出好了的内部版（有台账）就拿它比，不拿上一个 beta；报告也比同一版
+            os.makedirs(os.path.join(tmp, "releases", "internal-1124-4"))
+            open(os.path.join(tmp, "releases", "internal-1124-4", "support.json"), "w").write("{}")
+            st2 = {"history": [{"tag": "internal-1124-4", "ok": True}, {"tag": "beta2-rc1", "ok": True}]}
+            d.start_build({"tag": "beta2-rc2", "by": "lab-bot"}, st2)
+            self.assertIn("'--prev' 'internal-1124-4'", popen[-1][2])
+            self.assertEqual(st2["running"]["prev"], "internal-1124-4")
             with self.assertRaisesRegex(RuntimeError, "rc 后面的号加一"):
                 d.start_build({"tag": "beta2-rc1"}, {"history": [{"tag": "beta2-rc1", "ok": True}]})
             os.makedirs(os.path.join(serve, "beta2-rc1"))     # 出过的记录被挤掉了，挂着的目录还在：也算出过
@@ -5613,6 +5620,20 @@ class ReleaseToolsTest(unittest.TestCase):
             os.makedirs(os.path.join(d.CORE, "releases", "beta1", "evidence"))
             open(os.path.join(d.CORE, "releases", "beta1", "support.json"), "w").write("{}")
             self.assertEqual(d.previous_beta("beta1.1"), "beta1")
+
+    def test_previous_internal_is_the_last_published_internal_with_a_ledger(self):
+        """候选版比的内部版（11-24）：出版历史里最近一个出好了的、有支持台账的内部版；没出成的、没台账的、beta 和候选版都跳过。"""
+        d = self._tool("release_daemon")
+        with unittest.mock.patch.object(d, "CORE", tempfile.mkdtemp()):
+            for t in ("internal-1123", "internal-1124-3", "beta2-rc3"):
+                os.makedirs(os.path.join(d.CORE, "releases", t))
+                open(os.path.join(d.CORE, "releases", t, "support.json"), "w").write("{}")
+            os.makedirs(os.path.join(d.CORE, "releases", "internal-1124-4"))      # 没有台账
+            hist = [{"tag": "internal-1123", "ok": True}, {"tag": "beta2-rc3", "ok": True},
+                    {"tag": "internal-1124-3", "ok": False}, {"tag": "internal-1124-4", "ok": True}]
+            self.assertEqual(d.previous_internal(hist), "internal-1123")
+            self.assertIsNone(d.previous_internal([]))
+            self.assertIsNone(d.previous_internal(None))
 
     def test_listing_copied_without_self_reported_size_or_tier(self):
         r = self._tool("release")

@@ -268,6 +268,17 @@ def previous_beta(tag: str):
     return names[-1] if names else None
 
 
+def previous_internal(hist: list):
+    """最近一版出好了的内部版（出版历史里 ok、有支持台账）；没有就 None。
+    候选版拿它比（11-24）：和上一个 beta 比的话，beta 以后加的任务都算新任务，要在这一版里连过 3 遍才开，
+    候选版又不做发布后的复测（只评 1 遍），这些任务一档都开不了。内部版这条线的台账里，它们已经连过 3 遍开着。"""
+    for h in reversed(hist or []):
+        t = h.get("tag") or ""
+        if h.get("ok") and TAG.match(t) and os.path.exists(os.path.join(CORE, "releases", t, "support.json")):
+            return t
+    return None
+
+
 def pins_from_top(tag: str) -> dict:
     """顶层仓库标签里各子模块的提交（经 GitHub，出版机器上没有顶层仓库的克隆）。只取流水线管的几个仓库。"""
     top = os.environ.get("LUOKE_RELEASE_TOP", "luokelabs/luoke")
@@ -449,13 +460,15 @@ def start_build(req: dict, st: dict) -> None:
         tag = last["tag"] if resume else next_tag(time.strftime("%m%d"), st.get("history", []))
     # 出版克隆的工作区放到钉住的提交上（internal_build 的 freeze 要求正好在那个提交、没有改动）；流水线自己不跟着切
     sh(["git", "-C", CORE, "checkout", "-q", "--detach", pins["luoke-core"]])
+    prev = None
     cmd = [PY, "-B", "tools/internal_build.py", "--tag", tag, "--build-mail"] + [f"--pin={k}={v}" for k, v in pins.items()]
     if BETA.match(tag) or cand:
-        # beta 和它的候选版：一律全评（internal_build 对非内部版不走金丝雀）；差异对比拿上一个有台账的 beta（beta1.1 比 beta1），
-        # 没有就照默认拿最近一版。候选版不算 beta（previous_beta 只认 betaN[.M]），rc2 也和上一个 beta 比，不和 rc1 比
-        prev_beta = previous_beta(tag)
-        if prev_beta:
-            cmd += ["--prev", prev_beta]
+        # beta 和它的候选版：一律全评（internal_build 对非内部版不走金丝雀）。beta 的差异对比拿上一个有台账的 beta（beta1.1 比 beta1）；
+        # 候选版拿最近一版出好了的内部版（11-24，见 previous_internal），没有内部版才拿上一个 beta；都没有就照默认拿最近一版。
+        # 候选版不和上一个候选版比（rc2 不和 rc1 比）
+        prev = (previous_internal(st.get("history")) if cand else None) or previous_beta(tag)
+        if prev:
+            cmd += ["--prev", prev]
     if cand:
         cmd += ["--url-base", url_base]     # 清单里配件包、引擎包、主控的地址都写成局域网的；隐含不上传
     if req.get("accept"):
@@ -471,7 +484,8 @@ def start_build(req: dict, st: dict) -> None:
     script = " ".join(_q(x) for x in cmd) + f" > {_q(out)} 2>&1; echo $? > {_q(rc)}"
     p = subprocess.Popen(["/bin/sh", "-c", script], cwd=CORE, start_new_session=True, env=dict(os.environ, LC_ALL="en_US.UTF-8"),
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    st["running"] = {"tag": tag, "pid": p.pid, "rc": rc, "pins": pins, "req": req, "started": time.time(), "resume": resume}
+    st["running"] = {"tag": tag, "pid": p.pid, "rc": rc, "pins": pins, "req": req, "started": time.time(), "resume": resume,
+                     **({"prev": prev} if prev else {})}
     log(f"开始 {tag}（{'续跑' if resume else '新的一版'}，{req.get('by', '定时')}）pid {p.pid}")
     reply(f"开始出 **{tag}**" + ("（接着上次停下的地方）" if resume else "") + "：" +
           "、".join(f"{k} {v[:7]}" for k, v in pins.items()) + ("。空跑：只出不传。" if os.environ.get("LUOKE_RELEASE_DRYRUN") == "1" else "。")
@@ -530,8 +544,9 @@ def finish_build(st: dict) -> None:
     if run.get("preempted"):
         rc = 0      # 版已经发了，只是复测被打断：算成功，复测下一版接着补
     hist = st.setdefault("history", [])
-    # 流程报告和出版时比的是同一版：beta 和它的候选版比上一个 beta（start_build 的 --prev），内部版比上一个出好了的
-    prev = (previous_beta(tag) if BETA.match(tag) or RC.match(tag) else None) or next((h["tag"] for h in reversed(hist) if h.get("ok")), None)
+    # 流程报告和出版时比的是同一版：beta 和它的候选版用 start_build 记下的 --prev，内部版比上一个出好了的
+    prev = (run.get("prev") or (previous_beta(tag) if BETA.match(tag) or RC.match(tag) else None)
+            or next((h["tag"] for h in reversed(hist) if h.get("ok")), None))
     subprocess.run([PY, "-B", "tools/release_report.py", tag] + (["--prev", prev] if prev else []), cwd=CORE, capture_output=True)
     summ = subprocess.run([PY, "-B", "tools/release_report.py", tag, "--summary"] + (["--prev", prev] if prev else []),
                           cwd=CORE, capture_output=True, text=True).stdout.strip()
