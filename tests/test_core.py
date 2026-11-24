@@ -291,6 +291,19 @@ class DispatchTest(unittest.TestCase):
         self.assertFalse(d.interactive())      # 续期不算
         d.low_power = True
         self.assertEqual(d.warmup("luoke-mail.draft", None), {"accepted": False, "code": "deferred"})
+        d.pause_on_low_power = False                # 设置里关了「低电量模式时暂停」：照常预热
+        self.assertTrue(d.warmup("luoke-mail.draft", None)["accepted"])
+
+    def test_low_power_setting(self):
+        """低电量模式默认让后台暂停；关掉「低电量模式时暂停」后只看「用电池时」"""
+        d = self.disp(self.tier32)
+        d.on_ac, d.low_power = False, True
+        d.battery_mode = "normal"
+        self.assertEqual(d.background_state(), ("paused", ["low_power"]))
+        d.pause_on_low_power = False
+        self.assertEqual(d.background_state(), ("running", []))
+        d.battery_mode = "light"
+        self.assertEqual(d.background_state(), ("paused", ["battery"]))
 
 
 class ProxyTest(unittest.TestCase):
@@ -1534,7 +1547,7 @@ class HubUnitTest(unittest.TestCase):
         """beta 2 安全审查 M4：本体没了、主控的父进程变成 1 时，之前谁连上来都算本体。同账户的程序先结束本体、
         赶在主控（--parent-watch）退出前连上来，就能拿 /endpoint 的密钥。现在父进程是 1 时谁都不算；实验室照旧放行"""
         from luoke_core import hub as hubmod
-        h, d = self.local_allow_hub("internal-1113")
+        h, d = self.trial_hub("internal-1113")
         h.recipe.verified["luoke-core"] = {"versions": ["0.1.0"]}
         hd = object.__new__(hubmod.Handler)
         hd.hub = h
@@ -1894,6 +1907,20 @@ class HubUnitTest(unittest.TestCase):
         self.assertIsNone(h.smoke_failed)
         h2 = Hub(Recipe.load(RECIPE), d, d, lab=True, accessory_dirs=[d], mem_gb=32, smoke=False)
         self.assertEqual(h2.dispatcher.battery_mode, "no_large_model")     # 落盘的新值开机就用
+
+    def test_pause_on_low_power_setting(self):
+        """低电量模式时暂停：默认开；改了落盘、开机就用；只收 true / false"""
+        from luoke_core.hub import BadRequest, Hub
+        d = tempfile.mkdtemp()
+        h = Hub(Recipe.load(RECIPE), d, d, lab=True, accessory_dirs=[d], mem_gb=32, smoke=False)
+        self.assertTrue(h.settings["pause_on_low_power"])
+        self.assertTrue(h.dispatcher.pause_on_low_power)
+        h.update_settings({"pause_on_low_power": False})
+        self.assertFalse(h.dispatcher.pause_on_low_power)
+        with self.assertRaises(BadRequest):
+            h.update_settings({"pause_on_low_power": "no"})
+        h2 = Hub(Recipe.load(RECIPE), d, d, lab=True, accessory_dirs=[d], mem_gb=32, smoke=False)
+        self.assertFalse(h2.dispatcher.pause_on_low_power)
 
     def test_user_chosen_tier(self):
         """省空间（issue luoke-core#2）：大内存机器可以选更低的档；设置里存的档开机就用；不能往上选。"""
@@ -3997,7 +4024,7 @@ class ReleaseToolsTest(unittest.TestCase):
 
     def test_hello_held_until_the_hold_is_removed(self):
         """hello 在评测表里三档都 hold 着：上一版发布后补满 3 遍都过、这一版也过了，照样关着；删掉 hold 才照规矩开。
-        hold 着照旧在发布前评（不挪到发布后），但不复测。"""
+        hold 着的档不评（11-20：beta2-rc3 的 hello 在 16 GB 档白占 1 小时），也不复测；台账照「这一版没评、hold 着」关着。"""
         ib = self._tool("internal_build")
         sup = self._tool("support")
         evals = self.rel.load_evals()
@@ -4014,7 +4041,16 @@ class ReleaseToolsTest(unittest.TestCase):
         for state in (None, "off"):
             self.assertEqual(sup.needs_repeat(state, True, [True]), 0)
             self.assertEqual(sup.decide(state, True, [True])[0], "off")
-        self.assertFalse(ib.closed_cant_open(task, "16", prev, evals))                    # 照旧在发布前评一遍
+        self.assertFalse(ib.closed_cant_open(task, "16", prev, evals))                    # 不算"挪到发布后"：hold 着的直接不评
+        template = os.path.join(ROOT, "recipes", "dev.json")
+        src = {"luoke-agent": "/a", "luoke-mail": "/m"}
+        only = [task, "luoke-mail.triage"]
+        with unittest.mock.patch.object(ib, "ROOT", tempfile.mkdtemp()), unittest.mock.patch.object(ib, "log", lambda m: None):
+            run = ib.plan_eval("test-x", {}, src, None, template, list(holds), evals, only=only)[0]
+            self.assertEqual({t: ts for t, ts in run.items()}, {t: ["luoke-mail.triage"] for t in holds})
+            unheld = dict(evals, **{task: {k: v for k, v in evals[task].items() if k != "held_unsupported"}})
+            run = ib.plan_eval("test-x", {}, src, None, template, list(holds), unheld, only=only)[0]
+            self.assertEqual(sorted(t for t, ts in run.items() if task in ts), sorted(holds))   # 删掉 hold 就照常评
 
     def test_transcribe_and_tidy_eval_summaries(self):
         """luoke-ime 的转写评测（evals/transcribe）：总分是字准确率，硬性条目由评测程序判（按住不说话不出字），延迟看终稿；每档各评一遍"""
@@ -4323,7 +4359,7 @@ class ReleaseToolsTest(unittest.TestCase):
 
     def test_closed_cells_that_cannot_open_move_after_publish(self):
         """10-23：上一版关着、发布后没补满 3 遍的格子，这一版评了也照"关"发，挪到发布后评；
-        补满了的（这一版过了就开）、开着的、hold 着的、新任务都照旧在发布前评。"""
+        补满了的（这一版过了就开）、开着的、新任务都照旧在发布前评；hold 着的不算这一类（11-20 起直接不评，见 hello 那条）。"""
         ib = self._tool("internal_build")
         evals = {"t": {"held_unsupported": {"32": "x"}}}
         led = {"t": {"16": {"state": "off", "runs": [True]}, "32": {"state": "off", "runs": []},
@@ -6559,6 +6595,97 @@ class InstallTest(unittest.TestCase):
             with self.assertRaises(download.DownloadError):
                 download.install_app_zip(z, dest, expect_bundle_id="ai.luoke.fake", register=False)
         self.assertTrue(os.path.isdir(os.path.join(dest, "假配件.app", "Contents")))     # 旧的还在
+
+    def fake_signed_app(self, d, ticket=True):
+        """有 Info.plist、可选钉着票据的空壳 .app，给 verify_app 的假 codesign 用"""
+        app = os.path.join(d, "假配件.app")
+        os.makedirs(os.path.join(app, "Contents"))
+        with open(os.path.join(app, "Contents", "Info.plist"), "wb") as f:
+            plistlib.dump({"CFBundleIdentifier": "ai.luoke.fake"}, f)
+        if ticket:
+            with open(os.path.join(app, "Contents", "CodeResources"), "wb") as f:
+                f.write(b"ticket")
+        return app
+
+    def fake_codesign(self, calls, notarized=True):
+        """记下每条命令；codesign 都答过，-dv 报我们的 Team ID，-R 那条按 notarized 答"""
+        from luoke_core import download
+
+        def run(cmd, **kw):
+            calls.append(list(cmd))
+            if "-dv" in cmd:
+                return subprocess.CompletedProcess(cmd, 0, "", f"TeamIdentifier={download.TEAM_ID}\n")
+            if any(a.startswith("-R=") for a in cmd):
+                return subprocess.CompletedProcess(cmd, 0 if notarized else 3, "", "")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        return run
+
+    def test_verify_app_checks_notarization_without_xcrun(self):
+        """没装命令行工具的 Mac 上 /usr/bin/xcrun 是个壳：调它会失败、弹安装框。核公证只用 codesign（#240 补测）"""
+        from luoke_core import download
+        app = self.fake_signed_app(tempfile.mkdtemp())
+        calls = []
+        with unittest.mock.patch.dict(os.environ, {"LUOKE_ALLOW_UNSIGNED": "0"}), \
+                unittest.mock.patch.object(download.subprocess, "run", side_effect=self.fake_codesign(calls)):
+            download.verify_app(app, "ai.luoke.fake")
+        self.assertTrue(calls)
+        self.assertTrue(all(c[0] == "/usr/bin/codesign" for c in calls), calls)
+        self.assertFalse(any("xcrun" in a or "stapler" in a for c in calls for a in c))
+        req = [a for c in calls for a in c if a.startswith("-R=")]
+        self.assertEqual(req, ["-R=" + download.NOTARIZED_REQUIREMENT])
+        self.assertIn("notarized", req[0])
+        self.assertIn(f'certificate leaf[subject.OU] = "{download.TEAM_ID}"', req[0])
+        self.assertIn("anchor apple generic", req[0])
+        self.assertNotIn("--check-notarization", [a for c in calls for a in c])      # 不上网
+
+    def test_verify_app_refuses_without_stapled_ticket(self):
+        """票据没钉在包上的不装：哪怕系统缓存里有它的票据（没网时装不上）"""
+        from luoke_core import download
+        app = self.fake_signed_app(tempfile.mkdtemp(), ticket=False)
+        calls = []
+        with unittest.mock.patch.dict(os.environ, {"LUOKE_ALLOW_UNSIGNED": "0"}), \
+                unittest.mock.patch.object(download.subprocess, "run", side_effect=self.fake_codesign(calls)):
+            with self.assertRaisesRegex(download.DownloadError, "没有公证票据"):
+                download.verify_app(app, "ai.luoke.fake")
+
+    def test_verify_app_refuses_when_codesign_says_not_notarized(self):
+        from luoke_core import download
+        app = self.fake_signed_app(tempfile.mkdtemp())
+        calls = []
+        with unittest.mock.patch.dict(os.environ, {"LUOKE_ALLOW_UNSIGNED": "0"}), \
+                unittest.mock.patch.object(download.subprocess, "run", side_effect=self.fake_codesign(calls, notarized=False)):
+            with self.assertRaisesRegex(download.DownloadError, "没有公证票据"):
+                download.verify_app(app, "ai.luoke.fake")
+
+    def test_stapled_ticket_is_a_real_file(self):
+        from luoke_core import download
+        d = tempfile.mkdtemp()
+        app = self.fake_signed_app(d, ticket=False)
+        self.assertFalse(download.stapled_ticket(app))
+        open(os.path.join(app, "Contents", "CodeResources"), "wb").close()
+        self.assertFalse(download.stapled_ticket(app))                 # 空文件不算
+        os.remove(os.path.join(app, "Contents", "CodeResources"))
+        with open(os.path.join(d, "elsewhere"), "wb") as f:
+            f.write(b"ticket")
+        os.symlink(os.path.join(d, "elsewhere"), os.path.join(app, "Contents", "CodeResources"))
+        self.assertFalse(download.stapled_ticket(app))                 # 链接不算
+
+    @unittest.skipUnless(sys.platform == "darwin", "codesign 只在 macOS 上有")
+    def test_adhoc_signed_app_is_not_notarized(self):
+        """真跑 codesign：ad-hoc 重签的包过不了公证要求，也装不上"""
+        from luoke_core import download
+        d = tempfile.mkdtemp()
+        app = os.path.join(d, "假配件.app")
+        os.makedirs(os.path.join(app, "Contents", "MacOS"))
+        with open(os.path.join(app, "Contents", "Info.plist"), "wb") as f:
+            plistlib.dump({"CFBundleIdentifier": "ai.luoke.fake", "CFBundleExecutable": "fake"}, f)
+        shutil.copy("/usr/bin/true", os.path.join(app, "Contents", "MacOS", "fake"))
+        r = subprocess.run(["/usr/bin/codesign", "-s", "-", "-f", "--deep", app], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(download.notarized(app))
+        with unittest.mock.patch.dict(os.environ, {"LUOKE_ALLOW_UNSIGNED": "0"}):
+            with self.assertRaises(download.DownloadError):
+                download.verify_app(app, "ai.luoke.fake")
 
     def test_install_app_zip_backup_and_rename(self):
         """替换：旧版挪进 backup_dir；旧 .app 改过名字也一起挪走，不留两份。"""

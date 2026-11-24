@@ -220,9 +220,16 @@ enum Updater {
         throw failure
     }
 
+    /// 核安装包（DMG）是我们签的、公证过：苹果的证书链、我们的 Team ID、notarized。只用系统自带的 codesign：
+    /// /usr/bin/xcrun 在没装命令行工具的 Mac 上是个壳，调它会失败，还会弹「安装命令行开发者工具」的框。
+    /// 不加 --check-notarization 时不上网，只认钉在包上的票据和系统已经验过的票据。-R 的值以 = 开头才当要求文本
+    static let notarizationCheck = (tool: "/usr/bin/codesign", arguments: { (path: String) -> [String] in
+        ["--verify", "--strict", "-R=anchor apple generic and certificate leaf[subject.OU] = \"\(teamID)\" and notarized", path]
+    })
+
     @discardableResult
     private static func run(_ cmd: String, _ args: [String]) -> (Int32, String) {
-        // 升级这条路照旧算螺壳（Spawn.swift）：只跑写死的 hdiutil、codesign、stapler，换包要螺壳的身份，出错了用户就收不到修复
+        // 升级这条路照旧算螺壳（Spawn.swift）：只跑写死的 hdiutil、codesign，换包要螺壳的身份，出错了用户就收不到修复
         let p = Spawn.process(cmd, args, access: .luoke)
         let pipe = Pipe()
         p.standardOutput = pipe
@@ -252,7 +259,7 @@ enum Updater {
     /// notarized = false 只给开发版的测试入口（--upgrade-from-dmg）：不核公证和团队签名
     private static func installChecked(dmg: URL, to tag: String, notarized: Bool, verified: @escaping () -> Void,
                                        confirm: () -> Bool) throws {
-        guard !notarized || run("/usr/bin/xcrun", ["stapler", "validate", dmg.path]).0 == 0 else { throw Failure.unverified("安装包没通过苹果的安全检查") }
+        guard !notarized || run(notarizationCheck.tool, notarizationCheck.arguments(dmg.path)).0 == 0 else { throw Failure.unverified("安装包没通过苹果的安全检查") }
         let (rc, out) = run("/usr/bin/hdiutil", ["attach", "-nobrowse", "-readonly", "-plist", dmg.path])
         guard rc == 0, let plist = try? PropertyListSerialization.propertyList(from: Data(out.utf8), format: nil) as? [String: Any],
               let mount = ((plist["system-entities"] as? [[String: Any]]) ?? []).compactMap({ $0["mount-point"] as? String }).first

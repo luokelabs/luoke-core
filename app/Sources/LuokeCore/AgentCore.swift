@@ -58,7 +58,7 @@ struct CoreNotice: Equatable {
                               detail: "正在用电池，后台的整理先不做，免得费电；接上电源就接着做。想在电池上也做，在「设置 · 通用」的「用电池时」里选「照常运行」。")
         }
         if reasons.contains("low_power") {
-            return CoreNotice(kind: .paused, text: "已暂停", detail: "这台 Mac 开着低电量模式，后台的整理先不做；关掉低电量模式就接着做。",
+            return CoreNotice(kind: .paused, text: "已暂停", detail: "这台 Mac 开着低电量模式，后台的整理先不做；关掉低电量模式就接着做。想在低电量模式下也做，在「设置 · 通用」里关掉「低电量模式时暂停」。",
                               actionLabel: "打开电池设置", action: .batterySettings)
         }
         if reasons.contains("thermal") {
@@ -850,7 +850,7 @@ final class AgentCore: NSObject, NSWindowDelegate, WindowHost {
                                   latestVersion: hub.updateFound?.tag, lastChecked: last > 0 ? Date(timeIntervalSince1970: last) : nil,
                                   powerMode: HostPowerMode(rawValue: st?.powerMode ?? "") ?? .balanced,
                                   batteryMode: HostBatteryMode(rawValue: st?.batteryMode ?? "") ?? .light,
-                                  autoCheck: Updater.autoEnabled)
+                                  autoCheck: Updater.autoEnabled, pauseOnLowPower: st?.pauseOnLowPower)
 
         let recipe = Manifests.recipe() ?? [:]
         let choices = Manifests.tierChoices(memGB: Diagnostics.memGB())
@@ -922,6 +922,7 @@ final class AgentCore: NSObject, NSWindowDelegate, WindowHost {
             settingsChanged()
         case .powerMode(let m): hub.setPowerMode(m.rawValue)
         case .batteryMode(let m): hub.setBatteryMode(m.rawValue)
+        case .pauseOnLowPower(let on): hub.setPauseOnLowPower(on)
         case .tier(let t): hub.setTier(t)
         case .localAPI(let on): endpoint { _ = try $0.request("PUT", "/settings", body: ["endpoint_enabled": on]) }
         case .autoCheckUpdates(let on):        // 设置 · 通用「每天自动检查更新」（luoke-agent 11-16）

@@ -104,6 +104,8 @@ struct HubStatus {
     let backgroundOnBattery: Bool
     /// 用电池时：normal 照常运行、light 少干活、no_large_model 不运行大模型（旧主控只给 background_on_battery）
     let batteryMode: String
+    /// 低电量模式时暂停后台（旧主控不给是 nil）
+    let pauseOnLowPower: Bool?
     let onAC: Bool
     let breaker: String?
     let memoryTier: String?
@@ -156,6 +158,7 @@ struct HubStatus {
         powerMode = st["power_mode"] as? String ?? "balanced"
         backgroundOnBattery = st["background_on_battery"] as? Bool ?? false
         batteryMode = st["battery_mode"] as? String ?? (backgroundOnBattery ? "normal" : "light")
+        pauseOnLowPower = st["pause_on_low_power"] as? Bool
         onAC = (o["power"] as? [String: Any])?["on_ac"] as? Bool ?? true
         breaker = o["breaker"] as? String
         smokeOK = (o["smoke"] as? [String: Any])?["ok"] as? Bool

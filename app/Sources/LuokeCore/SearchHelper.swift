@@ -35,8 +35,33 @@ enum SearchHelper: BundledApp {
     static var mayRun: Bool { developmentBuild || !AppInfo.isLab }
 
     private static func wanted() -> Bool {
-        guard mayRun, let m = manifest, enabled else { return false }
+        guard mayRun, let m = manifest, enabled, !Reallow.holds() else { return false }
         return Accessories.wantsResident(m)
+    }
+
+    /// 升级后记成开着、螺壳又没有完全磁盘访问：先不起。它一起来就读桌面、文稿、下载，用的是螺壳的授权，
+    /// 这几项在螺壳名下还没问过，macOS 会在用户什么都没点的时候弹框。等用户在「重新允许」卡片上点「开启」，
+    /// 本体当场问、问完再起（SearchActivation）；有了完全磁盘访问也放开。记在 UserDefaults，没点的下次打开螺壳再问
+    enum Reallow {
+        static let key = "searchAwaitingReallow"
+
+        static func waiting(defaults: UserDefaults = .standard) -> Bool { defaults.bool(forKey: key) }
+
+        static func set(_ on: Bool, defaults: UserDefaults = .standard) {
+            if on { defaults.set(true, forKey: key) } else { defaults.removeObject(forKey: key) }
+        }
+
+        /// 先不起：等着重新允许、又没有完全磁盘访问。有了完全磁盘访问就不用等了，顺手清掉
+        static func holds(defaults: UserDefaults = .standard, fullDisk: () -> Bool? = { HostPermissions.fullDisk() }) -> Bool {
+            guard waiting(defaults: defaults) else { return false }
+            guard fullDisk() != true else { set(false, defaults: defaults); return false }
+            return true
+        }
+
+        /// 要记成开着时：没有完全磁盘访问就先等着
+        static func holdIfNeeded(defaults: UserDefaults = .standard, fullDisk: Bool?) {
+            if fullDisk != true { set(true, defaults: defaults) }
+        }
     }
 
     private static var environment: [String: String] {
@@ -87,9 +112,20 @@ enum SearchHelper: BundledApp {
                 oldAppGone = true
                 retiring = false
                 process.start()
-                if hadOne && !enabled { askWhenFront() }      // 老用户：旧授权不跟过来，要重新开启
+                // 老用户：记成开着（BundledApps.afterRetire）。旧授权不跟过来：没有完全磁盘访问时先不起，
+                // 桌面、文稿、下载等用户点了「开启」再在螺壳名下重新允许（Reallow）
+                let choice = BundledApps.afterRetire(SearchHelper.self, hadOld: hadOne,
+                                                     beforeKeepOn: { Reallow.holdIfNeeded(fullDisk: HostPermissions.fullDisk()) },
+                                                     keptOn: askReallow)
+                if choice != .keepOn, enabled { askReallow() }     // 上次没点「开启」的：这次打开再问
             }
         }
+    }
+
+    /// 等着重新允许的：螺壳到前台、没有别的窗口时弹「开启」卡片（HelperOffer），不在后台弹
+    private static func askReallow() {
+        guard Reallow.holds() else { return }
+        HelperOffer.add(accessory) { SearchActivation.show(upgraded: true) }
     }
 
     private static var retiring = false
@@ -100,16 +136,6 @@ enum SearchHelper: BundledApp {
     private static func retireOldApp() -> Bool {
         guard !developmentBuild, !AppInfo.isLab else { return false }
         return BundledApps.retireApps([bundleID], label: "螺壳搜索", grace: 15)         // 手上的活要做完，它自己的收尾最长等这么久
-    }
-
-    /// 开机自己起来时不弹要授权的窗口：等用户把螺壳叫到前面
-    private static func askWhenFront() {
-        if NSApp.isActive { SearchActivation.show(upgraded: true); return }
-        var token: NSObjectProtocol?
-        token = NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { _ in
-            if let token { NotificationCenter.default.removeObserver(token) }
-            if !enabled { SearchActivation.show(upgraded: true) }
-        }
     }
 
     /// 让 QuickTime 从搜到的那一刻开始放：自动化权限在螺壳名下，由本体代做。它经描述符 3 说 {"play": 路径, "at": 秒}

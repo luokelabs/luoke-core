@@ -11,10 +11,12 @@ for 是哪些发布号前缀在 VM 里编（默认只有内部版和本机版）
   out/   可写：VM 里的 run.sh 把产物、run.log、rc 写在这里
 镜像里开机就跑 job/run.sh，跑完关机；宿主机等 VM 停下、收走 out/、删掉 VM。
 VM 名字带 reljob- 前缀，出版机的 VM 管家不碰它；编的时候放 release-<pid>.hold，管家就不起新的 CI VM。
+一版要连着编好几台（配件、主控）时，调用方再用 SessionHold 放一个整段的 release-session-<pid>.hold，台和台之间不留空档。
 两台 VM 的上限（Apple 的许可）算在一起：CI 的 VM 正在跑就等它跑完。
 """
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import re
@@ -69,6 +71,38 @@ def work_dir() -> str:
 
 def say(msg: str) -> None:
     print(f"== VM：{msg}", flush=True)
+
+
+class SessionHold:
+    """整段出版的 hold：release-session-<pid>.hold。在的时候管家不起新的 CI VM（已经在跑的照旧跑完），
+    一版连着编好几台 VM 时台和台之间不留空档，下一台不用再等一个 CI job。
+
+    take() 放、drop() 收，重复调用没关系；进程退出（包括 die 抛的 SystemExit）时 atexit 收掉。进程被杀了收不掉的，
+    管家和下一次的 clean_stale 看 pid 不在就删。别在不用 VM 又可能很久的步骤（评测、等钥匙串）期间占着：CI 会一直停。"""
+
+    def __init__(self) -> None:
+        self.path = ""
+        self._registered = False
+
+    def take(self) -> None:
+        if self.path:
+            return
+        os.makedirs(work_dir(), exist_ok=True)
+        path = os.path.join(work_dir(), f"release-session-{os.getpid()}.hold")
+        open(path, "w").close()
+        self.path = path
+        if not self._registered:
+            atexit.register(self.drop)
+            self._registered = True
+
+    def drop(self) -> None:
+        if not self.path:
+            return
+        try:
+            os.remove(self.path)
+        except FileNotFoundError:
+            pass
+        self.path = ""
 
 
 def lume(*args: str, check: bool = True, timeout: int = 600) -> str:
@@ -139,11 +173,11 @@ def alive(pid: int) -> bool:
 
 
 def clean_stale() -> None:
-    """上一次被杀（截版窗口、机器睡眠、手动停）留下的：进程不在的 release-<pid>.hold（留着 CI 就一直停）、
+    """上一次被杀（截版窗口、机器睡眠、手动停）留下的：进程不在的 release-<pid>.hold、release-session-<pid>.hold（留着 CI 就一直停）、
     名字里的进程不在的 reljob-* VM（占名额），~/vmci/rel/ 下超过 KEEP_RUNS 次的旧目录。"""
     w = work_dir()
     for n in os.listdir(w) if os.path.isdir(w) else []:
-        m = re.fullmatch(r"release-(\d+)\.hold", n)
+        m = re.fullmatch(r"release-(?:session-)?(\d+)\.hold", n)
         if m and not alive(int(m.group(1))):
             say(f"删掉上次留下的 {n}")
             os.remove(os.path.join(w, n))

@@ -382,6 +382,7 @@ final class HubModel: ObservableObject {
 
     func setPowerMode(_ mode: String) { update(["power_mode": mode]) }
     func setBatteryMode(_ mode: String) { update(["battery_mode": mode]) }
+    func setPauseOnLowPower(_ on: Bool) { update(["pause_on_low_power": on]) }
     @Published var tierError: String?
     var tierErrorTier: String?      // tierError 说的是哪一档（主窗口的设置画在那一行上）
     func setTier(_ tier: String) {
@@ -506,6 +507,13 @@ struct HubModelSettings: View {
             LKSettingRow(icon: "battery-medium", title: "用电池时") {
                 LKSegmented(options: [("normal", "照常运行"), ("light", "少干活"), ("no_large_model", "不运行大模型")],
                             selection: Binding(get: { st.batteryMode }, set: { model.setBatteryMode($0) }))
+            }
+            if let pause = st.pauseOnLowPower {
+                divider
+                LKSettingRow(icon: "battery-low", title: "低电量模式时暂停") {
+                    Toggle("", isOn: Binding(get: { pause }, set: { model.setPauseOnLowPower($0) }))
+                        .toggleStyle(.switch).controlSize(.small).tint(.lkPrimary).labelsHidden()
+                }
             }
             divider
             LKSettingRow(icon: "power", title: "登录时启动螺壳",

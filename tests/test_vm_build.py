@@ -168,6 +168,43 @@ class VMBuildTest(unittest.TestCase):
             V.build_scan(f"{self.t}/acc", f"{self.t}/stage")
         self.assertIn("病毒库", str(e.exception))
 
+    def holds(self) -> list:
+        return sorted(f for f in os.listdir(f"{self.t}/work") if f.endswith(".hold"))
+
+    def test_session_hold_spans_several_builds(self):
+        h = V.SessionHold()
+        h.take()
+        h.take()                                               # 重复占没关系
+        self.assertEqual(self.holds(), [f"release-session-{os.getpid()}.hold"])
+        V.build_search(f"{self.t}/acc", f"{self.t}/stage")
+        V.build_search(f"{self.t}/acc", f"{self.t}/stage2")
+        self.assertEqual(self.calls().count("holds=2"), 2)     # 每台自己的 hold 加整段的
+        self.assertEqual(self.holds(), [f"release-session-{os.getpid()}.hold"])   # 一台编完不收整段的
+        h.drop()
+        h.drop()
+        self.assertEqual(self.holds(), [])
+        h.take()                                               # 放开以后还能再占
+        self.assertEqual(len(self.holds()), 1)
+        h.drop()
+
+    def test_dead_session_hold_is_cleaned_live_one_kept(self):
+        dead = 999999
+        while V.alive(dead):
+            dead += 1
+        open(f"{self.t}/work/release-session-{dead}.hold", "w").close()
+        h = V.SessionHold()
+        h.take()
+        V.clean_stale()
+        self.assertEqual(self.holds(), [f"release-session-{os.getpid()}.hold"])
+        h.drop()
+
+    def test_session_hold_dropped_at_exit(self):
+        code = ("import sys; sys.path.insert(0, sys.argv[1]); import vm_build as V; V.lab_config.PATH = sys.argv[2]; "
+                "V.SessionHold().take(); sys.exit(3)")
+        r = subprocess.run([sys.executable, "-c", code, os.path.join(ROOT, "tools"), self.lab])
+        self.assertEqual(r.returncode, 3)
+        self.assertEqual(self.holds(), [])
+
     def test_waits_when_two_vms_running(self):
         for n in ("cijob-a", "cijob-b"):
             with open(f"{self.t}/state.{n}", "w") as f:

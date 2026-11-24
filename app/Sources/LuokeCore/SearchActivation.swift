@@ -14,6 +14,9 @@ enum SearchActivation {
     private static var model: SearchActivationModel?
     static let hostID = "search-activation"
 
+    /// 卡片（窗口）开着
+    static var isOpen: Bool { MainWindow.showing(hostID) || window?.isVisible == true }
+
     /// 「好」「以后再说」、开成了：关掉
     static func close() {
         MainWindow.dismiss(hostID)
@@ -230,6 +233,7 @@ final class SearchActivationModel: ObservableObject {
                 }
             }
             DispatchQueue.main.async {
+                SearchHelper.Reallow.set(false)      // 用户点了「开启」、要过的都问过了：可以起了
                 SearchHelper.enable { why in
                     if let why { self.phase = .failed(why); return }
                     self.done.forEach { $0() }
@@ -312,7 +316,7 @@ struct SearchActivationView: View {
     @ViewBuilder private var message: some View {
         switch model.phase {
         case .refused:
-            Text("没有要到权限，搜索没有开启。macOS 不会再问拒绝过的项：在 系统设置 › 隐私与安全性 里允许螺壳，再点「再试一次」。")
+            Text((SearchHelper.enabled ? "没有要到权限。" : "没有要到权限，搜索没有开启。") + "macOS 不会再问拒绝过的项：在 系统设置 › 隐私与安全性 里允许螺壳，再点「再试一次」。")
                 .font(.system(size: 13)).foregroundStyle(Color.lkDangerText).fixedSize(horizontal: false, vertical: true)
         case .partly:
             Text("已开启。\(model.deniedTitles.joined(separator: "、"))没允许，这部分搜不到。要搜的话，在 系统设置 › 隐私与安全性 里允许螺壳，再跟螺壳说一声。")

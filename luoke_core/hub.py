@@ -149,7 +149,7 @@ class Hub:
         self.loglock = threading.Lock()
         self.mem_gb = mem_gb or machine.mem_gb()
         self.settings_path = os.path.join(env_dir, "settings.json")
-        self.settings = {"power_mode": "balanced", "background_on_battery": False, "battery_mode": None, "tier": None,
+        self.settings = {"power_mode": "balanced", "background_on_battery": False, "battery_mode": None, "pause_on_low_power": True, "tier": None,
                          "endpoint_enabled": False, "endpoint_port": endpoint_mod.DEFAULT_PORT}   # 给高级用户的本机端点，默认关
         try:
             with open(self.settings_path, encoding="utf-8") as f:
@@ -216,6 +216,7 @@ class Hub:
         self.dispatcher.power_mode = self.settings["power_mode"]
         self._set_battery_mode(self.settings.get("battery_mode") if self.settings.get("battery_mode") in BATTERY_MODES
                                else ("normal" if self.settings["background_on_battery"] else "light"))
+        self.dispatcher.pause_on_low_power = self.settings["pause_on_low_power"] is not False
         self.endpoint_active: dict = {}  # 线程 -> {"model", "started"}：本机接口正在生成的请求（queue_status）
         self.score_ms: dict = {}      # 任务名 -> 最近的打分耗时（毫秒），只作诊断（state.json 的 tasks）
         self.score_full_ms: dict = {} # 同上，只记候选数 >= 8 的（接近全量，和探针可比）
@@ -441,6 +442,11 @@ class Hub:
             if patch["battery_mode"] not in BATTERY_MODES:
                 raise BadRequest("invalid_request", "battery_mode 只能是 " + " / ".join(BATTERY_MODES))
             self._set_battery_mode(patch["battery_mode"])
+        if "pause_on_low_power" in patch:
+            if not isinstance(patch["pause_on_low_power"], bool):
+                raise BadRequest("invalid_request", "pause_on_low_power 只能是 true / false")
+            self.settings["pause_on_low_power"] = patch["pause_on_low_power"]
+            self.dispatcher.pause_on_low_power = patch["pause_on_low_power"]
         if "endpoint_key" in patch:
             # 用户自己设的密钥（任意字符串，空 = 不校验）：只写进 0600 的密钥文件，不进 settings.json（10-19 定）
             if not isinstance(patch["endpoint_key"], str):

@@ -804,7 +804,7 @@ def plan_eval(tag: str, pins: dict, src: dict, prev: str, template: str, tiers: 
     金丝雀（canary_ok，ADR 0008 修订）：一格只差"主控代码变了"、别的条件都满足时不直接重评，每档挑一条先评，
     原始答复和上一版逐字节一样，这一档其余这样的格子沿用（评测那一步做比对）；不一样就照旧全评。
     挪到发布后（10-23，规则不变）：上一版关着、这一版也开不了的格子——上一版发布后没补满 3 遍——这一版评了也照"关"发，
-    不占发布前的时间，发布后和复测一起评、补满 3 遍，下一版据此打开。上一版补满了的留在发布前评（这一版评过就开）；hold 着的照旧。用专用模型（不是本档底座）的任务只在最高档评一次（质量和档无关，beta0 也只评 128），
+    不占发布前的时间，发布后和复测一起评、补满 3 遍，下一版据此打开。上一版补满了的留在发布前评（这一版评过就开）。hold 着的格子不评（11-20：评了也开不了，beta2-rc3 的 hello 在 16 GB 档白占 1 小时；台账照「这一版没评、hold 着」记关着；要开时删掉 hold，照规矩连过 3 遍）。用专用模型（不是本档底座）的任务只在最高档评一次（质量和档无关，beta0 也只评 128），
     评测表写了 per_tier 的除外（嵌入：起不起得来是按档的）。配件还没进流水线（没钉住、没有冻结的源码）的任务不评，台账沿用上一版（新任务就是关着）。
     续跑（10-19：出版步骤要能续跑）：这一版自己上一次没跑完时已经有的证据，满足沿用条件就留着不重跑，不算"沿用"。"""
     recipe = Recipe.load(template)
@@ -820,12 +820,16 @@ def plan_eval(tag: str, pins: dict, src: dict, prev: str, template: str, tiers: 
     reused = []
     deferred = []
     hub_only: dict = {}
+    held: list = []
     for tier in tiers:
         plan = release.plan_combos(recipe, [tier], tasks)
         for (task, key), c in plan.items():
             spec = evals[task]
             if c["model"] != recipe.base_for(tier) and tier != top and not spec.get("per_tier"):
                 continue
+            if str(tier) in (spec.get("held_unsupported") or {}):
+                held.append(f"{task} {tier} GB")
+                continue          # hold 着：评了也开不了，不评（台账照「这一版没评、hold 着」关着）
             mine = own_ev.get((task, key, tier))
             if mine and not mine.get("reused_from") and reusable(mine, spec, src, pins, recipe):
                 continue          # 上一次已经评好了
@@ -841,6 +845,8 @@ def plan_eval(tag: str, pins: dict, src: dict, prev: str, template: str, tiers: 
                 hub_only.setdefault(tier, []).append((task, old))
             else:
                 to_run.setdefault(tier, []).append(task)
+    if held:
+        log("hold 着、这一版不评：" + "、".join(held))
     canary: dict = {}
     for tier, cells in hub_only.items():
         def is_on(task):
@@ -1691,8 +1697,13 @@ def main() -> None:
     check_engine_eval(a.tag, a.template, a.no_eval)
     log(f"=== 内部版 {a.tag}：步骤 {','.join(steps)}，档 {','.join(tiers)}" + ("，不评测（--no-eval）" if a.no_eval else ""))
     IN_VM = vm_build.enabled(a.tag)
+    # 整段 hold：配件三台和主控一台之间不留空档，不然出版机的 VM 管家会在空档里起 CI VM，下一台得等一个 CI job 跑完。
+    # 从这里占到主控编完；中间真要评测（几十分钟到几个小时，不用 VM）和等钥匙串时放开，完了再占上
+    vm_hold = vm_build.SessionHold()
     if IN_VM:
         log(f"配件预编和主控在一次性 VM 里编（{vm_build.image_version() or '没有出版镜像 ' + vm_build.image()}），签名、公证、输入法照旧在本机")
+        if "apps" in steps or "build" in steps:
+            vm_hold.take()
 
     pins = pins_from_top(a.tag) if a.from_top else {}
     deviation_note = ""
@@ -1789,6 +1800,8 @@ def main() -> None:
         save_state()
         log(f"不评测（--no-eval）：拷 {reuse_from} 的 {n} 条证据和支持台账")
     elif "eval" in steps:
+        if to_run:
+            vm_hold.drop()        # 评测不用 VM，可能要几个小时：这段时间 CI 照常跑
         copy_reused(a.tag, reuse_from, reused)
         # 金丝雀对不上时这一档其余照旧全评，那几格也算进来（internal-1026-2：128 档金丝雀没对上、全评到 rerank，引擎没编）
         if "luoke-ime" in src and (any("luoke-ime.rerank" in v for v in to_run.values())
@@ -1830,6 +1843,10 @@ def main() -> None:
             th.join()
         if errors:
             die("评测没跑完：" + "；".join(errors))
+    if IN_VM and "build" in steps:
+        vm_hold.take()            # 评完了：后面几步很快就到主控，在跑的 CI 先收尾、不再起新的
+    else:
+        vm_hold.drop()
     if "merge" in steps:
         normalize_raw(a.tag)
         ev = release.load_evidence(rec)
@@ -1856,8 +1873,11 @@ def main() -> None:
         with ph("engine"):
             release_py(a.tag, "engine", [], tiers_arg, prev, a.template)
     elif "engine" in steps and not copy_engine(a.tag, reuse_from, a.template) and not copy_engine(a.tag, prev, a.template):
+        vm_hold.drop()                 # 钥匙串锁着可能等很久，别让 CI 一直停
         with ph("keychain wait"):
             wait_for_keychain()        # 引擎包换版本才重打，要公证
+        if IN_VM and "build" in steps:
+            vm_hold.take()
         with ph("engine"):
             release_py(a.tag, "engine", ["--notarize", "--yes"] + (["--engine-app", engine_app_for(a.template, ENGINE_APP)] if ENGINE_APP else []), tiers_arg, prev, a.template)
     # 模型两处都放组织 luokelabs：ModelScope 以前是个人账号，已发的版本还指着那边，那边的仓库留着
@@ -1916,6 +1936,7 @@ def main() -> None:
 
     if "build" in steps:
         step("build", build_core)
+    vm_hold.drop()                # 后面签名、DMG、上传都在本机
     if "sign" in steps or "dmg" in steps or ("publish" in steps and not a.no_publish):
         if any(done.get(n) != inputs for n in ("sign", "dmg", "publish")) or redo:
             with ph("keychain wait"):

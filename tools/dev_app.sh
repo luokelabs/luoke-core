@@ -1,15 +1,16 @@
 #!/bin/sh
-# 起一份开发实例：整个螺壳.app（主窗口、agent 核心、记忆、邮件助手、搜索、扫描）的本机开发构建，给负责人看产品线的改动（docs/dev-instance.md）。
-#   tools/dev_app.sh <名字>            打包并起来（名字：小写字母、数字、-，例如 agent、mail-today）
-#   tools/dev_app.sh <名字> --build    只打包，不起
-#   tools/dev_app.sh <名字> --open     不重打，起上次打好的那份
-#   tools/dev_app.sh <名字> --stop     停掉这个实例（按它的 bundle id 找到的 PID），再打开本机装着的螺壳
-#   tools/dev_app.sh <名字> --status   看它在不在跑、环境目录和 socket
-# 每个名字一份：bundle id ai.luoke.core.<名字>.lab（实验室构建），包名「螺壳（<名字>）」，
+# 起开发版：整个螺壳.app（主窗口、agent 核心、记忆、邮件助手、搜索、扫描）的本机开发构建，给负责人看产品线的改动（docs/dev-instance.md）。
+#   tools/dev_app.sh             打包并起来
+#   tools/dev_app.sh --build     只打包，不起
+#   tools/dev_app.sh --open      不重打，起上次打好的那份
+#   tools/dev_app.sh --stop      停掉开发版（按它的 bundle id 找到的 PID），再打开本机装着的螺壳
+#   tools/dev_app.sh --status    看它在不在跑、环境目录和 socket
+# 本机只有一个开发版（负责人 11-23 定：系统设置里最多一个正式版、一个开发版）：哪个分支、哪个会话起，都是同一个身份，
+# bundle id ai.luoke.core.dev.lab，包名「螺壳（dev）」，包放在 ~/Codes/luoke/luoke-core/app/build-dev.noindex。不再按名字各起一份。
 # 环境目录就是装着的螺壳的 ~/Library/Application Support/luoke-core（socket 在 run/hub.sock、日志、模型、引擎），输入法这些照样找得到主控。
 # 数据和正式版是同一份：记忆、agent、邮件助手、搜索、扫描都用本机用户真实的数据，应用装在真实的位置。
-# 所以起之前先停掉在跑的别的螺壳（本机装着的正式版、别的开发实例），--stop 之后再打开本机装着的螺壳。
-# DEV_FIRST_RUN=0：不走首次运行，直接是平常的样子（模型、引擎由主控自己补下；不登记登录项、不弄输入法和通知）。只这一次，下次不设照旧。
+# 所以起之前先停掉在跑的别的螺壳（本机装着的正式版、别的开发构建），--stop 之后再打开本机装着的螺壳。
+# DEV_FIRST_RUN=0：不走首次运行，直接是平常的样子（模型、引擎由主控自己补下；不登记登录项、不弄输入法和通知）。跳过一次就记在开发版自己的设置里，之后从访达打开（比如给了权限 macOS 让它重开）也不再弹。
 # 各项目的代码从哪来（默认 ~/Codes/luoke 下的检出；在 worktree 里改的，把对应的变量指向自己的 worktree；设成空的不带）：
 #   LUOKE_AGENT_SRC、LUOKE_MEM_SRC、LUOKE_MAIL_SRC、LUOKE_SEARCH_SRC；扫描默认用它 release 里最新的打好的包（LUOKE_SCAN_PKG 可换，
 #   LUOKE_SCAN_SRC 从源码打要扫描的开发环境）。
@@ -19,22 +20,26 @@
 # 模型从本机在用的螺壳的模型目录克隆（APFS 克隆，只读、不占空间），可用 LUOKE_LOCAL_MODEL_ROOTS 换。
 set -eu
 here=$(cd "$(dirname "$0")/.." && pwd)
-name=${1:-}
-action=${2:-run}
-case "$name" in
-  ""|-*) sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+# 以前的写法 `dev_app.sh <名字> [动作]`：名字不再用，照样起这一个开发版
+case "${1:-}" in
+  -h|--help) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  ""|-*) ;;
+  *) echo "名字（$1）不再用：本机只有一个开发版「螺壳（dev）」" >&2; shift ;;
 esac
-echo "$name" | grep -Eq '^[a-z0-9][a-z0-9-]*$' || { echo "名字只能用小写字母、数字和 -：$name" >&2; exit 2; }
-case "$name" in lab|dev|core) echo "「$name」留给已有的构建，换一个名字" >&2; exit 2 ;; esac
+action=${1:-run}
 
+name=dev
 bundle_id="ai.luoke.core.$name.lab"
 app_name="螺壳（$name）"
-root=${DEV_APP_ROOT:-$here}     # 打出的包、下载缓存放在这里：主控换成分支的克隆来打时，仍放在起脚本的那份检出里
-out="$root/app/build-$name.noindex"
+root=${DEV_APP_ROOT:-$here}     # 下载缓存、分支的克隆放在这里：主控换成分支的克隆来打时，仍放在起脚本的那份检出里
+codes="$HOME/Codes/luoke"
+# 包只有一份、放在一个固定的位置：哪个 worktree 起都打到这里，LaunchServices 和系统设置里只有这一个开发版
+if [ -n "${DEV_APP_OUT:-}" ]; then out=$DEV_APP_OUT
+elif [ -d "$codes/luoke-core/app" ]; then out="$codes/luoke-core/app/build-$name.noindex"
+else out="$root/app/build-$name.noindex"; fi
 app="$out/$app_name.app"
 env_dir="$HOME/Library/Application Support/luoke-core"     # 和装着的螺壳同一个（AppInfo.envDir）
 lsregister=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
-codes="$HOME/Codes/luoke"
 installed=/Applications/螺壳.app/Contents/Resources
 
 DEV_BRANCH=${DEV_BRANCH-ui-refactor}
@@ -52,7 +57,7 @@ if [ "$action" = run ] || [ "$action" = --build ]; then
   fi
 fi
 
-# 按 bundle id 找（每个实例的 id 不同，不会找到本机在用的螺壳）；lsappinfo 新旧两种输出：`"pid"=123`、`pid = 123`
+# 按 bundle id 找（和本机在用的螺壳 id 不同，不会找到它）；lsappinfo 新旧两种输出：`"pid"=123`、`pid = 123`
 # lsappinfo 在进程退出后还会留一会儿旧记录：再用 kill -0 核一下它还在
 pid_of() {
   p=$(lsappinfo info -only pid -app "$bundle_id" 2>/dev/null | sed -n 's/.*"\{0,1\}pid"\{0,1\} \{0,1\}= \{0,1\}\([0-9][0-9]*\).*/\1/p' | head -1)
@@ -60,7 +65,7 @@ pid_of() {
   return 0
 }
 
-# 在跑的别的螺壳（本机装着的正式版、开发版、别的开发实例）：和这个实例用同一份真实数据，同时开着邮件助手、agent 会抢。
+# 在跑的别的螺壳（本机装着的正式版、普通开发版、以前按名字起的开发实例）：和这个实例用同一份真实数据，同时开着邮件助手、agent 会抢。
 # 普通的实验室构建（ai.luoke.core.lab，评测用）有自己的数据，不算
 others() {
   lsappinfo list 2>/dev/null | sed -n 's/.*bundleID="\(ai\.luoke\.core[a-z0-9.-]*\)".*/\1/p' | sort -u | grep -v -x -e "$bundle_id" -e ai.luoke.core.lab || true
@@ -172,15 +177,23 @@ if [ "$action" != --open ]; then
     echo "LUOKE_AGENT_SRC（$LUOKE_AGENT_SRC）里没有 window/Package.swift：检出太旧，换成 luoke-agent 新的 main（或自己的 worktree）；不带主窗口设成空的" >&2
     exit 1
   fi
-  if [ -n "$(pid_of)" ]; then echo "$app_name 正在跑：先 tools/dev_app.sh $name --stop" >&2; exit 1; fi
+  if [ -n "$(pid_of)" ]; then echo "$app_name 正在跑：先 tools/dev_app.sh --stop" >&2; exit 1; fi
   LUOKE_BUNDLE_ID="$bundle_id" LUOKE_RECIPE_FILE="$recipe" LUOKE_RELEASE_FILE="$release" sh "$here/app/build_app.sh" "$out"
   "$lsregister" -u "$app" 2>/dev/null || true      # .noindex 只挡 Spotlight；打包时万一被登记了，也注销掉
+  # 系统权限（完全磁盘访问、通知、辅助功能）按签名记：ad-hoc 签名每打一次都变，系统设置里开着也不算数，每次都要重新授权。
+  # 钥匙串里有 Developer ID 证书就用它重签（不公证）：bundle id 和团队不变，授过一次的权限重打以后照样认。DEV_SIGN=0 不重签
+  if [ "${DEV_SIGN:-1}" != 0 ] && security find-identity -v -p codesigning 2>/dev/null | grep -q "Developer ID Application"; then
+    sh "$here/tools/release_sign.sh" "$app" || { echo "Developer ID 重签没成：这一份是 ad-hoc 签名，权限可能要重新授权" >&2; }
+    "$lsregister" -u "$app" 2>/dev/null || true
+  else
+    echo "没用 Developer ID 重签（没有证书或 DEV_SIGN=0）：ad-hoc 签名每次都变，权限可能要重新授权" >&2
+  fi
 fi
 [ "$action" = --build ] && { echo "打好了：$app"; exit 0; }
 
-[ -d "$app" ] || { echo "还没打包：tools/dev_app.sh $name" >&2; exit 1; }
+[ -d "$app" ] || { echo "还没打包：tools/dev_app.sh" >&2; exit 1; }
 if [ -n "$(pid_of)" ]; then echo "$app_name 已经在跑（PID $(pid_of)）"; exit 0; fi
-# 同一份真实数据只让一个螺壳开着：先停掉在跑的别的（本机装着的正式版、别的开发实例），--stop 时再打开本机装着的
+# 同一份真实数据只让一个螺壳开着：先停掉在跑的别的（本机装着的正式版、以前的开发实例），--stop 时再打开本机装着的
 for id in $(others); do stop_id "$id"; done
 wait_children
 roots=${LUOKE_LOCAL_MODEL_ROOTS:-"$HOME/Library/Application Support/luoke-core/models:$HOME/.omlx/models"}
@@ -194,4 +207,4 @@ sleep 2
 echo "起来了：$app_name（PID $(pid_of)）"
 echo "环境目录：$env_dir"
 echo "socket：$env_dir/run/hub.sock（配件、curl --unix-socket 用这个）"
-echo "停：tools/dev_app.sh $name --stop"
+echo "停：tools/dev_app.sh --stop"

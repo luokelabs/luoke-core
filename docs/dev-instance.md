@@ -1,20 +1,20 @@
-# 开发实例：本机起一份整个螺壳给负责人看
+# 开发版：本机起一份整个螺壳给负责人看
 
-本机开发不走内部版：负责人看产品线会话做的东西时，会话直接在本机起开发构建。开发实例是一份完整的螺壳.app，带主窗口、agent 核心、记忆、邮件助手、搜索和扫描，用的是负责人真实的数据，和直接用正式版一样。一切以开发顺畅为准。
+本机开发不走内部版：负责人看产品线会话做的东西时，会话直接在本机起开发构建。本机最多两个螺壳：一个正式版（`/Applications/螺壳.app`），一个开发版「螺壳（dev）」。哪个分支、哪个会话要给负责人看，都起这同一个开发版，不另起名字。开发版是一份完整的螺壳.app，带主窗口、agent 核心、记忆、邮件助手、搜索和扫描，用的是负责人真实的数据，和直接用正式版一样。一切以开发顺畅为准。
 
 ## 一条命令
 
 在自己的 luoke-core worktree 里运行：
 
 ```sh
-tools/dev_app.sh <名字>            # 打包并起来
-tools/dev_app.sh <名字> --stop     # 停，再打开本机装着的螺壳
-tools/dev_app.sh <名字> --status   # 在不在跑、环境目录、socket
-tools/dev_app.sh <名字> --open     # 不重打，起上次打好的
-tools/dev_app.sh <名字> --build    # 只打包
+tools/dev_app.sh             # 打包并起来
+tools/dev_app.sh --stop      # 停，再打开本机装着的螺壳
+tools/dev_app.sh --status    # 在不在跑、环境目录、socket
+tools/dev_app.sh --open      # 不重打，起上次打好的
+tools/dev_app.sh --build     # 只打包
 ```
 
-- **名字**：小写字母、数字和 `-`，用会话或功能名，例如 `agent`、`mail-today`。`lab`、`dev`、`core` 留给已有的构建，不能用。
+- **只有一个**：不再按名字各起一份。以前的写法 `tools/dev_app.sh <名字>` 照样能用，名字不算数，起的还是「螺壳（dev）」。要看不同分支的东西，用下面的变量换代码，不换身份。
 - **代码从哪来**：默认用 `~/Codes/luoke` 下各项目的检出，打包前先拉到最新的 main（检出不在 main 上、或有没提交的改动时照原样用）。在自己 worktree 里改的，把对应的变量指过去；设成空的就不带：
 
   | 变量 | 默认 |
@@ -30,7 +30,7 @@ tools/dev_app.sh <名字> --build    # 只打包
 
   例：`LUOKE_AGENT_SRC=~/Codes/luoke/luoke-agent/.claude/worktrees/<你的> tools/dev_app.sh agent`
 - **默认用界面重构的分支**：不带参数就是 `DEV_BRANCH=ui-refactor`，负责人和各会话用同一条命令、看到同一个螺壳。主控、agent、记忆、邮件、搜索里有 `ui-refactor` 分支的，用它最新的提交（克隆在 `app/build-cache.noindex/src/<项目>`，不动各项目的检出）；没有的用 main。主控的代码：在 main 上的检出里跑，换成 `ui-refactor` 最新的提交；在别的分支（会话自己的 worktree）上跑，就用这份。`DEV_BRANCH=` 设成空的，都用 main。上面几个 `*_SRC` 变量给了的，照给的用。
-- **跳过首次运行**：`DEV_FIRST_RUN=0 tools/dev_app.sh <名字>`，起来直接是平常的样子。只管这一次，没走完首次运行的实例下次照旧弹出来。不要自己写 `firstRunDone`。
+- **跳过首次运行**：`DEV_FIRST_RUN=0 tools/dev_app.sh <名字>`，起来直接是平常的样子。跳过一次，开发版就记下首次运行已走过（记在 `ai.luoke.core.dev.lab` 自己的设置里，不碰正式版）：之后从访达打开、给了权限被 macOS 重开，都不再弹。要重看首次运行，`defaults delete ai.luoke.core.dev.lab firstRunDone`。不要自己往正式版写 `firstRunDone`。
 
 ## 数据是真的
 
@@ -50,14 +50,15 @@ tools/dev_app.sh <名字> --build    # 只打包
 - **仍然要先问负责人的**：永久删除负责人的数据（邮件、文件、记忆库）、对外发信、改系统设置。钥匙串里的凭据只用，不删、不覆盖。
 - 普通的实验室构建（`ai.luoke.core.lab`，评测和自动化测试用）照旧用自己环境目录里的数据，不碰真的。
 
-## 每个实例各自的
+## 开发版的身份
 
-每个实例的身份由名字决定，都是实验室构建：
+开发版是实验室构建，身份固定：
 
-- **bundle id**：`ai.luoke.core.<名字>.lab`
-- **包名**：「螺壳（<名字>）」
-- **包**：worktree 里的 `app/build-<名字>.noindex/螺壳（<名字>）.app`。跑着的时候登记在 LaunchServices 里：通知中心靠它认这个 app，系统设置的通知里有它自己的一行；`luoke://` 链接也落到它。`--stop` 时注销，链接回到本机装着的螺壳。
-- **首次运行进度、系统权限**：按 bundle id 各一份。主控的设置在环境目录里，和装着的螺壳同一份。完全磁盘访问等权限按签名记，开发构建是临时签名，重打一份可能要重新授权。
+- **bundle id**：`ai.luoke.core.dev.lab`
+- **包名**：「螺壳（dev）」
+- **签名**：钥匙串里有 Developer ID 证书时，打完用它重签（`tools/release_sign.sh`，不公证）。完全磁盘访问、通知这些系统权限按签名记，ad-hoc 签名每打一次都会变，系统设置里开关还开着也不算数；用 Developer ID 签，bundle id 和团队不变，授过一次重打以后照样认。没有证书或 `DEV_SIGN=0` 时退回 ad-hoc，脚本会提示权限可能要重新授权。
+- **包**：只有一份，在 `~/Codes/luoke/luoke-core/app/build-dev.noindex/螺壳（dev）.app`，哪个 worktree 起都打到这里（`DEV_APP_OUT` 可换，只在没有这个检出的机器上用）。跑着的时候登记在 LaunchServices 里：通知中心靠它认这个 app，系统设置的通知里有它自己的一行；`luoke://` 链接也落到它。`--stop` 时注销，链接回到本机装着的螺壳。
+- **首次运行进度、系统权限**：开发版一份、正式版一份。主控的设置在环境目录里，和装着的螺壳同一份。
 - **不自己升级**：要新的就重打一份。
 
 **配方和发布清单**：默认取本机装着的 `/Applications/螺壳.app` 里那一对，用的模型和引擎和本机在用的是同一版。要换就设 `DEV_RECIPE`、`DEV_RELEASE`。
@@ -69,17 +70,18 @@ tools/dev_app.sh <名字> --build    # 只打包
 - **内存**：首次运行走完后，引擎会加载本档的底座。128 GB 的机器上是 gemma-4-26b 8-bit，约 28 GB。用完就 `--stop`。
 - **实验室构建放宽的**：配方里的任务全开，配件哪一版都认。装应用、装引擎照样核签名，只给本体用的接口照样核是不是本体。只在本机开发用，不发给别人。
 - 不要在 Finder 里打开 `build-*.noindex`：Finder 显示到的 .app 会被登记进 LaunchServices。打开过的话，跑一次 `lsregister -u <那个 .app>` 注销。
-- **清理**：删掉 `app/build-<名字>.noindex`。环境目录是装着的螺壳的，不删。
+- **不要再起别的身份**：`ai.luoke.core.<别的名字>.lab`、`app/build_app.sh --install` 的「螺壳（开发）」都会在系统设置的权限列表里多出一行，要另外授权。给负责人看东西只用 `tools/dev_app.sh`。
+- **清理**：环境目录是装着的螺壳的，不删。以前按名字起的开发实例（「螺壳（apps-menu）」这类）的包和权限条目，删之前先列给负责人确认。
 
 ## 和别的起法的区别
 
 - `tools/dev_hub.sh`：只起主控进程，不起 .app，给应用接入、调接口用。环境目录是 `luoke-core-<名字>`，数据不是真的。
-- `app/build_app.sh --install`：普通开发版 `ai.luoke.core.dev`，只有一份，环境目录、数据都和装着的螺壳同一份。给负责人看东西用开发实例。
+- `app/build_app.sh --install`：普通开发版 `ai.luoke.core.dev`「螺壳（开发）」，环境目录、数据都和装着的螺壳同一份。负责人的 Mac 上不用它，给负责人看东西用 `tools/dev_app.sh`。
 - 内部版：照旧每天两版，给团队和测试者。
 
 ## 本机正式版
 
-开发实例是临时签名、bundle id 带 `.lab`，系统给正式版开的权限（通知、完全磁盘访问、照片图库）它拿不到，页面上的权限状态在开发实例里验不了。要在本机验这类只有正式版才看得出的东西，打一份本机正式版：
+开发版 bundle id 带 `.lab`，系统给正式版开的权限（通知、完全磁盘访问、照片图库）它要另外授权，正式版的权限状态在开发版里验不了。要在本机验这类只有正式版才看得出的东西，打一份本机正式版：
 
 ```sh
 tools/local_app.sh --install

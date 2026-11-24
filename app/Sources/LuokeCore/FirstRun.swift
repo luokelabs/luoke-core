@@ -22,7 +22,13 @@ enum FirstRun {
     static let doneKey = "firstRunDone"
 
     static func needed() -> Bool {
-        return !UserDefaults.standard.bool(forKey: doneKey) && ProcessInfo.processInfo.environment["LUOKE_SKIP_FIRST_RUN"] != "1"
+        // 开发版（`tools/dev_app.sh` 带 DEV_FIRST_RUN=0 起的）跳过一次就记下：给了权限 macOS 让它退出、再从访达打开时
+        // 不带这个变量，以前又从首次运行开始（负责人 11-23）。开发版有自己的 bundle id，记在它自己的设置里，不影响正式版
+        if ProcessInfo.processInfo.environment["LUOKE_SKIP_FIRST_RUN"] == "1" {
+            UserDefaults.standard.set(true, forKey: doneKey)
+            return false
+        }
+        return !UserDefaults.standard.bool(forKey: doneKey)
     }
 
     static var window: NSWindow?
@@ -55,8 +61,27 @@ enum FirstRun {
         Uninstall.bringFront(w)
     }
 
+    /// 到了完成页就记下（这一轮没装上的、输入法要不要出那一块）；点「完成」时删掉。首次运行重开时据此直接回完成页
+    static let reachedDoneKey = "firstRunReachedDone"
+
+    struct ReachedDone: Equatable {
+        let failed: [String]
+        let inputMethod: Bool
+    }
+
+    static func saveReachedDone(failed: [String], inputMethod: Bool, defaults: UserDefaults = .standard) {
+        defaults.set(["failed": failed, "inputMethod": inputMethod], forKey: reachedDoneKey)
+    }
+
+    static func reachedDone(defaults: UserDefaults = .standard) -> ReachedDone? {
+        guard let o = defaults.dictionary(forKey: reachedDoneKey) else { return nil }
+        return ReachedDone(failed: o["failed"] as? [String] ?? [], inputMethod: o["inputMethod"] as? Bool ?? false)
+    }
+
     static func finish() {
         UserDefaults.standard.set(true, forKey: doneKey)
+        HelperOffer.markOffered(BundledApps.all.map { $0.accessory })     // 完成页上问过开启搜索和扫描：以后不再补问
+        UserDefaults.standard.removeObject(forKey: reachedDoneKey)
         window?.close()
         // 主窗口是为首次运行开的、用户又没自己打开螺壳：和原来一样关掉（#112）；要开的停在「今天」
         MainWindow.endSetup(hostID, keepOpen: MainWindow.openAfterSetup)
@@ -73,7 +98,15 @@ private final class AnswerSlot<T>: @unchecked Sendable {
 
 final class FirstRunModel: ObservableObject {
     enum Step: String { case preflight, accessories, consent, fetching, smoke, done }
-    @Published var step: Step = .preflight { didSet { FirstRunModel.mark(step.rawValue); if step == .done { prepareInputMethod(); watchNotifications() } } }
+    @Published var step: Step = .preflight {
+        didSet {
+            FirstRunModel.mark(step.rawValue)
+            guard step == .done else { return }
+            if upgrade == nil && !FirstRunModel.previewing { FirstRun.saveReachedDone(failed: failed, inputMethod: installedInputMethod) }
+            prepareInputMethod()
+            watchNotifications()
+        }
+    }
     @Published var inputMethodState = "" {   // 输入法 --status 的 state；空 = 还没看
         didSet { if inputMethodState == "ready" && oldValue != "ready" { tutorialStep = nil } }   // 加上了就退出图文教程；别的状态变化不打断（11-02 16 GB 测试机：点「打开键盘设置」时教程自己关了）
     }
@@ -172,6 +205,12 @@ final class FirstRunModel: ObservableObject {
             applyTierChoice()
             makePlan()
             step = .consent
+        }
+        // 上次已经装好、到了完成页，螺壳又重开了（开完全磁盘访问时系统让它退出重开）：直接回完成页，不再从第 1 步点一遍
+        if upgrade == nil && step == .preflight, let saved = FirstRun.reachedDone() {
+            failed = saved.failed
+            installedInputMethod = saved.inputMethod
+            step = .done
         }
     }
 
@@ -329,7 +368,7 @@ final class FirstRunModel: ObservableObject {
         step = .fetching
         let fm = FileManager.default
         try? fm.createDirectory(atPath: AppInfo.modelDir, withIntermediateDirectories: true)
-        installedInputMethod = accessories.contains { $0.selected && !$0.installed && $0.type == "input-method" }
+        installedInputMethod = FirstRunModel.showsInputMethod(accessories, upgrade: upgrade != nil)
         if Manifests.hasRelease {
             progress = "螺壳正在按发布清单下载…"
             if upgrade == nil { HubModel.shared.startHub() }
@@ -421,7 +460,13 @@ final class FirstRunModel: ObservableObject {
         DispatchQueue.global().async { self.driveDownloads(names: names) }
     }
 
-    /// 输入法是这轮要装的、而且装上了（没下下来的不算）
+    /// 完成页出不出输入法那一块：首次安装时，这轮勾了的或者已经装着的都出（螺壳重开后第二遍走时输入法已经装上，不在可勾的里，
+    /// 但还没添加、没选方案；11-21 16 GB 测试机复验）。升级只出这轮新装的
+    static func showsInputMethod(_ accessories: [AccessoryChoice], upgrade: Bool) -> Bool {
+        accessories.contains { $0.type == "input-method" && (upgrade ? $0.selected && !$0.installed : $0.selected || $0.installed) }
+    }
+
+    /// 输入法该在完成页出现、而且装上了（没下下来的不算）
     var inputMethodReady: Bool {
         installedInputMethod && !accessories.contains { $0.type == "input-method" && failed.contains($0.id) }
     }
@@ -698,12 +743,17 @@ struct FirstRunView: View {
         .foregroundStyle(Color.lkForeground)
         .lkWindowSize(width: 760, height: 540)
         .onAppear { m.preflight() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            fullDisk = HostPermissions.fullDisk() != false       // 从系统设置回来
+        }
     }
 
     // ---- 每一页 -------------------------------------------------------------------------------------------
 
     @State private var searchOn = SearchHelper.enabled
     @State private var scanOn = ScanHelper.enabled
+    /// 完全磁盘访问给了没有（查不出时当给了）。系统设置里开了以后螺壳要重开才算数，重开就回到完成页（FirstRun.reachedDone）
+    @State private var fullDisk = HostPermissions.fullDisk() != false
 
     @ViewBuilder private var page: some View {
         switch m.step {
@@ -942,7 +992,7 @@ struct FirstRunView: View {
             LKTitle(title: fetchTitle.0, sub: fetchTitle.1)
             if outcome == .hubDown {
                 LKNote(icon: "triangle-alert", text: (hub.hubExit.map { "螺壳进程退出了（代码 \($0)）。" } ?? ((hub.hubError ?? "螺壳进程起不来") + "。"))
-                       + "点「重试」，还不行就在「设置 › 关于」里导出诊断信息发给我们。", kind: .danger)
+                       + "点击「重试」，如仍无法启动请在「设置 › 隐私与权限」或顶部菜单「帮助」中导出诊断信息。", kind: .danger)
             } else {
             if outcome == .working {
             VStack(alignment: .leading, spacing: 6) {
@@ -1089,7 +1139,10 @@ struct FirstRunView: View {
                             Text("检查这台 Mac 的安全和存储空间。开启时需要完全磁盘访问权限。").font(.system(size: 13))
                         }
                         Spacer()
-                        if scanOn { LKBadge(text: "已开启", kind: .success) } else {
+                        if scanOn && !fullDisk {
+                            // 开启时跳过了授权：开着，但做不了多少，不写「已开启」（11-21 16 GB 测试机复验）
+                            Button("授权") { PermissionWindow.show(app: ScanHelper.accessory, id: "fda") }.buttonStyle(LKPrimaryButton())
+                        } else if scanOn { LKBadge(text: "已开启", kind: .success) } else {
                             Button("开启") {
                                 PermissionWindow.show(app: ScanHelper.accessory, id: "fda", enabling: true) {
                                     ScanHelper.enable { why in if why == nil { scanOn = true } }
@@ -1192,7 +1245,7 @@ struct FirstRunView: View {
                         .buttonStyle(LKSecondaryButton())
                     Text("添加完成后此处自动更新").font(.system(size: 12)).foregroundStyle(Color.lkMuted)
                 }
-                Text("系统可能提示「输入法能看到你输入的内容」，所有输入法均有此提示。螺壳输入法不联网：输入的文字在本机处理，默认记入本机的螺壳记忆，不交给可读取内容的云服务；如不需要记录，可在输入法设置的「通用」中关闭「记录输入内容到记忆」。")
+                Text("系统可能提示「输入法能看到你输入的内容」，所有输入法均有此提示。螺壳输入法不联网：输入的文字在本机处理，默认记入本机的螺壳记忆，不交给可读取内容的云服务；如不需要记录，可在螺壳「螺壳输入法 › 设置」的「记忆记录」中关闭「记录输入内容到记忆」。")
                     .font(.system(size: 12)).foregroundStyle(Color.lkMuted).fixedSize(horizontal: false, vertical: true)
             }
         }

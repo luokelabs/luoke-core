@@ -78,8 +78,70 @@ enum BundledApps {
 
     /// 用户开启了没有：state.json 的 enabled，没选过看 defaultOn（不是 BundledApp 的工具也用，ToolHost）
     static func isEnabled(_ accessory: String, defaultOn: Bool, state: URL = AppInfo.envDir.appendingPathComponent("state.json")) -> Bool {
-        guard let data = try? Data(contentsOf: state), let o = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return defaultOn }
-        return (o["enabled"] as? [String: Bool])?[accessory] ?? defaultOn
+        recorded(accessory, state: state) ?? defaultOn
+    }
+
+    /// state.json 的 enabled 里这个应用的记录：开着、停用了，没记过是 nil
+    static func recorded(_ accessory: String, state: URL = AppInfo.envDir.appendingPathComponent("state.json")) -> Bool? {
+        guard let data = try? Data(contentsOf: state), let o = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        return (o["enabled"] as? [String: Bool])?[accessory]
+    }
+
+    /// 升级上来以后这个应用怎么办：用户装过、用过的，升级后不能被关掉。
+    /// keepOn：以前单独装过它、没有记录，记成开着，缺的系统权限另外要，不算关。装过看两样：旧的 .app 刚挪走，
+    /// 或者它的数据目录还在（旧的 .app 在更早的一次升级里已经挪走了，那次又没记下）；
+    /// offer：没装过也没选过，补问一次首次安装里开启它的那个选择（HelperOffer）；
+    /// none：用户自己选过（开着、停用了）的照旧，问过一次的不再问，首次安装还没走的由首次安装问
+    enum UpgradeChoice: Equatable { case none, keepOn, offer }
+
+    static func upgradeChoice(hadOld: Bool, leftData: Bool = false, recorded: Bool?, offered: Bool, firstRunNeeded: Bool) -> UpgradeChoice {
+        guard recorded == nil else { return .none }
+        if hadOld { return .keepOn }
+        if firstRunNeeded || offered { return .none }
+        return leftData ? .keepOn : .offer
+    }
+
+    /// 清单 data 里写的目录有一个还在：以前单独装过、用过它。只认个人文件夹里面的具体目录（~/.xxx），不认个人文件夹本身。
+    /// 清单的位置和 defaultOn 一样
+    static func leftData(_ accessory: String, resources: URL = AppInfo.resources, home: String = NSHomeDirectory()) -> Bool {
+        let file = resources.appendingPathComponent(accessory.replacingOccurrences(of: "luoke-", with: "")).appendingPathComponent("luoke-accessory.json")
+        guard let data = try? Data(contentsOf: file), let o = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
+        let base = URL(fileURLWithPath: home).standardizedFileURL
+        return ((o["data"] as? [String]) ?? []).contains { d in
+            guard d.hasPrefix("~/") else { return false }
+            let dir = base.appendingPathComponent(String(d.dropFirst(2))).standardizedFileURL
+            guard dir.pathComponents.count > base.pathComponents.count, dir.path.hasPrefix(base.path + "/") else { return false }
+            return FileManager.default.fileExists(atPath: dir.path)
+        }
+    }
+
+    /// 收进来的应用挪完旧的 .app 以后（SearchHelper、ScanHelper 的 start，主线程上）。开发版、实验室不管：本机装着的不归它们。
+    /// beforeKeepOn：要记成开着、还没记之前（螺壳搜索在这里决定先不起）；keptOn：记成开着以后。答这次怎么办的
+    @discardableResult
+    static func afterRetire(_ app: BundledApp.Type, hadOld: Bool, beforeKeepOn: () -> Void = {}, keptOn: @escaping () -> Void = {}) -> UpgradeChoice {
+        guard !developmentBuild, !AppInfo.isLab else { return .none }
+        let recordedNow = recorded(app.accessory)
+        let choice = upgradeChoice(hadOld: hadOld, leftData: recordedNow == nil && leftData(app.accessory), recorded: recordedNow,
+                                   offered: HelperOffer.offered(app.accessory), firstRunNeeded: FirstRun.needed())
+        switch choice {
+        case .none: break
+        case .keepOn: beforeKeepOn(); keepOn(app, tries: 20, then: keptOn)
+        case .offer: HelperOffer.offer(app.accessory)
+        }
+        return choice
+    }
+
+    /// 记成开着、起程序。主控刚起时 socket 可能还没好：隔几秒再试
+    private static func keepOn(_ app: BundledApp.Type, tries: Int, then: @escaping () -> Void) {
+        app.enable { why in
+            guard let why else {
+                note("\(app.accessory)：以前单独装过，升级后记成开着")
+                then()
+                return
+            }
+            guard tries > 1 else { note("\(app.accessory)：以前单独装过，没能记成开着：\(why)"); return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { keepOn(app, tries: tries - 1, then: then) }
+        }
     }
 
     /// 用户确认过的：state.json 的 permissions_ok，{"配件": {"权限 id": 确认的时间}}。没写的就是没放行

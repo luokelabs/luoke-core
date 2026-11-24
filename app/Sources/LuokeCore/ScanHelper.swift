@@ -26,11 +26,15 @@ enum ScanHelper: BundledApp {
     }
 
     /// 主控起来以后：beta 1 单独装的 螺壳扫描.app（同一个 bundle id）结束、挪进废纸篓，数据不动，这一份接着用。只做一次，
-    /// 用户没开启也做。开发版、实验室不动：本机装着的不归它们管
+    /// 用户没开启也做。有旧的、用户又没选过的，记成开着（BundledApps.afterRetire）；缺完全磁盘访问时页面上要，不算关。
+    /// 开发版、实验室不动：本机装着的不归它们管
     static func start() {
         guard manifest != nil, !retiredOld, !BundledApps.developmentBuild, !AppInfo.isLab else { return }
         retiredOld = true
-        DispatchQueue.global().async { BundledApps.retireApps([bundleID], label: "螺壳扫描", grace: 15) }
+        DispatchQueue.global().async {
+            let hadOne = BundledApps.retireApps([bundleID], label: "螺壳扫描", grace: 15)
+            DispatchQueue.main.async { BundledApps.afterRetire(ScanHelper.self, hadOld: hadOne) }
+        }
     }
     private static var retiredOld = false
 

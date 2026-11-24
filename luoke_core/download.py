@@ -253,7 +253,7 @@ TEAM_ID = "NJQ5W3T9K5"     # 螺壳实验室的 Developer ID（主控、配件�
 
 def verify_app(app: str, bundle_id: Optional[str] = None) -> None:
     """装之前核签名（审查 2026-10-17：之前只看文件名和清单）：codesign 完整校验、Team ID 是我们的、Info.plist 的 bundle id 对、
-    公证票据钉在包上。LUOKE_ALLOW_UNSIGNED=1 时跳过（只给单元测试和实验室构建用）。"""
+    公证票据钉在包上、codesign 认它公证过（notarized，不用 xcrun）。LUOKE_ALLOW_UNSIGNED=1 时跳过（只给单元测试和实验室构建用）。"""
     if os.environ.get("LUOKE_ALLOW_UNSIGNED") == "1":
         return
     r = subprocess.run(["/usr/bin/codesign", "--verify", "--deep", "--strict", app], capture_output=True, text=True)
@@ -267,9 +267,28 @@ def verify_app(app: str, bundle_id: Optional[str] = None) -> None:
         bid = (apps.read_plist(os.path.join(app, "Contents", "Info.plist")) or {}).get("CFBundleIdentifier")
         if bid != bundle_id:
             raise DownloadError(f"{os.path.basename(app)} 的 bundle id 是 {bid}，不是 {bundle_id}")
-    r = subprocess.run(["/usr/bin/xcrun", "stapler", "validate", app], capture_output=True, text=True)
-    if r.returncode != 0:
+    if not stapled_ticket(app) or not notarized(app):
         raise DownloadError(f"{os.path.basename(app)} 没有公证票据")
+
+
+# 公证核验只用系统自带的 codesign：/usr/bin/xcrun 在没装命令行工具的 Mac 上是个壳，调它会失败，还会弹「安装命令行开发者工具」的框。
+# 不加 --check-notarization 时 codesign 不上网，只认钉在包上的票据和系统已经验过的票据，离线也能答，不弹框，也不看 Gatekeeper 开没开
+NOTARIZED_REQUIREMENT = f'anchor apple generic and certificate leaf[subject.OU] = "{TEAM_ID}" and notarized'
+
+
+def notarization_check(path: str, deep: bool = True) -> list:
+    """核「苹果的证书链、我们的 Team ID、公证过」的 codesign 命令。-R 的值以 = 开头才当要求文本，不然会当文件路径"""
+    return ["/usr/bin/codesign", "--verify", "--strict"] + (["--deep"] if deep else []) + ["-R=" + NOTARIZED_REQUIREMENT, path]
+
+
+def notarized(path: str, deep: bool = True) -> bool:
+    return subprocess.run(notarization_check(path, deep), capture_output=True, text=True).returncode == 0
+
+
+def stapled_ticket(app: str) -> bool:
+    """公证票据钉在 .app 上（staple 把它写成 Contents/CodeResources）：没网时装得上要靠它。是不是真票据由 notarized 核"""
+    p = os.path.join(app, "Contents", "CodeResources")
+    return os.path.isfile(p) and not os.path.islink(p) and os.path.getsize(p) > 0
 
 
 _move = apps._move

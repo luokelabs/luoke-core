@@ -57,6 +57,7 @@ class Dispatcher:
         # 外面每次刷新的环境
         self.on_ac = True
         self.low_power = False
+        self.pause_on_low_power = True   # 设置「低电量模式时暂停」：关掉后低电量模式不挡后台和预热，后台只看「用电池时」
         self.thermal = "nominal"
 
     @property
@@ -66,6 +67,10 @@ class Dispatcher:
     @background_on_battery.setter
     def background_on_battery(self, on: bool) -> None:
         self.battery_mode = "normal" if on else "light"
+
+    def low_power_pauses(self) -> bool:
+        """macOS 开着低电量模式，且设置是低电量模式时暂停（默认）"""
+        return self.low_power and self.pause_on_low_power
 
     def no_large_model(self) -> bool:
         """现在在用电池、设置是「不运行大模型」：底座不加载，要用它的请求先不做"""
@@ -100,7 +105,7 @@ class Dispatcher:
             reasons.append("battery_no_large_model")       # 配件自己说电池上也要做（allow_battery）也不做：用的是底座
         elif not self.on_ac and self.battery_mode == "light" and not allow_battery:
             reasons.append("battery")
-        if self.low_power:
+        if self.low_power_pauses():
             reasons.append("low_power")
         if self.thermal in ("serious", "critical") or (self.power_mode == "quiet" and self.thermal == "fair"):
             reasons.append("thermal")
@@ -277,7 +282,7 @@ class Dispatcher:
             if lease_id and lease_id in self.leases:
                 self.leases[lease_id] = (task, t + LEASE_SECS)
                 return {"accepted": True, "lease_id": lease_id, "expires_in": LEASE_SECS}
-            if self.low_power or self.memory_pressure != "normal":
+            if self.low_power_pauses() or self.memory_pressure != "normal":
                 return {"accepted": False, "code": "deferred"}
             new = secrets.token_hex(8)
             self.leases[new] = (task, t + LEASE_SECS)

@@ -13,7 +13,7 @@
 #   版本从包名读，解开的目录要另给 LUOKE_ENGINE_VERSION；没设不带）
 # 自带 Python 和 luoke_core 的放法与 tools/package_python_app.py 一致（Resources/python，包装进 site-packages，预编译）。
 set -eu
-set -o pipefail     # 下面 `swift build | tail`：编译失败也要停下（10-23 发现：之前取的是 tail 的退出码，编不过照样打包，用的是 .build 里旧的二进制）
+set -o pipefail     # 下面 `… | tail`：编译失败也要停下（10-23 发现：之前取的是 tail 的退出码，编不过照样打包，用的是 .build 里旧的二进制）
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/.." && pwd)
 out=${1:-"$here/build.noindex"}
@@ -48,7 +48,17 @@ else
 fi
 export LUOKE_AGENT_SRC="$agent_src"
 
-cd "$here" && swift build -c release 2>&1 | tail -3
+# 编过了只打最后 3 行；编不过把报错行和最后 20 行打到 stderr。只看最后 3 行时，编不过只剩诊断的脚注链接，
+# 看不出哪里错（11-23 internal-1123 不带主窗口，VM 的 run.log 里没有报错）
+mkdir -p "$here/.build"
+swift_log="$here/.build/build_app-swift.log"
+if ! (cd "$here" && swift build -c release >"$swift_log" 2>&1); then
+  grep -E ': (fatal )?error:' "$swift_log" | head -40 >&2 || true
+  tail -20 "$swift_log" >&2
+  echo "swift build 没编过（完整输出：$swift_log）" >&2
+  exit 1
+fi
+tail -3 "$swift_log"
 bin="$here/.build/release/LuokeCore"
 [ -x "$bin" ] || { echo "没编出来：$bin" >&2; exit 1; }
 # 带没带上主窗口以编出来的为准（Package.swift 的缓存没跟上环境变量时，宁可停下）

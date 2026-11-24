@@ -381,8 +381,12 @@ struct PermissionView: View {
                     .padding(.horizontal, 16).padding(.vertical, 10)
                 }
             }
-            if model.granted {
+            // 系统那层给了螺壳、这个应用还没用上：不写「已授权」再摆一个「允许」（#181：读着像授权了按钮没变），
+            // 写清是螺壳有了、还差让这个应用用
+            if model.granted && model.agreed {
                 LKBadge(text: "已授权", kind: .success)
+            } else if model.granted {
+                Text("螺壳已有此权限").font(.system(size: 13)).foregroundStyle(Color.lkMuted)
             } else if model.needsSettings && model.agreed {
                 Text("在系统设置里打开「\(AppInfo.appName)」").font(.system(size: 13))
             }
@@ -401,7 +405,7 @@ struct PermissionView: View {
                     Button(model.enabling ? "跳过" : "以后再说") { model.finish() }.buttonStyle(LKSecondaryButton()).disabled(model.asking || model.recording)
                 }
                 if model.granted {
-                    if !model.agreed { Button(model.enabling ? "开启" : "允许") { model.allow() }.buttonStyle(LKPrimaryButton()).disabled(model.recording) }
+                    if !model.agreed { Button(model.enabling ? "开启" : "允许\(model.item.appName)使用") { model.allow() }.buttonStyle(LKPrimaryButton()).disabled(model.recording) }
                 } else {
                     Button(model.needsSettings ? "打开系统设置" : "允许") { model.ask() }.buttonStyle(LKPrimaryButton()).disabled(model.asking || model.recording)
                 }
