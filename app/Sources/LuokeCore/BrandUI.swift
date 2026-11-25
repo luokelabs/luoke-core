@@ -4,7 +4,7 @@ import SwiftUI
 import LuokeWindow
 #endif
 
-// 螺壳应用界面规范 v2（§2、§11）在 SwiftUI 里的写法：颜色 token（工作台那组，浅色、深色都是暖色）、主按钮、列表组、
+// 螺壳应用界面规范 v2（§2、§11）在 SwiftUI 里的写法：颜色 token（工作台那组；深色是暖灰的底，luoke-brand 11-23 起不用棕）、主按钮、列表组、
 // 安装 / 升级窗口的左栏和底栏。安装、升级、完成三页照样板（ui/src/install/Install.tsx）改（10-21 定 beta1 前改）。
 
 extension Color {
@@ -15,24 +15,24 @@ extension Color {
                            blue: CGFloat(v & 0xFF) / 255, alpha: 1)
         })
     }
-    static let lkBackground = Color(light: 0xFCFAF7, dark: 0x1F1511)
-    static let lkCard       = Color(light: 0xFFFFFF, dark: 0x2C1F19)
-    static let lkSidebar    = Color(light: 0xF7F2EB, dark: 0x261A15)
-    static let lkForeground = Color(light: 0x2B1A12, dark: 0xFBF3E8)
-    static let lkMuted      = Color(light: 0x7A6558, dark: 0xBBA596)
-    static let lkMutedBg    = Color(light: 0xF4EEE6, dark: 0x372720)
-    static let lkBorder     = Color(light: 0xECE4DA, dark: 0x3B2A22)
-    static let lkInput      = Color(light: 0xE2D8CC, dark: 0x4A382E)
-    static let lkPrimary    = Color(light: 0x3A1F14, dark: 0xFDF4E4)
-    static let lkOnPrimary  = Color(light: 0xFDF8F1, dark: 0x2B1A12)
+    static let lkBackground = Color(light: 0xFCFAF7, dark: 0x1C1B19)
+    static let lkCard       = Color(light: 0xFFFFFF, dark: 0x262422)
+    static let lkSidebar    = Color(light: 0xF7F2EB, dark: 0x22211F)
+    static let lkForeground = Color(light: 0x2B1A12, dark: 0xFAF8F5)
+    static let lkMuted      = Color(light: 0x7A6558, dark: 0xB5AFA8)
+    static let lkMutedBg    = Color(light: 0xF4EEE6, dark: 0x2F2D2A)
+    static let lkBorder     = Color(light: 0xECE4DA, dark: 0x353330)
+    static let lkInput      = Color(light: 0xE2D8CC, dark: 0x45423E)
+    static let lkPrimary    = Color(light: 0x3A1F14, dark: 0xF2707F)
+    static let lkOnPrimary  = Color(light: 0xFDF8F1, dark: 0x1C1B19)
     static let lkBrand      = Color(light: 0xE8556B, dark: 0xF2707F)
-    static let lkBrandSoft  = Color(light: 0xFCE8EA, dark: 0x4A2329)
+    static let lkBrandSoft  = Color(light: 0xFCE8EA, dark: 0x3F2329)
     static let lkSuccess    = Color(light: 0x2F7A4F, dark: 0x5CC98A)
     static let lkSuccessSoft = Color(light: 0xE4F2E8, dark: 0x16301F)
     static let lkWarning    = Color(light: 0xA86A12, dark: 0xE8B45A)
-    static let lkWarningSoft = Color(light: 0xFBF0D9, dark: 0x33280F)
+    static let lkWarningSoft = Color(light: 0xFBF0D9, dark: 0x352D1C)
     static let lkDanger     = Color(light: 0xC2412D, dark: 0xF07A66)
-    static let lkDangerSoft = Color(light: 0xF9ECEA, dark: 0x472C24)
+    static let lkDangerSoft = Color(light: 0xF9ECEA, dark: 0x45282A)
     // -soft 底上的字：浅色压深一档才过 4.5:1，深色照原色（规范 v2 §2「标记上的字」）
     static let lkBrandText   = Color(light: 0xBF2D45, dark: 0xF2707F)
     static let lkWarningText = Color(light: 0x8F590C, dark: 0xE8B45A)
@@ -90,17 +90,37 @@ extension View {
 }
 
 /// 主按钮：lkPrimary 底 + 背景色的字，高 36、圆角 10、14/500（规范 §11：系统 .borderedProminent 深色下字看不清）
-/// destructive：只用于把东西移到废纸篓（卸载），lkDanger 底；字和主按钮一样用 lkOnPrimary（深色下 lkDanger 是浅珊瑚，白字只有 2.7:1）
+/// destructive：只用于把东西移到废纸篓（卸载）。浅色是 lkDanger 底、lkOnPrimary 的字；深色下主按钮是珊瑚粉、lkDanger 也是浅珊瑚，
+/// 实心的两种分不开，改成描边：红框红字，停上去铺 lkDangerSoft（和 luoke-agent 的危险按钮一样，11-24）
 struct LKPrimaryButton: ButtonStyle {
     var destructive = false
-    @Environment(\.isEnabled) private var enabled
     func makeBody(configuration: Configuration) -> some View {
-        configuration.label
+        LKPrimaryButtonBody(label: configuration.label, pressed: configuration.isPressed, destructive: destructive)
+    }
+}
+
+private struct LKPrimaryButtonBody<Label: View>: View {
+    let label: Label
+    let pressed: Bool
+    let destructive: Bool
+    @Environment(\.isEnabled) private var enabled
+    @Environment(\.colorScheme) private var scheme
+    @State private var hover = false
+
+    var body: some View {
+        let outlined = destructive && scheme == .dark
+        let fill: Color = outlined ? (hover || pressed ? Color.lkDangerSoft : .clear) : (destructive ? Color.lkDanger : Color.lkPrimary)
+        label
             .font(.system(size: 14, weight: .medium))
-            .foregroundStyle(Color.lkOnPrimary)
+            .foregroundStyle(outlined ? Color.lkDangerText : Color.lkOnPrimary)
             .padding(.horizontal, 16).frame(height: 36)
-            .background((destructive ? Color.lkDanger : Color.lkPrimary).opacity(enabled ? (configuration.isPressed ? 0.85 : 1) : 0.4))
+            .background(fill.opacity(outlined ? 1 : (pressed ? 0.85 : 1)))
+            .overlay {
+                if outlined { RoundedRectangle(cornerRadius: 10).strokeBorder(Color.lkDanger.opacity(0.6), lineWidth: 1) }
+            }
             .clipShape(.rect(cornerRadius: 10))
+            .opacity(enabled ? 1 : 0.4)
+            .onHover { hover = $0 }
     }
 }
 
@@ -543,8 +563,8 @@ struct LKTitle: View {
             models: HostModels(tiers: tiers.map(AgentCore.hostTier), catalog: catalog.map(AgentCore.hostModelRow),
                                advanced: HostLocalAPI(enabled: true, address: "127.0.0.1", port: 17861, models: ["luoke"], hasKey: true)),
             privacy: HostPrivacy(dataLine: "模型在这台 Mac 上跑，数据只存在这台 Mac 上，没有遥测。",
-                                 systemChecks: [HostSystemCheck(name: "通知", ok: true),
-                                                HostSystemCheck(name: "完全磁盘访问", ok: false, detail: "螺壳扫描要用")]))
+                                 systemChecks: [HostSystemCheck(key: HostSystemCheck.notifications, name: "通知", ok: true),
+                                                HostSystemCheck(key: "fda", name: "完全磁盘访问", ok: false, detail: "螺壳扫描要用")]))
     }
 }
 #endif

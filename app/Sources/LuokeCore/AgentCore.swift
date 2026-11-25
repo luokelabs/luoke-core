@@ -897,7 +897,7 @@ final class AgentCore: NSObject, NSWindowDelegate, WindowHost {
         var out: [HostSystemCheck] = []
         if let n = notificationAuth {
             let ok = ["authorized", "provisional", "ephemeral"].contains(n.status) && n.alerts
-            out.append(HostSystemCheck(name: "通知", ok: ok, detail: ok ? nil : "主动提醒要用"))
+            out.append(HostSystemCheck(key: HostSystemCheck.notifications, name: "通知", ok: ok, detail: ok ? nil : "主动提醒要用"))
         }
         let states = HostPermissions.current()
         var users: [String: [String]] = [:]
@@ -907,7 +907,8 @@ final class AgentCore: NSObject, NSWindowDelegate, WindowHost {
         for (id, apps) in users.sorted(by: { $0.key < $1.key }) {
             guard let s = states[id] else { continue }
             let name = id == "fda" ? "完全磁盘访问" : (id == "photos" ? "照片" : id)
-            out.append(HostSystemCheck(name: name, ok: s == "granted", detail: apps.joined(separator: "、") + "要用"))
+            // key 和应用清单里权限的 id 同一套：主窗口按它和螺壳级权限去重
+            out.append(HostSystemCheck(key: id, name: name, ok: s == "granted", detail: apps.joined(separator: "、") + "要用"))
         }
         return out
     }
