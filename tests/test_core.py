@@ -6046,6 +6046,39 @@ class ReleaseToolsTest(unittest.TestCase):
             open(os.path.join(d.CORE, "releases", "beta1", "support.json"), "w").write("{}")
             self.assertEqual(d.previous_beta("beta1.1"), "beta1")
 
+    def test_beta_compares_with_its_last_candidate(self):
+        """正式 beta 拿它最近一个出好了的候选版比（11-26）：转正的就是测过的候选版，开关照它来。拿上一个 beta 比的话，
+        之后加的任务全成了新任务、发布前只评 1 遍开不了（beta2 第一次出时语音、搜索、扫描的模型任务全关着）。
+        没有候选版拿最近一版内部版，再没有才拿上一个 beta；别的 beta 的候选版、没出成的、没台账的不算。"""
+        d = self._tool("release_daemon")
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        for t in ("internal-1125-4", "beta2-rc5", "beta2-rc6", "beta3-rc1"):
+            os.makedirs(os.path.join(tmp, "releases", t))
+            open(os.path.join(tmp, "releases", t, "support.json"), "w").write("{}")
+        os.makedirs(os.path.join(tmp, "releases", "beta2-rc7"))       # 没有台账
+        popen = []
+        with unittest.mock.patch.object(d, "CORE", tmp), unittest.mock.patch.object(d, "BUILD", tmp), \
+                unittest.mock.patch.object(d, "reply", lambda m: None), unittest.mock.patch.object(d, "log", lambda m: None), \
+                unittest.mock.patch.object(d, "pins_from_top", lambda t: {"luoke-core": "a" * 40}), \
+                unittest.mock.patch.object(d, "not_on_public", lambda p: []), \
+                unittest.mock.patch.object(d, "previous_beta", lambda t: "beta1.1"), \
+                unittest.mock.patch.object(d, "sh", lambda *a, **k: ""), \
+                unittest.mock.patch.object(d.subprocess, "Popen", lambda *a, **k: popen.append(a[0]) or types.SimpleNamespace(pid=5)):
+            hist = [{"tag": "beta2-rc5", "ok": True}, {"tag": "beta2-rc6", "ok": True}, {"tag": "internal-1125-4", "ok": True},
+                    {"tag": "beta2-rc7", "ok": True}, {"tag": "beta3-rc1", "ok": True}, {"tag": "beta2-rc8", "ok": False}]
+            self.assertEqual(d.previous_candidate("beta2", hist), "beta2-rc6")
+            st = {"history": hist}
+            d.start_build({"tag": "beta2", "by": "lab-owner"}, st)
+            self.assertIn("'--prev' 'beta2-rc6'", popen[-1][2])
+            self.assertEqual(st["running"]["prev"], "beta2-rc6")      # 出完的流程报告也比同一版
+            st = {"history": [{"tag": "internal-1125-4", "ok": True}]}
+            d.start_build({"tag": "beta2", "by": "lab-owner"}, st)
+            self.assertIn("'--prev' 'internal-1125-4'", popen[-1][2])
+            st = {"history": []}
+            d.start_build({"tag": "beta2", "by": "lab-owner"}, st)
+            self.assertIn("'--prev' 'beta1.1'", popen[-1][2])
+
     def test_previous_internal_is_the_last_published_internal_with_a_ledger(self):
         """候选版比的内部版（11-24）：出版历史里最近一个出好了的、有支持台账的内部版；没出成的、没台账的、beta 和候选版都跳过。"""
         d = self._tool("release_daemon")
@@ -7199,6 +7232,93 @@ class InstallTest(unittest.TestCase):
             h._after_downloads(manifest, ["luoke-mail"])
         self.assertEqual(stops, [1])                             # 只装应用：引擎不动
         self.assertIs(h.engine, engine)
+
+    def test_download_requested_while_restarting_engine_is_not_lost(self):
+        # 11-26：一批下完、在重启引擎的那十几秒里再要下载，请求进了没人读的队列，一直 queued
+        from luoke_core.hub import Hub
+        d = tempfile.mkdtemp()
+        h = Hub(Recipe.load(RECIPE), d, d, lab=True, accessory_dirs=[d], mem_gb=32, smoke=False)
+        h.release_path = os.path.join(d, "release.json")
+        open(h.release_path, "w").close()
+        manifest = {"items": {n: {"kind": "model", "files": [{"path": n, "size": 1}]} for n in ("a", "b", "c")}}
+        batches, after = [], []
+        restarting, release = threading.Event(), threading.Event()
+
+        def batch(_m, names):
+            batches.append(list(names))
+            for n in names:
+                h.downloads[n]["state"] = "done"
+
+        def after_downloads(_m, names):
+            after.append(list(names))
+            if len(after) == 1:              # 第一批收尾：模拟重启引擎、冒烟检查要一会儿
+                restarting.set()
+                release.wait(5)
+
+        with unittest.mock.patch("luoke_core.download.load_manifest", return_value=manifest), \
+                unittest.mock.patch.object(h, "_download_batch", batch), \
+                unittest.mock.patch.object(h, "_after_downloads", after_downloads):
+            h.start_downloads(["a"])
+            self.assertTrue(restarting.wait(5))
+            r = h.start_downloads(["b"])      # 收尾期间点「升级」
+            self.assertTrue(r["started"])
+            release.set()
+            for _ in range(100):
+                if h.downloads["b"]["state"] == "done" and not (h.download_thread and h.download_thread.is_alive()):
+                    break
+                time.sleep(0.05)
+            self.assertEqual(batches, [["a"], ["b"]])
+            self.assertEqual(h.downloads["b"]["state"], "done")
+            self.assertEqual(after, [["a"], ["b"]])          # 第二批也做收尾（下了模型要重启引擎）
+            self.assertEqual(h.download_queue, [])
+            self.assertIsNone(h.download_thread)          # 线程退出时把自己清掉，start_downloads 不会把请求排给它
+            h.start_downloads(["c"])          # 线程结束以后再要：另起一个线程照常下
+            for _ in range(100):
+                if h.downloads["c"]["state"] == "done" and h.download_thread is None:
+                    break
+                time.sleep(0.05)
+            self.assertEqual(batches[-1], ["c"])
+            self.assertEqual(h.downloads["c"]["state"], "done")
+
+    def test_download_requested_again_while_running_is_not_stuck_queued(self):
+        # 11-26：正在下的又点一次「升级」，状态被换成新的 queued、排进队又被滤掉，下完了界面还一直 queued
+        from luoke_core.hub import Hub
+        d = tempfile.mkdtemp()
+        h = Hub(Recipe.load(RECIPE), d, d, lab=True, accessory_dirs=[d], mem_gb=32, smoke=False)
+        h.release_path = os.path.join(d, "release.json")
+        open(h.release_path, "w").close()
+        manifest = {"items": {n: {"kind": "accessory", "files": [{"path": n, "size": 1}]} for n in ("a", "b")}}
+        fetched = []
+        started = {"a": threading.Event(), "b": threading.Event()}
+        go = {"a": threading.Event(), "b": threading.Event()}
+
+        def batch(_m, names):            # 照 _download_batch：开始时拿住这一项的状态，进度写进它
+            for n in names:
+                st = h.downloads[n]
+                st["state"] = "downloading"
+                started[n].set()
+                go[n].wait(5)
+                fetched.append(n)
+                st["state"] = "done"
+
+        with unittest.mock.patch("luoke_core.download.load_manifest", return_value=manifest), \
+                unittest.mock.patch.object(h, "_download_batch", batch), \
+                unittest.mock.patch.object(h, "_after_downloads", lambda *_: None):
+            h.start_downloads(["a", "b"])
+            self.assertTrue(started["a"].wait(5))
+            h.start_downloads(["a"])          # a 正在下：不重置、不再排
+            h.start_downloads(["b"])          # b 排在这一批里还没轮到：不重置、不再排
+            self.assertEqual(h.downloads["a"]["state"], "downloading")
+            go["a"].set()
+            self.assertTrue(started["b"].wait(5))
+            h.start_downloads(["a"])          # a 这一批里已经下完：用户要重下就重下
+            go["b"].set()
+            for _ in range(100):
+                if h.download_thread is None:
+                    break
+                time.sleep(0.05)
+            self.assertEqual(fetched, ["a", "b", "a"])
+            self.assertEqual({n: h.downloads[n]["state"] for n in "ab"}, {"a": "done", "b": "done"})
 
     def test_needed_downloads_and_install_dirs(self):
         from luoke_core.hub import Hub

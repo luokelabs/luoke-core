@@ -568,11 +568,16 @@ class Hub:
         missing = [n for n in names if n not in manifest["items"]]
         if missing:
             raise BadRequest("invalid_request", f"发布清单里没有：{', '.join(missing)}")
-        for n in names:
-            item = manifest["items"][n]
-            self.downloads[n] = {"state": "queued", "done": 0, "total": download.item_total(item), "file": None, "error": None}
         with self.download_lock:
-            if self.download_thread and self.download_thread.is_alive():
+            running = bool(self.download_thread and self.download_thread.is_alive())
+            if running:
+                # 正在下或已经排着的不重置、不再排（11-26：卡住时用户会再点「升级」，状态换成新的 queued，
+                # 正在下的那份进度写进旧的，新的一直 queued）
+                names = [n for n in names if (self.downloads.get(n) or {}).get("state") not in ("queued", "downloading")]
+            for n in names:
+                item = manifest["items"][n]
+                self.downloads[n] = {"state": "queued", "done": 0, "total": download.item_total(item), "file": None, "error": None}
+            if running:
                 # 正在下别的：排进队，当前这轮做完接着下（审查 2026-10-17：之前直接返回 started=False，调用方不看）
                 self.download_queue.extend(n for n in names if n not in self.download_queue)
                 self.log(f"downloads queued behind the running batch: {names}")
@@ -583,16 +588,29 @@ class Hub:
         return {"started": True, "downloads": self.downloads}
 
     def _download_worker(self, manifest: dict, names: list) -> None:
-        done_names: list = []
         while True:
-            self._download_batch(manifest, names)
-            done_names += names
+            done_names: list = []
+            while True:
+                self._download_batch(manifest, names)
+                done_names += names
+                with self.download_lock:
+                    # 排着的都是新请求（正在下的 start_downloads 不再排）：这一批里已经下完又要的也照下
+                    names, self.download_queue = list(self.download_queue), []
+                    if not names:
+                        break
+            try:
+                self._after_downloads(manifest, done_names)
+            except Exception as e:  # noqa: BLE001  收尾出错也要接着看队列，不然排着的请求没人管
+                self.log(f"after downloads failed: {type(e).__name__}: {str(e)[:200]}")
+            # 收尾（重启引擎、冒烟检查，十几秒）期间进来的请求：接着下（11-26 从 beta1.1 升上来时点输入法「升级」卡在 0%：之前线程还活着却不再看队列，
+            # start_downloads 把请求排进去就没人读，一直 queued）。最后一次看队列和标记线程结束在同一把锁里，不留窗口
             with self.download_lock:
-                names = [n for n in self.download_queue if n not in names]
-                self.download_queue = []
+                names, self.download_queue = list(self.download_queue), []
                 if not names:
-                    break
-        self._after_downloads(manifest, done_names)
+                    if self.download_thread is threading.current_thread():
+                        self.download_thread = None
+                    return
+            self.log(f"downloads requested while finishing the last batch: {names}")
 
     def _download_batch(self, manifest: dict, names: list) -> None:
         for n in names:

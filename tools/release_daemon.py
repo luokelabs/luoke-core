@@ -295,9 +295,21 @@ def previous_beta(tag: str):
     return names[-1] if names else None
 
 
+def previous_candidate(tag: str, hist: list):
+    """正式 beta 的基线（11-26）：出版历史里这个 beta 最近一个出好了的、有支持台账的候选版（beta2 → beta2-rc6）；没有就 None。
+    转正的就是测过的候选版：哪个任务在哪一档开照候选版来，差异也和候选版比。之前拿上一个 beta 比，
+    beta2 第一次出时语音、搜索、扫描的模型任务全成了新任务、发布前评 1 遍开不了，全关着发了出去。"""
+    for h in reversed(hist or []):
+        t = h.get("tag") or ""
+        m = RC.match(t)
+        if h.get("ok") and m and m.group(1) == tag and os.path.exists(os.path.join(CORE, "releases", t, "support.json")):
+            return t
+    return None
+
+
 def previous_internal(hist: list):
     """最近一版出好了的内部版（出版历史里 ok、有支持台账）；没有就 None。
-    候选版拿它比（11-24）：和上一个 beta 比的话，beta 以后加的任务都算新任务，要在这一版里连过 3 遍才开，
+    候选版拿它比（11-24；正式 beta 没有候选版时也拿它）：和上一个 beta 比的话，beta 以后加的任务都算新任务，要在这一版里连过 3 遍才开，
     候选版又不做发布后的复测（只评 1 遍），这些任务一档都开不了。内部版这条线的台账里，它们已经连过 3 遍开着。"""
     for h in reversed(hist or []):
         t = h.get("tag") or ""
@@ -499,10 +511,12 @@ def start_build(req: dict, st: dict) -> None:
     prev = None
     cmd = [PY, "-B", "tools/internal_build.py", "--tag", tag, "--build-mail"] + [f"--pin={k}={v}" for k, v in pins.items()]
     if BETA.match(tag) or cand:
-        # beta 和它的候选版：一律全评（internal_build 对非内部版不走金丝雀）。beta 的差异对比拿上一个有台账的 beta（beta1.1 比 beta1）；
-        # 候选版拿最近一版出好了的内部版（11-24，见 previous_internal），没有内部版才拿上一个 beta；都没有就照默认拿最近一版。
-        # 候选版不和上一个候选版比（rc2 不和 rc1 比）
-        prev = (previous_internal(st.get("history")) if cand else None) or previous_beta(tag)
+        # beta 和它的候选版：一律全评（internal_build 对非内部版不走金丝雀）。差异对比和支持台账：
+        # 正式 beta 拿它最近一个出好了的候选版（11-26：转正的就是测过的候选版，开关照候选版来，见 previous_candidate），
+        # 没有候选版、和候选版本身拿最近一版出好了的内部版（11-24，见 previous_internal），再没有才拿上一个有台账的 beta；
+        # 都没有就照默认拿最近一版。候选版不和上一个候选版比（rc2 不和 rc1 比）
+        prev = ((previous_candidate(tag, st.get("history")) if BETA.match(tag) else None)
+                or previous_internal(st.get("history")) or previous_beta(tag))
         if prev:
             cmd += ["--prev", prev]
     if cand:
