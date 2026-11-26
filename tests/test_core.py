@@ -5237,6 +5237,10 @@ class ReleaseToolsTest(unittest.TestCase):
             json.dump({"tag": "internal-1023", "eval_mode": "full"}, open(os.path.join(root, "releases", "internal-1023", "pins.json"), "w"))
             self.assertTrue(ib.canary_allowed("internal-1024")[0])
             self.assertFalse(ib.canary_allowed("beta1")[0])
+            # 负责人开了 --reuse-rc 的 beta：和它全评过的候选版比金丝雀（11-26：只改了下载队列，beta2 不该全评 2.5 小时）
+            self.assertTrue(ib.canary_allowed("beta2", "beta2-rc6")[0])
+            self.assertTrue(ib.canary_allowed("beta2.1", "beta2.1-rc1")[0])
+            self.assertFalse(ib.canary_allowed("beta2-rc7", "beta2-rc6")[0])     # 候选版自己照旧全评
             os.utime(os.path.join(root, "releases", "internal-1023", "pins.json"), (time.time() - 10 * 86400,) * 2)
             os.makedirs(os.path.join(root, "releases", "beta2-rc1"))
             json.dump({"tag": "beta2-rc1", "eval_mode": "full"}, open(os.path.join(root, "releases", "beta2-rc1", "pins.json"), "w"))

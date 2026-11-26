@@ -4,7 +4,7 @@
     python3 tools/internal_build.py --tag internal-1016 --pin luoke-core=<sha> --pin luoke-mail=<sha> --pin luoke-mem=<sha> --pin luoke-ime=<sha>
         [--from-top]            从顶层仓库的标签读子模块指针（先 git fetch --tags），不用一个个 --pin
         [--prev <发布号>]        沿用谁的证据、和谁比差异（默认 releases/ 里最近的一个）
-        [--reuse-rc]            只给 beta：沿用它最近一个候选版的评测证据（逐格核过没变的才沿用；默认不开，beta 全评）
+        [--reuse-rc]            只给 beta：沿用它最近一个候选版的评测证据（逐格核过没变的才沿用，只差主控代码的格子靠金丝雀核；默认不开，beta 全评）
         [--tiers 16,32,128] [--steps freeze,apps,eval,merge,diff,recipe,engine,manifest,build,sign,dmg,publish]
         [--skip-remote]         只评本机那一档（排练用）
         [--no-publish]          不传 GitHub
@@ -928,8 +928,12 @@ def strip_volatile(x):
     return x
 
 
-def canary_allowed(tag: str) -> tuple:
-    """这一版能不能用金丝雀（保底之二、之三）：beta、公开版一律全评；离上一次全评超过 7 天也全评。返回 (能不能, 说明)。"""
+def canary_allowed(tag: str, reuse_rc: Optional[str] = None) -> tuple:
+    """这一版能不能用金丝雀（保底之二、之三）：beta、公开版一律全评；离上一次全评超过 7 天也全评。返回 (能不能, 说明)。
+    例外（11-26）：负责人开了 --reuse-rc 的 beta（reuse_rc 是沿用的候选版），只差主控代码的格子每档先跑金丝雀、和那个候选版逐字节比，
+    一样才沿用。候选版本身是全评过的（beta_eval_source 只挑全评的），主控只改了一点（beta2 只改了下载队列）不用整版重评 2.5 小时"""
+    if reuse_rc and re.fullmatch(r"beta\d+(\.\d+)?", tag):
+        return True, ""
     if not re.match(r"(internal|local|studio)-", tag):
         return False, "beta 和公开版一律全评"
     newest = 0.0
@@ -1961,7 +1965,7 @@ def main() -> None:
         save_state()
     clamav_plan(a.tag, apps)      # 带扫描的 beta：ClamAV 的源码凑不齐就在评测、签名之前停
     evals = release.load_evals()
-    canary_ok, canary_why = canary_allowed(a.tag)
+    canary_ok, canary_why = canary_allowed(a.tag, state.get("reuse_rc"))
     if a.full_eval:
         canary_ok, canary_why = False, "--full-eval"
     if a.no_eval:
