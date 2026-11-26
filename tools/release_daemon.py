@@ -9,12 +9,19 @@
        /release            临时加一版：按各仓库 origin/main 的最新提交钉版（扫描钉 main 上最近的、发了 release 的 tag），名字从 internal-MMDD-3 起顺延（早版、晚版占着 MMDD 和 -2）
        /release … --accept  差异报告里有总分回退时放行（只认负责人的账号；候选版另认 release.rc_senders 里的账号）
        /release … --no-eval 不评测：整版沿用上一版真评过的证据和开关，不比差异、不做发布后复测，发布说明写明（只给内部版）
+       /release betaN[.M]           出 beta：上传成 luoke-releases 的**草稿**（11-25），对外什么都不变；草稿建好就回复地址
+       /release betaN[.M] --publish 负责人看过草稿后转正（tools/release_finalize.py：核附件、写 ClamAV 源码索引、转正并设为最新）
+       /release betaN[.M] --discard 不发了：删掉草稿（已转正的不碰），修好后照常 /release betaN 重出
+                                    这两条只认负责人本人，不排队、马上做（正在出的版不受影响）
+       /release betaN[.M] --reuse-rc  beta 沿用它最近一个候选版的评测证据：逐格核过（配件、主控代码、引擎、评测表、题集都没变）才沿用，
+                                    其余照旧评；配件和引擎照旧现打。默认不开（beta 全评）。--accept 续跑接着沿用，不带开关重发就全评；
+                                    钉住的 core 不认这个开关时开始前就拒
        /release betaN[.M]-rcM       出候选版：钉四个公开仓库 main 现在的提交（导出、推送做完以后），全评、打包、签名，不上传，
                                     拷到局域网托管的目录，回复里给测试机装的地址
      谁能发、能发什么，只按留言的 GitHub 账号和实验室配置里的名单认（beta 2 安全审查 H1：之前负责人、会话、定时截版共用一个账号，
      靠留言开头的「（…会话）」「（…定时截版）」区分，那只是约定，谁都能不写）：
        allowed      能发内部版（/release、/release internal-…、--no-eval）
-       owner        负责人：另外能发 beta、能 --accept
+       owner        负责人：另外能发 beta、能 --accept、能转正和删草稿。可以是一个账号，也可以是几个（列表，11-25 起）
        rc_senders   能发候选版、能给候选版 --accept（不在 allowed 里的只能发候选版）
        cut_senders  定时截版用的机器账号：只能发 /release internal-MMDD[-N]，不带别的参数；在这里的账号别的名单里有也不算
      留言开头自称「（…会话）」「（…定时截版）」的，照旧不给负责人和候选版的权限：防会话误发，不算认证。正式版不归流水线。
@@ -23,8 +30,8 @@
      记下进程号。上一版失败、钉住的提交没变时，新的请求接着那一版续跑（它会从停下的步骤接着做）。
 
 配置：请求 issue 和账号在实验室配置里（tools/lab_config.py，不进公开的树）的 release 一节——issue（形如 <owner>/<repo>#<n>）、
-allowed（能发 /release 的账号）、owner（负责人的账号：beta 和除候选版以外的 --accept 只认本人的留言）。环境变量 LUOKE_RELEASE_ISSUE、
-LUOKE_RELEASE_ALLOWED（逗号分隔）、LUOKE_RELEASE_OWNER 设了就用环境变量。cut_senders（定时截版的机器账号，见上）只在实验室配置里。
+allowed（能发 /release 的账号）、owner（负责人的账号，一个或几个：beta 和除候选版以外的 --accept 只认负责人本人的留言）。环境变量 LUOKE_RELEASE_ISSUE、
+LUOKE_RELEASE_ALLOWED、LUOKE_RELEASE_OWNER（都是逗号分隔）设了就用环境变量。cut_senders（定时截版的机器账号，见上）只在实验室配置里。
 候选版另有三项，只在实验室配置里：rc_senders（能发候选版、也能给候选版 --accept 的账号，不在 allowed 里的只能发候选版）、rc_url_base（局域网托管的地址前缀，写局域网 IP：Tailscale 的 100.x 地址写进
 清单会被扫包拦下）、rc_serve_dir（那个地址对应的本机目录，由常驻的静态文件服务挂出去，流水线只往里拷）。其余是 launchd 的环境变量
 （模板在私有的 ops 仓库 lab/）：
@@ -84,6 +91,8 @@ SESSION = re.compile(r"^\s*（[^）]*(?:会话|定时截版)）", re.M)
 TAG = re.compile(r"^internal-\d{4}(-\d+)?$")
 BETA = re.compile(r"^beta\d+(\.\d+)?$")
 RC = re.compile(r"^(beta\d+(?:\.\d+)?)-rc\d+$")      # 候选版：第 1 组是它要出成的 beta
+FINALIZE = {"--publish": "publish", "--discard": "discard"}     # beta 草稿转正、删草稿（tools/release_finalize.py）
+DRAFT_FILE = "draft.json"       # internal_build.DRAFT_FILE：建好的 beta 草稿记在 releases/<tag>/ 里
 
 
 def log(msg: str) -> None:
@@ -136,7 +145,14 @@ def reply(body: str) -> None:
     sh(["gh", "issue", "comment", str(n), "--repo", repo, "--body", TAG_PREFIX + body], check=False)
 
 
-def parse_request(c: dict, allowed: set, owner: str, rc_senders: set = frozenset(), cut_senders: set = frozenset()) -> dict:
+def owners_of(v) -> set:
+    """release.owner：一个账号（字符串，逗号分隔也行）或账号列表 → 集合"""
+    if not v:
+        return set()
+    return {x.strip() for x in (v.split(",") if isinstance(v, str) else v) if x and x.strip()}
+
+
+def parse_request(c: dict, allowed: set, owner, rc_senders: set = frozenset(), cut_senders: set = frozenset()) -> dict:
     """一条留言 → 请求 {"accept": bool, "by": …, "comment": id}；不是请求返回 None；不允许返回 {"reject": 原因}。
     权限只按留言的账号认（模块开头的名单）：
     候选版 /release betaN-rcM 认负责人和 rc_senders 里的账号；只在 rc_senders、不在 allowed 里的只能发候选版。
@@ -153,7 +169,8 @@ def parse_request(c: dict, allowed: set, owner: str, rc_senders: set = frozenset
             return {"reject": f"@{who} 是定时截版的账号，只能发 /release internal-MMDD[-N]"}
         return {"accept": False, "by": who + "（定时截版）", "comment": c["id"], "tag": args[0]}
     labelled = bool(SESSION.search(c.get("body") or ""))
-    by_owner = bool(owner) and who == owner and not labelled
+    owners = owners_of(owner)
+    by_owner = who in owners and not labelled
     if not who or (who not in allowed and who not in rc_senders):
         return {"reject": f"@{who} 不在能发 /release 的名单里"}
     rcs = [a for a in args if RC.match(a)]
@@ -175,14 +192,24 @@ def parse_request(c: dict, allowed: set, owner: str, rc_senders: set = frozenset
     no_eval = "--no-eval" in args
     if no_eval and (rcs or betas):
         return {"reject": "--no-eval 只给内部版：beta 和候选版一律全评"}
+    final = [a for a in args if a in FINALIZE]
+    if final and (len(final) > 1 or len(betas) != 1 or len(args) != 2):
+        return {"reject": "转正、删草稿写成 /release betaN[.M] --publish 或 /release betaN[.M] --discard，不带别的"}
+    if final:
+        return {"finalize": FINALIZE[final[0]], "tag": betas[0], "by": who, "comment": c["id"]}     # beta 已经只认负责人本人
+    reuse_rc = "--reuse-rc" in args
+    if reuse_rc and not betas:
+        return {"reject": "--reuse-rc 只给 beta：/release betaN[.M] --reuse-rc（沿用它最近一个候选版的评测证据）"}
     tags = [a for a in args if TAG.match(a) or BETA.match(a) or RC.match(a)]
-    unknown = [a for a in args if a not in ("--accept", "--no-eval") and a not in tags]
+    unknown = [a for a in args if a not in ("--accept", "--no-eval", "--reuse-rc") and a not in tags]
     if unknown or len(tags) > 1:
         return {"reject": "看不懂：" + " ".join(unknown or tags) + "（只认 /release、/release internal-MMDD[-N]、/release betaN[.M]、"
-                          "/release betaN[.M]-rcM，后面可以加 --accept；内部版还可以加 --no-eval）"}
-    req = {"accept": accept, "by": who + ("" if by_owner or who != owner else "（会话）"), "comment": c["id"]}
+                          "/release betaN[.M]-rcM，后面可以加 --accept；内部版还可以加 --no-eval，beta 还可以加 --reuse-rc；beta 另有 --publish、--discard）"}
+    req = {"accept": accept, "by": who + ("" if by_owner or who not in owners else "（会话）"), "comment": c["id"]}
     if no_eval:
         req["no_eval"] = True
+    if reuse_rc:
+        req["reuse_rc"] = True
     if tags:
         req["tag"] = tags[0]
     return req
@@ -451,7 +478,7 @@ def start_build(req: dict, st: dict) -> None:
     last = (st.get("history") or [None])[-1]
     if req.get("tag"):
         tag = req["tag"]
-        done = any(h.get("tag") == tag and h.get("ok") for h in st.get("history", []))
+        done = any(h.get("tag") == tag and h.get("ok") and not h.get("discarded") for h in st.get("history", []))     # 草稿删了的可以重出
         if done:
             raise RuntimeError(f"{tag} 已经出过了；" + ("要再出一个候选版就把 rc 后面的号加一" if cand else "要再出一版用 /release（会顺延成 -3 起）"))
         resume = os.path.isdir(os.path.join(CORE, "releases", tag))     # 出过一半：internal_build 按 steps.json 接着做
@@ -460,6 +487,15 @@ def start_build(req: dict, st: dict) -> None:
         tag = last["tag"] if resume else next_tag(time.strftime("%m%d"), st.get("history", []))
     # 出版克隆的工作区放到钉住的提交上（internal_build 的 freeze 要求正好在那个提交、没有改动）；流水线自己不跟着切
     sh(["git", "-C", CORE, "checkout", "-q", "--detach", pins["luoke-core"]])
+    recorded_rc = None
+    if BETA.match(tag):
+        try:
+            with open(os.path.join(CORE, "releases", tag, "pins.json"), encoding="utf-8") as f:
+                recorded_rc = json.load(f).get("reuse_rc")
+        except (OSError, ValueError, AttributeError):
+            pass
+    if req.get("reuse_rc"):
+        check_reuse_supported(CORE, tag, pins["luoke-core"])
     prev = None
     cmd = [PY, "-B", "tools/internal_build.py", "--tag", tag, "--build-mail"] + [f"--pin={k}={v}" for k, v in pins.items()]
     if BETA.match(tag) or cand:
@@ -475,6 +511,8 @@ def start_build(req: dict, st: dict) -> None:
         cmd.append("--accept")
     if req.get("no_eval"):
         cmd.append("--no-eval")
+    if req.get("reuse_rc"):
+        cmd.append("--reuse-rc")
     if os.environ.get("LUOKE_RELEASE_DRYRUN") == "1":
         cmd.append("--no-publish")
     out = os.path.join(BUILD, f"daemon-{tag}.out")
@@ -485,11 +523,34 @@ def start_build(req: dict, st: dict) -> None:
     p = subprocess.Popen(["/bin/sh", "-c", script], cwd=CORE, start_new_session=True, env=dict(os.environ, LC_ALL="en_US.UTF-8"),
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     st["running"] = {"tag": tag, "pid": p.pid, "rc": rc, "pins": pins, "req": req, "started": time.time(), "resume": resume,
-                     **({"prev": prev} if prev else {})}
+                     **({"prev": prev} if prev else {}), **({"drafts": True} if BETA.match(tag) and makes_drafts(CORE) else {})}
     log(f"开始 {tag}（{'续跑' if resume else '新的一版'}，{req.get('by', '定时')}）pid {p.pid}")
     reply(f"开始出 **{tag}**" + ("（接着上次停下的地方）" if resume else "") + "：" +
           "、".join(f"{k} {v[:7]}" for k, v in pins.items()) + ("。空跑：只出不传。" if os.environ.get("LUOKE_RELEASE_DRYRUN") == "1" else "。")
-          + ("不评测：沿用上一版真评过的证据和开关。" if req.get("no_eval") else ""))
+          + ("不评测：沿用上一版真评过的证据和开关。" if req.get("no_eval") else "")
+          + reuse_note(req, recorded_rc))
+
+
+def check_reuse_supported(core: str, tag: str, pin: str) -> None:
+    """internal_build 用的是钉住的那一版：旧版不认 --reuse-rc，起来就退出码 2、日志里什么都没有。开始之前先说清楚"""
+    try:
+        with open(os.path.join(core, "tools", "internal_build.py"), encoding="utf-8") as f:
+            ok = "--reuse-rc" in f.read()
+    except OSError:
+        ok = False
+    if not ok:
+        raise RuntimeError(f"{tag} 钉住的 luoke-core {pin[:7]} 还不认 --reuse-rc（出版脚本用的是钉住的那一版）：去掉 --reuse-rc 再发，照常全评")
+
+
+def reuse_note(req: dict, recorded) -> str:
+    """开始出 beta 的回复里讲评测沿不沿用候选版（和 internal_build.beta_eval_source 同一套规则）"""
+    if req.get("reuse_rc"):
+        return f"评测接着沿用 {recorded} 的结果。" if recorded else "评测沿用最近一个候选版的结果：逐格核过没变的才沿用，其余照旧评。"
+    if recorded and req.get("accept"):
+        return f"评测接着沿用 {recorded} 的结果。"
+    if recorded:
+        return f"这次没带 --reuse-rc：不再沿用 {recorded}，全评。"
+    return ""
 
 
 def _q(s: str) -> str:
@@ -504,20 +565,89 @@ def alive(pid: int) -> bool:
         return False
 
 
-def in_repeats(tag: str) -> bool:
-    """这一版正在做发布后的复测吗（timeline.json 最后一步是 repeats、还没结束）：版已经发了，复测下一版会接着补"""
+def makes_drafts(core: str) -> bool:
+    """钉住的 core 里的 internal_build 是不是把 beta 建成草稿（11-25 以后的才是；beta2 及更早照旧直接发，没有 draft.json）"""
+    try:
+        with open(os.path.join(core, "tools", "internal_build.py"), encoding="utf-8") as f:
+            return "def record_draft(" in f.read()
+    except OSError:
+        return False
+
+
+def load_draft(tag: str):
+    """出版克隆里 releases/<tag>/draft.json（internal_build 建好 beta 草稿时写的）；没有、读不出就 None"""
+    try:
+        with open(os.path.join(CORE, "releases", tag, DRAFT_FILE), encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def note_draft(st: dict) -> None:
+    """正在出的 beta 草稿建好了就先回复一句（发布后的复测还要跑一阵，负责人不用等它）。只认这一次出版建的草稿"""
+    run = st.get("running")
+    if not run or run.get("draft_noted") or not run.get("drafts"):
+        return
+    if os.path.exists(run["rc"]) or not alive(run["pid"]):
+        return                  # 已经出完了：finish_build 一起回复，不先说「复测接着跑」
+    d = load_draft(run["tag"])
+    if not d or (d.get("created") or 0) < run.get("started", 0):
+        return
+    run["draft_noted"] = True
+    tag = run["tag"]
+    reply(f"**{tag}** 的草稿建好了：{d.get('url', '')}（对外还看不到）。发布后的复测接着跑，不用等它：负责人看过后发 "
+          f"`/release {tag} --publish` 转正；不发了发 `/release {tag} --discard` 删掉草稿。")
+
+
+def finalize(req: dict, st: dict) -> None:
+    """负责人的 --publish / --discard：不排队，马上跑工具目录里的 release_finalize.py（只动 GitHub 上的发布和 releases/<tag>/ 的记录）"""
+    tag, action = req["tag"], req["finalize"]
+    run = st.get("running")
+    if run and run.get("tag") == tag:
+        d = load_draft(tag)
+        if not d or ((d.get("created") or 0) < run.get("started", 0) and not in_repeats(tag, run.get("started", 0))):
+            # 正在重出这一版、还没到复测：releases/<tag>/ 里的草稿是上一次的，这一次可能还要重新上传，转正、删掉都等新的草稿建好。
+            # 已经到复测了还是旧的那份：这一次的上传跳过了（钉住的提交没变），草稿就是这一次的，照常放行
+            reply(f"**{tag}** 正在出，这一次的草稿还没建好" + ("（现在记着的是上一次的草稿）" if d else "") +
+                  f"：等回复「草稿建好了」再发 `/release {tag} --{action}`。")
+            return
+    log(f"{action} {tag}（{req.get('by')}）")
+    try:
+        r = subprocess.run([PY, "-B", os.path.join(ROOT, "tools", "release_finalize.py"), action, tag, "--root", CORE], cwd=ROOT,
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=900,
+                           env=dict(os.environ, LC_ALL="en_US.UTF-8"))
+        out, rc = (r.stdout or "") + (r.stderr or ""), r.returncode
+    except subprocess.TimeoutExpired:
+        out, rc = "15 分钟没做完，停了", 1
+    msg = next((ln[3:] for ln in reversed(out.splitlines()) if ln.startswith("=> ")), "")
+    log(f"{action} {tag}：退出码 {rc}，{msg or out.strip()[-300:]}")
+    if rc == 0 and action == "discard":
+        for h in st.get("history", []):
+            if h.get("tag") == tag and h.get("ok"):
+                h["discarded"] = True        # start_build 不再当成出过了
+    if rc == 0:
+        reply(msg or f"**{tag}** {action} 做完了。")
+    else:
+        reply(f"**{tag}** 的 `--{action}` 没做成：{msg or '见下'}" + ("" if msg else f"\n\n```\n{out.strip()[-2500:]}\n```") +
+              "\n\n草稿和对外发布都按上面说的状态；修好原因后再发一次同样的请求。")
+
+
+def in_repeats(tag: str, since: float = 0) -> bool:
+    """这一版正在做发布后的复测吗（timeline.json 最后一步是 repeats、还没结束）：版已经发了，复测下一版会接着补。
+    since：只认这个时间以后开始的复测。续跑时 timeline.json 留着上一次的阶段，上一次在复测中途被结束、没记结束时间的，
+    这一次刚开始、还没进下一步之前最后一步看着还是 repeats，传这一次的开始时间才不会认错"""
     try:
         tl = json.load(open(os.path.join(CORE, "releases", tag, "timeline.json"), encoding="utf-8"))
     except (OSError, ValueError):
         return False
     ph = tl.get("phases") or []
-    return bool(ph) and ph[-1].get("name") == "repeats" and ph[-1].get("end") is None
+    return bool(ph) and ph[-1].get("name") == "repeats" and ph[-1].get("end") is None and (ph[-1].get("start") or 0) >= since
 
 
 def preempt_repeats(st: dict) -> None:
     """有人在排队、正在出的版只剩发布后的复测：打断它（10-23），先出新的一版"""
     run = st.get("running")
-    if not run or not st.get("queue") or run.get("preempted") or not in_repeats(run["tag"]):
+    if not run or not st.get("queue") or run.get("preempted") or not in_repeats(run["tag"], run.get("started", 0)):
         return
     try:
         os.killpg(run["pid"], 15)        # start_new_session：进程组号就是 pid，连远端评测的 ssh 一起停
@@ -559,7 +689,17 @@ def finish_build(st: dict) -> None:
             url = host_candidate(tag)
         except (OSError, ValueError, KeyError, RuntimeError) as e:
             ok, why = False, f"打好了，但挂到局域网时出错：{e}；再发一次同样的请求会跳过做完的步骤、重新挂"
-    if ok:
+    draft = load_draft(tag) if run.get("drafts") else None
+    gone = bool(ok and run.get("drafts") and not draft and os.environ.get("LUOKE_RELEASE_DRYRUN") != "1")    # 复测时负责人删了草稿
+    if gone:
+        reply(f"**{tag}** 跑完了，草稿已经删了（--discard），没有发出去。\n\n{summ}")
+    elif ok and draft:
+        pub = draft.get("published")
+        reply(f"**{tag}** 出好了" + (f"，已转正：{pub.get('url', '')}" if pub else f"（草稿，还没转正）：{draft.get('url', '')}") +
+              ("（发布后的复测被新的请求打断，下一版接着补）" if run.get("preempted") else "") + "\n\n" + summ +
+              f"\n\n完整的流程报告在 luoke-core 的 `releases/{tag}/report.md`。" +
+              ("" if pub else f"\n\n负责人看过草稿后发 `/release {tag} --publish` 转正；不发了发 `/release {tag} --discard` 删掉草稿。"))
+    elif ok:
         if not cand and os.environ.get("LUOKE_RELEASE_DRYRUN") != "1":
             repo = "luokelabs/luoke-releases" if BETA.match(tag) else "luokelabs/luoke-internal-builds"     # luoke-core#36
             url = subprocess.run(["gh", "release", "view", tag, "--repo", repo, "--json", "url", "-q", ".url"],
@@ -574,10 +714,18 @@ def finish_build(st: dict) -> None:
             tail = "".join(open(logp, encoding="utf-8").readlines()[-30:])
         except OSError:
             pass
+        stale = not os.path.exists(logp) or os.path.getmtime(logp) < run.get("started", 0)
+        if stale or not tail.strip():
+            # 这一次没写进日志就退出的（参数不认、起不来）：原因在 internal_build 的标准输出里（日志里是上一次的）
+            try:
+                tail = "".join(open(os.path.join(BUILD, f"daemon-{tag}.out"), encoding="utf-8", errors="replace").readlines()[-30:]) or tail
+            except OSError:
+                pass
         why = why or ("进程没了，也没留下退出码（机器重启或被结束过）" if rc is None else f"退出码 {rc}")
         reply(f"**{tag}** 没出成（{why}）。\n\n{summ}\n\n日志末尾：\n```\n{tail[-3500:]}\n```\n"
               "修好原因后再发一次 `/release`，钉住的提交没变就从停下的步骤接着做；差异报告里有总分回退的，负责人看过报告后发 `/release --accept`（候选版也可以由 rc_senders 里的账号发 `/release betaN-rcM --accept`）。")
-    hist.append({"tag": tag, "ok": ok, "rc": rc, "pins": run["pins"], "started": run["started"], "ended": time.time()})
+    hist.append({"tag": tag, "ok": ok, "rc": rc, "pins": run["pins"], "started": run["started"], "ended": time.time(),
+                 **({"discarded": True} if gone else {})})
     st["history"] = hist[-50:]
     st["running"] = None
     log(f"结束 {tag}：{'成功' if ok else f'失败 rc={rc}'}")
@@ -616,6 +764,7 @@ def follow_main() -> None:
 def tick() -> None:
     st = load_state()
     preempt_repeats(st)
+    note_draft(st)
     finish_build(st)
     save_state(st)
     if not st.get("running"):
@@ -623,7 +772,7 @@ def tick() -> None:
     lab = lab_config.release()
     allowed = {x.strip() for x in os.environ["LUOKE_RELEASE_ALLOWED"].split(",") if x.strip()} if os.environ.get("LUOKE_RELEASE_ALLOWED") \
         else set(lab.get("allowed") or [])
-    owner = os.environ.get("LUOKE_RELEASE_OWNER") or lab.get("owner") or ""
+    owner = owners_of(os.environ.get("LUOKE_RELEASE_OWNER") or lab.get("owner"))
     rc_senders = set(lab.get("rc_senders") or [])
     cut_senders = set(lab.get("cut_senders") or [])
     first = st.get("last_comment") is None
@@ -650,6 +799,10 @@ def tick() -> None:
         age = request_age_hours(c)
         if age is not None and age > MAX_REQUEST_AGE_HOURS:
             reply(f"这条是 {int(age)} 小时前的，守护进程当时没在跑，不补跑；要出版请再发一次 /release。")
+            continue
+        if req.get("finalize"):
+            finalize(req, st)       # 转正、删草稿不排队：只动 GitHub 上的发布，和正在出的版不相干
+            save_state(st)
             continue
         st.setdefault("queue", []).append(req)
         ahead = len(st["queue"]) - 1 + (1 if st.get("running") else 0)

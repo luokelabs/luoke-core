@@ -4194,6 +4194,152 @@ class ReleaseToolsTest(unittest.TestCase):
         self.assertEqual((r["tag"], r["accept"], r["by"]), ("internal-1029-3", False, "lab-owner（会话）"))
         self.assertIn("只认负责人本人", d.parse_request(c("（luoke-top 定时截版）\n/release beta1.1"), allowed, owner)["reject"])
 
+    def test_reuse_rc_only_for_beta_by_owner(self):
+        """--reuse-rc（11-25）：只给负责人发的 beta；内部版、候选版、会话发的都拒；转给 internal_build 的参数里带上。"""
+        d = self._tool("release_daemon")
+        allowed, owner = {"lab-owner", "rc-bot"}, "lab-owner"
+        def c(body, who="lab-owner", i=1):
+            return {"id": i, "body": body, "user": {"login": who}}
+        r = d.parse_request(c("/release beta2 --reuse-rc"), allowed, owner)
+        self.assertEqual((r["tag"], r.get("reuse_rc"), r["accept"]), ("beta2", True, False))
+        self.assertTrue(d.parse_request(c("/release beta2 --reuse-rc --accept"), allowed, owner)["accept"])
+        self.assertNotIn("reuse_rc", d.parse_request(c("/release beta2"), allowed, owner))      # 默认不开
+        self.assertIn("只给 beta", d.parse_request(c("/release --reuse-rc"), allowed, owner)["reject"])
+        self.assertIn("只给 beta", d.parse_request(c("/release internal-1125 --reuse-rc"), allowed, owner)["reject"])
+        self.assertIn("只给 beta", d.parse_request(c("/release beta2-rc6 --reuse-rc"), allowed, owner, rc_senders={"rc-bot"})["reject"])
+        self.assertIn("只认负责人本人", d.parse_request(c("（luoke-top 会话）/release beta2 --reuse-rc"), allowed, owner)["reject"])
+        with open(os.path.join(ROOT, "tools", "release_daemon.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn('if req.get("reuse_rc"):\n        cmd.append("--reuse-rc")', src)
+
+    def test_reuse_candidate_picks_latest_fully_evaluated_rc(self):
+        """--reuse-rc 挑 releases/ 里这个 beta 的候选版：有证据、pins.json 记着全评；评测跑完了的（到过 diff，停在差异上的也算）优先
+        （评测中途停下的证据不全），都没跑完才挑号最大的；按号比，不按字符串；别的 beta 的候选版不算；一个都没有就停。"""
+        ib = self._tool("internal_build")
+        with tempfile.TemporaryDirectory() as root, unittest.mock.patch.object(ib, "log", lambda m: None):
+            def rel(name, mode="full", evidence=True, phases=None):
+                d = os.path.join(root, "releases", name)
+                os.makedirs(os.path.join(d, "evidence") if evidence else d, exist_ok=True)
+                if mode is not None:
+                    with open(os.path.join(d, "pins.json"), "w", encoding="utf-8") as f:
+                        json.dump({"tag": name, "eval_mode": mode}, f)
+                if phases:
+                    with open(os.path.join(d, "timeline.json"), "w", encoding="utf-8") as f:
+                        json.dump({"phases": [{"name": n, "ok": ok} for n, ok in phases]}, f)
+            rel("beta2-rc5"); rel("beta2-rc10"); rel("beta2-rc9")
+            rel("beta2-rc11", mode="none")            # 没真评过的不算
+            rel("beta2-rc12", evidence=False)          # 没证据的不算
+            rel("beta2-rc13", mode=None)               # 没 pins.json 的不算
+            rel("beta3-rc1"); rel("beta2.1-rc20"); rel("internal-1125-4")
+            self.assertEqual(ib.reuse_candidate("beta2", root), "beta2-rc10")     # 都没跑完：按号，不按字符串
+            self.assertEqual(ib.reuse_candidate("beta2.1", root), "beta2.1-rc20")
+            rel("beta2-rc5", phases=[("eval 16", True), ("diff", True), ("check", True)])
+            self.assertEqual(ib.reuse_candidate("beta2", root), "beta2-rc5")      # 跑完了的压过号大但中途停下的
+            rel("beta2-rc9", phases=[("eval 16", True), ("diff", False)])
+            self.assertEqual(ib.reuse_candidate("beta2", root), "beta2-rc9")      # 停在差异上没放行的也算评完了，号大的优先
+            with self.assertRaises(SystemExit):
+                ib.reuse_candidate("beta4", root)
+            with self.assertRaises(SystemExit):
+                ib.reuse_candidate("internal-1125", root)
+
+    def test_beta_eval_source_carries_over_only_on_accept(self):
+        """beta 沿不沿用：带 --reuse-rc 用上次记下的（没有就挑）；只带 --accept 接着用记下的；不带开关重发就不沿用（负责人关掉的办法）；
+        内部版、候选版一律 None。守护进程开始的回复照同一套规则写。"""
+        ib = self._tool("internal_build")
+        d = self._tool("release_daemon")
+        with tempfile.TemporaryDirectory() as root, unittest.mock.patch.object(ib, "log", lambda m: None):
+            os.makedirs(os.path.join(root, "releases", "beta3-rc2", "evidence"))
+            os.makedirs(os.path.join(root, "releases", "beta3-rc1", "evidence"))      # 上次记下的那个
+            with open(os.path.join(root, "releases", "beta3-rc2", "pins.json"), "w", encoding="utf-8") as f:
+                json.dump({"eval_mode": "full"}, f)
+            src = ib.beta_eval_source
+            self.assertEqual(src("beta3", None, True, False, root), "beta3-rc2")
+            self.assertEqual(src("beta3", "beta3-rc1", True, False, root), "beta3-rc1")     # 续跑：用记下的，不换
+            self.assertEqual(src("beta3", "beta3-rc1", False, True, root), "beta3-rc1")     # --accept 续跑
+            self.assertIsNone(src("beta3", "beta3-rc1", False, False, root))                # 不带开关重发：全评
+            self.assertIsNone(src("beta3", None, False, True, root))
+            self.assertIsNone(src("beta3", None, False, False, root))
+            self.assertIsNone(src("beta3-rc3", None, True, False, root))
+            self.assertIsNone(src("internal-1125", None, True, False, root))
+            self.assertEqual(src("beta3", "beta3-rc9", True, False, root), "beta3-rc2")     # 记下的不在了：带开关就重新挑
+            with self.assertRaises(SystemExit):
+                src("beta3", "beta3-rc9", False, True, root)                                # 只带 --accept：停下说清楚
+            self.assertIsNone(src("beta3", "beta3-rc9", False, False, root))
+            # 关掉沿用：拷来的证据和原始答复删掉，自己评的留着
+            ev = os.path.join(root, "releases", "beta3", "evidence")
+            os.makedirs(os.path.join(ev, "raw", "16"))
+            for name, extra in (("a.k.16.json", {"reused_from": "beta3-rc1", "raw": "raw/16/a.json"}), ("b.k.16.json", {})):
+                with open(os.path.join(ev, name), "w", encoding="utf-8") as f:
+                    json.dump(dict({"task": name[0]}, **extra), f)
+            with open(os.path.join(ev, "raw", "16", "a.json"), "w") as f:
+                f.write("{}")
+            self.assertEqual(ib.drop_reused("beta3", "beta3-rc1", root), 1)
+            self.assertEqual(sorted(os.listdir(ev)), ["b.k.16.json", "raw"])
+            self.assertEqual(os.listdir(os.path.join(ev, "raw", "16")), [])
+            self.assertEqual(ib.drop_reused("beta3", "beta3-rc1", root), 0)
+        self.assertIn("沿用最近一个候选版", d.reuse_note({"reuse_rc": True}, None))
+        self.assertIn("接着沿用 beta3-rc1", d.reuse_note({"reuse_rc": True}, "beta3-rc1"))
+        self.assertIn("接着沿用 beta3-rc1", d.reuse_note({"accept": True}, "beta3-rc1"))
+        self.assertIn("不再沿用 beta3-rc1", d.reuse_note({}, "beta3-rc1"))
+        self.assertEqual(d.reuse_note({}, None), "")
+        self.assertEqual(d.reuse_note({"accept": True}, None), "")
+        with open(os.path.join(ROOT, "tools", "internal_build.py"), encoding="utf-8") as f:
+            main_src = f.read().split("def main()", 1)[1]
+        self.assertIn('beta_eval_source(a.tag, own_state.get("reuse_rc"), a.reuse_rc, a.accept)', main_src)
+        self.assertIn('state.pop("reuse_rc", None)', main_src)
+        self.assertIn('drop_reused(a.tag, own_state["reuse_rc"])', main_src)
+        self.assertLess(main_src.index("beta_eval_source("), main_src.index("plan_eval(a.tag, pins, src, eval_from,"))
+
+    def test_reuse_rc_rejected_up_front_when_pinned_core_is_too_old(self):
+        """钉住的 core 里的 internal_build 不认 --reuse-rc：开始之前就拒，说清楚原因（不然起来退出码 2、日志里什么都没有）"""
+        d = self._tool("release_daemon")
+        with tempfile.TemporaryDirectory() as core:
+            os.makedirs(os.path.join(core, "tools"))
+            with open(os.path.join(core, "tools", "internal_build.py"), "w", encoding="utf-8") as f:
+                f.write('ap.add_argument("--no-eval")\n')
+            with self.assertRaises(RuntimeError) as e:
+                d.check_reuse_supported(core, "beta2", "f5e16dc02ec4")
+            self.assertIn("还不认 --reuse-rc", str(e.exception))
+            self.assertIn("f5e16dc", str(e.exception))
+            with open(os.path.join(core, "tools", "internal_build.py"), "w", encoding="utf-8") as f:
+                f.write('ap.add_argument("--reuse-rc")\n')
+            d.check_reuse_supported(core, "beta2", "abc1234")
+        d.check_reuse_supported(ROOT, "beta2", "HEAD")       # 这一版自己认
+        src = inspect.getsource(d.start_build)
+        self.assertLess(src.index("check_reuse_supported("), src.index("subprocess.Popen("))
+
+    def test_plan_eval_reuses_candidate_evidence(self):
+        """beta 沿用候选版：plan_eval 拿候选版的证据当「上一版」，过了 reusable 的格子沿用、不重跑，没过的照旧评；
+        沿用的证据拷过来记 reused_from = 候选版。发布说明写「沿用候选版 <rc> N 条」，中间不多空格。"""
+        ib = self._tool("internal_build")
+        rel = self.rel
+        template = os.path.join(ROOT, "recipes", "dev.json")
+        evals = rel.load_evals()
+        task, other, tier = "luoke-mail.triage", "luoke-mail.thread", "128"
+        combos = rel.plan_combos(ib.Recipe.load(template), [tier], [task, other])
+        key = next(k for (t, k) in combos if t == task)
+        with tempfile.TemporaryDirectory() as root, unittest.mock.patch.object(ib, "ROOT", root), \
+                unittest.mock.patch.object(ib, "log", lambda m: None), \
+                unittest.mock.patch.object(ib, "reusable", lambda old, spec, *a, **k: spec is evals[task]):
+            ev = os.path.join(root, "releases", "beta3-rc2", "evidence")
+            os.makedirs(ev)
+            d = {"release": "beta3-rc2", "task": task, "accessory": "luoke-mail", "tier_run": tier, "score": 40, "score_max": 47,
+                 "hard_ok": True, "combo": {"key": key, "model": "m", "base": "b", "tiers": [tier], "params": {}}}
+            with open(os.path.join(ev, f"{task}.x.{tier}.json"), "w", encoding="utf-8") as f:
+                json.dump(d, f)
+            to_run, reused, deferred, canary = ib.plan_eval("beta3", {}, {"luoke-mail": "/m"}, "beta3-rc2", template, [tier], evals,
+                                                            only=[task, other])
+            self.assertEqual([(t, x["task"]) for t, x in reused], [(tier, task)])
+            self.assertEqual(to_run, {tier: [other]})
+            self.assertEqual(canary, {})
+            ib.copy_reused("beta3", "beta3-rc2", reused)
+            got = rel.load_evidence(os.path.join(root, "releases", "beta3"))
+            self.assertEqual([(k[0], v["reused_from"], v["release"]) for k, v in got.items()], [(task, "beta3-rc2", "beta3")])
+        with open(os.path.join(ROOT, "tools", "internal_build.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn('reused_label=f"候选版 {eval_from}" if', src)
+        self.assertIn("沿用{reused_label} {len(reused)} 条", src)
+
     def test_eval_paths_limit_reuse_check(self):
         """11-09 应 luoke-ime：评测表写了 paths 的，只在这些路径（加评测程序、题集）变了时重跑；没写的照旧看整个仓库（文档除外）。"""
         ib = self._tool("internal_build")
@@ -5104,6 +5250,8 @@ class ReleaseToolsTest(unittest.TestCase):
         with unittest.mock.patch.object(d, "CORE", root):
             json.dump({"phases": [{"name": "publish", "start": 0, "end": 1}, {"name": "repeats", "start": 1, "end": None}]}, open(p, "w"))
             self.assertTrue(d.in_repeats("internal-1024"))
+            self.assertTrue(d.in_repeats("internal-1024", 1))
+            self.assertFalse(d.in_repeats("internal-1024", 5))     # 上一次留下的复测（没记结束）：这一次 5 秒才开始，不算
             json.dump({"phases": [{"name": "eval 16", "start": 0, "end": None}]}, open(p, "w"))
             self.assertFalse(d.in_repeats("internal-1024"))
             self.assertFalse(d.in_repeats("missing"))
@@ -5515,6 +5663,283 @@ class ReleaseToolsTest(unittest.TestCase):
             raise OSError("磁盘满了")
         self.assertFalse(finish(full))
         self.assertIn("挂到局域网时出错：磁盘满了", replies[-1])
+
+    def test_beta_publish_and_discard_requests(self):
+        """beta 先发草稿（11-25）：/release betaN --publish 转正、--discard 删草稿，只认负责人本人、只给 beta、不带别的参数"""
+        d = self._tool("release_daemon")
+        allowed, owner, rcs = {"lab-owner", "lab-dev"}, "lab-owner", {"lab-bot"}
+        def c(body, who="lab-owner"):
+            return {"id": 7, "body": body, "user": {"login": who}}
+        self.assertEqual(d.parse_request(c("/release beta3 --publish"), allowed, owner, rcs),
+                         {"finalize": "publish", "tag": "beta3", "by": "lab-owner", "comment": 7})
+        self.assertEqual(d.parse_request(c("/release beta3.1 --discard"), allowed, owner, rcs)["finalize"], "discard")
+        for body, who in (("/release beta3 --publish", "lab-dev"), ("（luoke-top 会话）/release beta3 --publish", "lab-owner"),
+                          ("/release beta3 --publish", "lab-bot")):
+            self.assertIn("reject", d.parse_request(c(body, who), allowed, owner, rcs), body + " " + who)
+        for body in ("/release --publish", "/release internal-1125 --publish", "/release beta3-rc1 --publish",
+                     "/release beta3 --publish --discard", "/release beta3 --publish --accept"):
+            self.assertIn("reject", d.parse_request(c(body), allowed, owner, rcs), body)
+        self.assertEqual(d.parse_request(c("/release beta3"), allowed, owner, rcs)["tag"], "beta3")     # 不带开关照旧出（建草稿）
+        # 负责人可以是几个账号（11-25）；会话标签照旧不给权限
+        two = ["lab-owner", "lab-dev"]
+        for who in two:
+            self.assertEqual(d.parse_request(c("/release beta3", who), allowed, two, rcs)["tag"], "beta3")
+            self.assertEqual(d.parse_request(c("/release beta3 --publish", who), allowed, two, rcs)["finalize"], "publish")
+            self.assertTrue(d.parse_request(c("/release --accept", who), allowed, two, rcs)["accept"])
+            self.assertIn("reject", d.parse_request(c("（luoke-top 会话）/release beta3", who), allowed, two, rcs))
+            self.assertEqual(d.parse_request(c("（luoke-top 会话）/release", who), allowed, two, rcs)["by"], who + "（会话）")
+        self.assertIn("reject", d.parse_request(c("/release beta3", "lab-bot"), allowed, two, rcs))
+        self.assertEqual(d.owners_of("a, b"), {"a", "b"})
+        self.assertEqual(d.owners_of(["a", " b ", ""]), {"a", "b"})
+        self.assertEqual(d.owners_of(None), set())
+        self.assertIn('owners_of(os.environ.get("LUOKE_RELEASE_OWNER") or lab.get("owner"))', inspect.getsource(d.tick))
+
+    def test_internal_build_uploads_beta_as_a_draft(self):
+        """beta 的 publish 建草稿（--draft，不写 ClamAV 索引），建完核附件、记进 releases/<tag>/draft.json；内部版照旧直接发预发布版"""
+        ib = self._tool("internal_build")
+        src = inspect.getsource(ib.publish)
+        self.assertIn('"--draft"', src)
+        self.assertIn('"--prerelease"', src)
+        self.assertNotIn("put_clamav_index(", src)          # 索引转正时才写
+        self.assertLess(src.index("releases_by_tag(repo, tag"), src.index('"--draft"'))     # 已经有同名的：对得上接着用，对不上停
+        self.assertLess(src.index("check_draft(old, shas)"), src.index('"--draft"'))
+        sleeps = []
+        with tempfile.TemporaryDirectory() as root, unittest.mock.patch.object(ib, "ROOT", root), \
+                unittest.mock.patch.object(ib, "log", lambda m: None), unittest.mock.patch.object(ib.time, "sleep", sleeps.append):
+            os.makedirs(os.path.join(root, "releases", "beta3"))
+            files = []
+            for name, body in (("Luoke.dmg", b"dmg"), ("release.json", b"{}")):
+                p = os.path.join(root, name)
+                with open(p, "wb") as f:
+                    f.write(body)
+                files.append(p)
+            sha = ib.release.download.sha256_file(files[0])
+            assets = [{"name": "Luoke.dmg", "size": 3, "state": "uploaded", "digest": "sha256:" + sha},
+                      {"name": "release.json", "size": 2, "state": "uploaded"}]
+            listing = [{"id": 99, "tag_name": "beta3", "draft": True, "html_url": "https://example.invalid/untagged-1", "assets": assets}]
+            # 刚传完 GitHub 还没就绪、接口一时不通：隔一会儿再看
+            seq = [None, [dict(listing[0], assets=[assets[0], dict(assets[1], state="starter")])], listing]
+            with unittest.mock.patch.object(ib, "releases_by_tag", lambda repo, tag, env, check=True: seq.pop(0)):
+                ib.record_draft("beta3", "o/r", files, "# 索引", None)
+            self.assertEqual((seq, len(sleeps)), ([], 2))
+            shas = ib.local_shas(files)
+            self.assertEqual(ib.check_draft(listing, shas)[2], [])       # 重跑时对得上就接着用
+            # 清单里核过的包不再重读，只算清单外的
+            manifest = {"items": {"mail": {"kind": "accessory", "files": [{"path": "m.zip", "sha256": "aa"}]},
+                                  "engine": {"kind": "engine", "files": [{"path": "e.zip", "sha256": "bb"}]}},
+                        "installers": {"dmg": {"file": "Luoke.dmg", "sha256": "cc"}}}
+            known = ib.manifest_shas(root, manifest)
+            self.assertEqual(known, {os.path.join(root, "accessories", "m.zip"): "aa", os.path.join(root, "engine", "e.zip"): "bb",
+                                     os.path.join(root, "Luoke.dmg"): "cc"})
+            read = []
+            with unittest.mock.patch.object(ib.release.download, "sha256_file", lambda p: read.append(os.path.basename(p)) or "dd"):
+                got_shas = ib.local_shas(files, known)
+            self.assertEqual((read, got_shas["Luoke.dmg"][1], got_shas["release.json"][1]), (["release.json"], "cc", "dd"))
+            self.assertIn("local_shas(assets, manifest_shas(out, manifest))", src)
+            self.assertTrue(ib.check_draft([dict(listing[0], draft=False)], shas)[2])
+            got = json.load(open(os.path.join(root, "releases", "beta3", "draft.json"), encoding="utf-8"))
+            self.assertEqual((got["id"], got["url"], got["clamav_index"]), (99, "https://example.invalid/untagged-1", "# 索引"))
+            self.assertEqual([(a["name"], a["size"]) for a in got["assets"]], [("Luoke.dmg", 3), ("release.json", 2)])
+            for bad in ([dict(assets[0], digest="sha256:00"), assets[1]], [assets[0]], [assets[0], dict(assets[1], size=5)],
+                        [assets[0], dict(assets[1], state="starter")]):
+                with unittest.mock.patch.object(ib, "releases_by_tag", lambda repo, tag, env, check=True: [dict(listing[0], assets=bad)]), \
+                        self.assertRaises(SystemExit):
+                    ib.record_draft("beta3", "o/r", files, None, None)
+            with unittest.mock.patch.object(ib, "releases_by_tag", lambda repo, tag, env, check=True: listing * 2), self.assertRaises(SystemExit):
+                ib.record_draft("beta3", "o/r", files, None, None)
+        with open(os.path.join(ROOT, "tools", "internal_build.py"), encoding="utf-8") as f:
+            pub = f.read().split("def publish(", 1)[1].split("\ndef ", 1)[0]
+        # 同名的已经转正了：说换一个号，不让负责人去 --discard（--discard 不碰已发布的）
+        published_branch = pub.split("if not all(x.get(\"draft\") for x in old):", 1)[1].split("die(f\"{repo} 里已经有", 1)[0]
+        self.assertIn("换一个号出", published_branch)
+        self.assertNotIn("--discard", published_branch)
+
+    def test_release_finalize_publishes_or_discards_the_recorded_draft(self):
+        """转正：草稿还在、只有一个、附件和 draft.json 一致才转；先写 ClamAV 索引再转正、设为最新；已经转正的不重做。
+        删草稿：只删草稿，已转正的不碰；删掉 draft.json、steps.json 的 publish，重出时从上传接着做"""
+        fin = self._tool("release_finalize")
+        with tempfile.TemporaryDirectory() as root:
+            rec = os.path.join(root, "releases", "beta3")
+            os.makedirs(rec)
+            draft = {"tag": "beta3", "repo": "o/r", "id": 99, "url": "https://example.invalid/untagged-1", "clamav_index": "# 索引",
+                     "assets": [{"name": "Luoke.dmg", "size": 3, "sha256": "ab"}]}
+            def write_draft():
+                with open(os.path.join(rec, "draft.json"), "w", encoding="utf-8") as f:
+                    json.dump(draft, f)
+            write_draft()
+            with open(os.path.join(rec, "steps.json"), "w", encoding="utf-8") as f:
+                json.dump({"sign": "x", "dmg": "x", "publish": "x"}, f)
+            rel = {"id": 99, "tag_name": "beta3", "draft": True, "assets": [{"name": "Luoke.dmg", "size": 3, "state": "uploaded", "digest": "sha256:ab"}]}
+            calls = []
+            def api(listing):
+                def f(args, env, body=None):
+                    calls.append((args[:3], body))
+                    if args[0] == "--paginate":
+                        return [listing]
+                    if args[:2] == ["-X", "PATCH"]:
+                        return {"draft": False, "html_url": "https://example.invalid/tag/beta3"}
+                    return None
+                return f
+            index = []
+            with unittest.mock.patch.object(fin.ib, "put_clamav_index", lambda text, env: (index.append(text), calls.append(("index", text)))):
+                for listing, why in (([], "找不到"), ([rel, dict(rel, id=100)], "2 个"),
+                                     ([dict(rel, assets=[dict(rel["assets"][0], size=4)])], "大小"),
+                                     ([dict(rel, assets=[dict(rel["assets"][0], digest="sha256:cd")])], "哈希"),
+                                     ([dict(rel, assets=[])], "少了")):
+                    with unittest.mock.patch.object(fin, "gh_api", api(listing)), self.assertRaisesRegex(fin.Refused, why):
+                        fin.publish("beta3", root, None)
+                self.assertEqual(index, [])          # 没核过就不写索引
+                calls.clear()
+                with unittest.mock.patch.object(fin, "gh_api", api([rel])):
+                    msg = fin.publish("beta3", root, None)
+                self.assertIn("转正了：https://example.invalid/tag/beta3", msg)
+                order = ["index" if c[0] == "index" else "list" if c[0][0] == "--paginate" else c[0][1] for c in calls]
+                self.assertEqual(order, ["list", "index", "PATCH"])
+                self.assertEqual(calls[-1], (["-X", "PATCH", "repos/o/r/releases/99"], {"draft": False, "make_latest": "true"}))
+                self.assertEqual(json.load(open(os.path.join(rec, "draft.json")))["published"]["url"], "https://example.invalid/tag/beta3")
+                with unittest.mock.patch.object(fin, "gh_api", api([dict(rel, draft=False, html_url="u")])):
+                    self.assertIn("已经转正过了", fin.publish("beta3", root, None))
+                    with self.assertRaisesRegex(fin.Refused, "只删草稿"):
+                        fin.discard("beta3", root, None)
+            # 转正这一步失败：索引已经写了，回复说再发一次就补上
+            write_draft()
+            def patch_fails(args, env, body=None):
+                if args[0] == "--paginate":
+                    return [[rel]]
+                raise fin.Refused("HTTP 502")
+            with unittest.mock.patch.object(fin.ib, "put_clamav_index", lambda text, env: None), \
+                    unittest.mock.patch.object(fin, "gh_api", patch_fails), self.assertRaisesRegex(fin.Refused, "502.*索引已经写了.*再发一次"):
+                fin.publish("beta3", root, None)
+            calls.clear()
+            with unittest.mock.patch.object(fin, "gh_api", api([rel, dict(rel, id=100, html_url="https://example.invalid/untagged-2")])):
+                msg = fin.discard("beta3", root, None)      # 只删记着的那个，别人手建的同名草稿不碰
+            self.assertIn("草稿删了（1 个）", msg)
+            self.assertIn("另有 1 个同名草稿不是流水线建的，没动：https://example.invalid/untagged-2", msg)
+            self.assertEqual([c[0] for c in calls[1:]], [["-X", "DELETE", "repos/o/r/releases/99"]])
+            self.assertFalse(os.path.exists(os.path.join(rec, "draft.json")))
+            self.assertEqual(json.load(open(os.path.join(rec, "steps.json"))), {"sign": "x", "dmg": "x"})
+            write_draft()
+            calls.clear()
+            with unittest.mock.patch.object(fin, "gh_api", api([dict(rel, id=100), dict(rel, id=101)])):   # 记着的已经被手删了：同名的都删
+                self.assertIn("草稿删了（2 个）", fin.discard("beta3", root, None))
+            self.assertEqual([c[0][2].rsplit("/", 1)[1] for c in calls[1:]], ["100", "101"])
+            calls.clear()
+            with unittest.mock.patch.object(fin, "gh_api", api([rel, dict(rel, id=100)])):      # 没有记录：同名草稿都删
+                self.assertIn("草稿删了（2 个）", fin.discard("beta3", root, None))
+            self.assertEqual([c[0][2].rsplit("/", 1)[1] for c in calls[1:]], ["99", "100"])      # 没有记录：仓库按 tag 定
+            with unittest.mock.patch.object(fin, "gh_api", api([])):
+                self.assertIn("没有记着的 beta3 草稿", fin.discard("beta3", root, None))
+                with self.assertRaisesRegex(fin.Refused, "draft.json 不在"):
+                    fin.publish("beta3", root, None)
+
+    def test_daemon_runs_finalize_at_once_and_notes_the_draft(self):
+        """--publish / --discard 不排队、马上跑工具目录的 release_finalize.py，按它最后一行「=> 」回复；正在出的同一版还没建草稿就叫等。
+        草稿建好先回复一次（复测还在跑）；出完的 beta 回复写草稿地址和怎么转正。删了草稿的 beta 可以重出"""
+        import subprocess
+        d = self._tool("release_daemon")
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        replies = []
+        for p in (unittest.mock.patch.object(d, "CORE", tmp), unittest.mock.patch.object(d, "BUILD", tmp),
+                  unittest.mock.patch.object(d, "reply", replies.append), unittest.mock.patch.object(d, "log", lambda m: None)):
+            p.start()
+            self.addCleanup(p.stop)
+        rec = os.path.join(tmp, "releases", "beta3")
+        os.makedirs(rec)
+        ran = []
+        def fake_run(out, rc=0):
+            def f(cmd, **kw):
+                ran.append(cmd)
+                return subprocess.CompletedProcess(cmd, rc, stdout=out, stderr="")
+            return f
+        st = {"running": {"tag": "beta3", "pid": os.getpid(), "rc": os.path.join(tmp, "rc"), "pins": {}, "started": 100, "drafts": True}, "history": []}
+        with unittest.mock.patch.object(d.subprocess, "run", fake_run("")):
+            d.finalize({"finalize": "publish", "tag": "beta3", "by": "lab-owner"}, st)
+        self.assertEqual(ran, [])
+        self.assertIn("草稿还没建好", replies[-1])
+        d.note_draft(st)
+        self.assertEqual(len(replies), 1)
+        with open(os.path.join(rec, "draft.json"), "w", encoding="utf-8") as f:
+            json.dump({"url": "https://example.invalid/untagged-1", "created": 50}, f)
+        d.note_draft(st)                      # 上一次出版留下的草稿记录不算
+        self.assertEqual(len(replies), 1)
+        with unittest.mock.patch.object(d.subprocess, "run", fake_run("=> 不该跑")):
+            d.finalize({"finalize": "publish", "tag": "beta3", "by": "lab-owner"}, st)     # 正在重出：上一次的草稿不能转正
+        self.assertEqual(ran, [])
+        self.assertIn("现在记着的是上一次的草稿", replies[-1])
+        replies.pop()
+        # 上一次在复测中途被结束（没记结束时间）、这一次还没进下一步：留下的 repeats 不算这一次到了复测
+        with open(os.path.join(rec, "timeline.json"), "w", encoding="utf-8") as f:
+            json.dump({"phases": [{"name": "publish", "start": 40, "end": 45}, {"name": "repeats", "start": 50, "end": None}]}, f)
+        with unittest.mock.patch.object(d.subprocess, "run", fake_run("=> 不该跑")):
+            d.finalize({"finalize": "publish", "tag": "beta3", "by": "lab-owner"}, st)
+        self.assertEqual(ran, [])
+        self.assertIn("现在记着的是上一次的草稿", replies.pop())
+        # 钉住的提交没变的续跑：上传跳过、直接到复测，旧的那份就是这一次的草稿，照常放行
+        with open(os.path.join(rec, "timeline.json"), "w", encoding="utf-8") as f:
+            json.dump({"phases": [{"name": "publish", "start": 40, "end": 45}, {"name": "repeats", "start": 110, "end": None}]}, f)
+        with unittest.mock.patch.object(d.subprocess, "run", fake_run("=> **beta3** 转正了：u。\n")):
+            d.finalize({"finalize": "publish", "tag": "beta3", "by": "lab-owner"}, st)
+        self.assertEqual((len(ran), replies.pop()), (1, "**beta3** 转正了：u。"))
+        ran.clear()
+        os.remove(os.path.join(rec, "timeline.json"))
+        with open(os.path.join(rec, "draft.json"), "w", encoding="utf-8") as f:
+            json.dump({"url": "https://example.invalid/untagged-1", "created": 200}, f)
+        d.note_draft(st)
+        d.note_draft(st)
+        self.assertEqual(len(replies), 2)
+        self.assertIn("草稿建好了：https://example.invalid/untagged-1", replies[-1])
+        self.assertIn("/release beta3 --publish", replies[-1])
+        done_st = {"running": dict(st["running"], draft_noted=False, pid=2 ** 22 + 7)}     # 已经出完（进程没了）：只等 finish_build 回复
+        d.note_draft(done_st)
+        self.assertEqual(len(replies), 2)
+        with unittest.mock.patch.object(d.subprocess, "run", fake_run("$ gh api …\n=> **beta3** 转正了：u。\n")):
+            d.finalize({"finalize": "publish", "tag": "beta3", "by": "lab-owner"}, st)
+        self.assertEqual(ran[-1][3:], ["publish", "beta3", "--root", tmp])
+        self.assertTrue(ran[-1][1:3] == ["-B", os.path.join(d.ROOT, "tools", "release_finalize.py")])
+        self.assertEqual(replies[-1], "**beta3** 转正了：u。")
+        with unittest.mock.patch.object(d.subprocess, "run", fake_run("失败：命令退出码 1：gh api …\n", rc=1)):
+            d.finalize({"finalize": "publish", "tag": "beta3", "by": "lab-owner"}, st)
+        self.assertIn("没做成", replies[-1])
+        self.assertIn("失败：命令退出码 1", replies[-1])
+        # 出完：草稿还没转正，回复草稿地址和怎么转正
+        with open(st["running"]["rc"], "w") as f:
+            f.write("0\n")
+        with unittest.mock.patch.object(d.subprocess, "run", fake_run("摘要")):
+            d.finish_build(st)
+        self.assertIn("出好了（草稿，还没转正）：https://example.invalid/untagged-1", replies[-1])
+        self.assertIn("--publish", replies[-1])
+        self.assertTrue(st["history"][-1]["ok"])
+        self.assertNotIn("discarded", st["history"][-1])
+        # 删草稿：出过的记录标上 discarded，之后可以重出
+        with unittest.mock.patch.object(d.subprocess, "run", fake_run("=> **beta3** 的草稿删了（1 个）。\n")):
+            d.finalize({"finalize": "discard", "tag": "beta3", "by": "lab-owner"}, st)
+        self.assertTrue(st["history"][-1]["discarded"])
+        os.makedirs(os.path.join(tmp, "tools"))
+        with open(os.path.join(tmp, "tools", "internal_build.py"), "w", encoding="utf-8") as f:
+            f.write("def record_draft(tag):\n    pass\n")         # 钉住的 core 会建草稿
+        with unittest.mock.patch.object(d, "pins_from_top", lambda t: {"luoke-core": "a" * 40}), \
+                unittest.mock.patch.object(d, "not_on_public", lambda p: []), \
+                unittest.mock.patch.object(d, "previous_beta", lambda t: None), \
+                unittest.mock.patch.object(d, "sh", lambda *a, **k: ""), \
+                unittest.mock.patch.object(d.subprocess, "Popen", lambda *a, **k: types.SimpleNamespace(pid=5)):
+            d.start_build({"tag": "beta3", "by": "lab-owner"}, st)
+        self.assertEqual(st["running"]["tag"], "beta3")
+        # 复测时草稿被删了：出完的回复照实说，记录也标上
+        os.remove(os.path.join(rec, "draft.json"))
+        st["running"]["rc"] = os.path.join(tmp, "rc")
+        with unittest.mock.patch.object(d.subprocess, "run", fake_run("摘要")):
+            d.finish_build(st)
+        self.assertIn("草稿已经删了", replies[-1])
+        self.assertTrue(st["history"][-1]["discarded"])
+        # 钉的是还直接发的旧 core（beta2）：没有 draft.json 是正常的，照旧回复发布页，不当成删了草稿
+        st["running"] = {"tag": "beta2", "pid": 1, "rc": os.path.join(tmp, "rc"), "pins": {}, "started": 100}
+        d.note_draft(st)
+        with unittest.mock.patch.object(d.subprocess, "run", fake_run("https://example.invalid/tag/beta2")):
+            d.finish_build(st)
+        self.assertIn("**beta2** 出好了：https://example.invalid/tag/beta2", replies[-1])
+        self.assertNotIn("discarded", st["history"][-1])
+        self.assertFalse(d.makes_drafts(os.path.join(tmp, "nowhere")))
 
     def test_internal_build_treats_candidates_like_beta(self):
         """候选版 betaN-rcM 和 beta 一样全评、全部现打；测试托管（--url-base）不做发布后的复测，也不上传。"""

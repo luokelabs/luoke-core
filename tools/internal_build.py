@@ -4,6 +4,7 @@
     python3 tools/internal_build.py --tag internal-1016 --pin luoke-core=<sha> --pin luoke-mail=<sha> --pin luoke-mem=<sha> --pin luoke-ime=<sha>
         [--from-top]            从顶层仓库的标签读子模块指针（先 git fetch --tags），不用一个个 --pin
         [--prev <发布号>]        沿用谁的证据、和谁比差异（默认 releases/ 里最近的一个）
+        [--reuse-rc]            只给 beta：沿用它最近一个候选版的评测证据（逐格核过没变的才沿用；默认不开，beta 全评）
         [--tiers 16,32,128] [--steps freeze,apps,eval,merge,diff,recipe,engine,manifest,build,sign,dmg,publish]
         [--skip-remote]         只评本机那一档（排练用）
         [--no-publish]          不传 GitHub
@@ -961,6 +962,85 @@ def no_eval_allowed(tag: str) -> bool:
     return bool(re.fullmatch(r"internal-\d{4}(-\d+)?", tag))
 
 
+def rc_evals_done(rec: str) -> bool:
+    """候选版的评测跑完了吗：timeline.json 里到过 diff 这一步（各档评完、合并以后才走到；停在差异上没放行的也算评完了）。
+    评测中途停下的候选版证据不全"""
+    try:
+        with open(os.path.join(rec, "timeline.json"), encoding="utf-8") as f:
+            phases = json.load(f).get("phases") or []
+    except (OSError, ValueError, AttributeError):
+        return False
+    return any(isinstance(p, dict) and p.get("name") == "diff" for p in phases)
+
+
+def reuse_candidate(tag: str, root: str = "") -> str:
+    """--reuse-rc：beta 沿用它最近一个候选版（betaN-rcM）真评过的证据。只认 releases/ 里有证据、pins.json 记着全评的
+    （候选版本来不许 --no-eval，这里再核一遍）；评测跑完了的（rc_evals_done）优先，都没跑完才挑号最大的：评测中途停下的候选版证据不全，
+    挑它会多评。没有就停：开了这个开关又找不到候选版，不悄悄退回全评，让人知道。
+    哪些格子能沿用照内部版的同一套条件逐格核（reusable）：配件、主控代码、实际跑的引擎、评测表、题集都没变才沿用，其余照旧重评。"""
+    if not re.fullmatch(r"beta\d+(\.\d+)?", tag):
+        die(f"{tag}：--reuse-rc 只给 beta（betaN[.M]）")
+    base = os.path.join(root or ROOT, "releases")
+    found = []
+    for n in os.listdir(base) if os.path.isdir(base) else []:
+        m = re.fullmatch(re.escape(tag) + r"-rc(\d+)", n)
+        if not m or not os.path.isdir(os.path.join(base, n, "evidence")):
+            continue
+        try:
+            with open(os.path.join(base, n, "pins.json"), encoding="utf-8") as f:
+                mode = json.load(f).get("eval_mode")
+        except (OSError, ValueError):
+            continue
+        if mode == "full":
+            found.append((rc_evals_done(os.path.join(base, n)), int(m.group(1)), n))
+    if not found:
+        die(f"--reuse-rc：releases/ 里没有 {tag} 全评过的候选版（{tag}-rcM），没有证据可沿用")
+    done, _, name = max(found)
+    n_ev = len(glob.glob(os.path.join(base, name, "evidence", "*.json")))
+    log(f"--reuse-rc：挑 {name}（{'评测跑完了' if done else '评测没跑完，没有跑完了的候选版'}，{n_ev} 条证据）")
+    return name
+
+
+def beta_eval_source(tag: str, recorded: Optional[str], reuse_rc: bool, accept: bool, root: str = "") -> Optional[str]:
+    """beta 这一次的评测证据沿用哪个候选版（None：全评）。带 --reuse-rc：用这一版上次记下的（续跑），没记过就挑一个；
+    只带 --accept（差异停下后放行）：上次记下了就接着沿用，不然续跑会把沿用的格子重评一遍；
+    别的情况（不带开关重发）：不沿用、全评，上次记下的作废，这是负责人关掉沿用的办法。"""
+    if not re.fullmatch(r"beta\d+(\.\d+)?", tag):
+        return None
+    if recorded and not os.path.isdir(os.path.join(root or ROOT, "releases", recorded, "evidence")) and (reuse_rc or accept):
+        # 记下的候选版不在了：照旧"沿用"只会悄悄全评。带 --reuse-rc 就重新挑；只带 --accept 停下，让负责人选
+        if not reuse_rc:
+            die(f"上次记下沿用的候选版 {recorded} 不在了（releases/{recorded}/evidence）：带 --reuse-rc 重新挑一个，或者不带开关重发、全评")
+        log(f"上次记下沿用的候选版 {recorded} 不在了，重新挑")
+        recorded = None
+    if reuse_rc:
+        return recorded or reuse_candidate(tag, root)
+    if accept and recorded:
+        return recorded
+    return None
+
+
+def drop_reused(tag: str, src_tag: str, root: str = "") -> int:
+    """不再沿用 src_tag：删掉这一版里从它拷来的证据（reused_from 是它的）和跟着拷来的原始答复。
+    不删的话，这一次不评的格子（挪到发布后、hold 着）还留着候选版的结果，差异和台账照样读到，说明里却写着全评。返回删了几条。"""
+    ev = os.path.join(root or ROOT, "releases", tag, "evidence")
+    n = 0
+    for p in glob.glob(os.path.join(ev, "*.json")):
+        try:
+            with open(p, encoding="utf-8") as f:
+                d = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(d, dict) or d.get("reused_from") != src_tag:
+            continue
+        raw = d.get("raw")
+        if raw and os.path.isfile(os.path.join(ev, raw)):
+            os.remove(os.path.join(ev, raw))
+        os.remove(p)
+        n += 1
+    return n
+
+
 def reuse_all(tag: str, src_tag: str, src: Optional[dict] = None) -> tuple:
     """--no-eval：不评，整版拷 src_tag 的证据（记 reused_from）和支持台账，配方的开关就和它一样。
     这一版钉的是最新提交（11-09 定）：配件换了版本的，证据改记钉住的版本（配方写进已验证、照来源版的开关干活），
@@ -1582,10 +1662,10 @@ def clamav_plan(tag: str, apps: dict, env: Optional[dict] = None) -> Optional[di
     return {"version": version, "attach": attach, "files": files if attach else [], "patches": len(names) - 2, "found": found, "where": where}
 
 
-def write_clamav_index(found: dict, env: Optional[dict]) -> None:
-    """luoke-releases main 上的 ClamAV 源码索引（clamav_source.INDEX_PATH）。在建发布之前写：GitLab 镜像在发布建好时推 main，
-    就一起带过去。内容没变就不提交。"""
-    text = clamav_source.render_index(found)
+def put_clamav_index(text: str, env: Optional[dict]) -> None:
+    """luoke-releases main 上的 ClamAV 源码索引（clamav_source.INDEX_PATH），text 是 clamav_source.render_index 的原文。
+    beta 先建草稿（11-25），索引在转正时由 tools/release_finalize.py 写、写完再转正：草稿删了索引就没动过，
+    转正时 GitHub 才在 main 上打标签、GitLab 镜像这时推 main，就一起带过去。内容没变就不提交。"""
     api = f"repos/{RELEASES_REPO}/contents/{clamav_source.INDEX_PATH}"
     cur = run(["gh", "api", api], check=False, quiet=True, env=env)
     body = {"message": "licenses/clamav: ClamAV source index", "branch": "main",
@@ -1607,7 +1687,88 @@ def write_clamav_index(found: dict, env: Optional[dict]) -> None:
     log(f"已更新 {RELEASES_REPO} 的 {clamav_source.INDEX_PATH}")
 
 
-def publish(tag: str, pins: dict, apps: dict, reused: list, to_run: dict, note: str = "") -> None:
+DRAFT_FILE = "draft.json"      # releases/<tag>/ 里记 beta 草稿：转正时照它核附件、写 ClamAV 索引
+
+
+def releases_by_tag(repo: str, tag: str, env: Optional[dict], check: bool = True) -> Optional[list]:
+    """发布仓库里 tag_name 是 tag 的发布（草稿也算：草稿还没有真的标签，只能按 tag_name 找；要能写这个仓库的令牌才看得到草稿）。
+    check=False 时读不到返回 None，不停"""
+    r = run(["gh", "api", "--paginate", "--slurp", f"repos/{repo}/releases?per_page=100"], quiet=True, env=env, check=check)
+    try:
+        pages = json.loads(r.stdout or "[]") if r.returncode == 0 else None
+    except ValueError:
+        pages = None
+    if pages is None:
+        if check:
+            die(f"读不懂 {repo} 的发布列表")
+        return None
+    return [x for page in pages for x in page if x.get("tag_name") == tag]
+
+
+def check_draft(found: list, shas: dict) -> tuple:
+    """叫这个名字的发布里只有一个草稿、附件和本地文件一一对上（名字、大小；GitHub 给了 digest 再核 sha256）？
+    shas 是 {附件名: (路径, sha256)}。返回 (草稿, 附件记录, 问题)，问题为空才算对上"""
+    drafts = [x for x in found if x.get("draft")]
+    if len(found) != 1 or not drafts:
+        return None, [], [f"叫这个名字的发布有 {len(found)} 个（草稿 {len(drafts)} 个）"]
+    r = drafts[0]
+    remote = {x["name"]: x for x in r.get("assets") or []}
+    if set(remote) != set(shas):
+        return r, [], [f"附件少 {sorted(set(shas) - set(remote))}，多 {sorted(set(remote) - set(shas))}"]
+    rec, bad = [], []
+    for name, (p, sha) in sorted(shas.items()):
+        x = remote[name]
+        if x.get("state", "uploaded") != "uploaded" or x.get("size") != os.path.getsize(p) or (x.get("digest") and x["digest"] != "sha256:" + sha):
+            bad.append(name)
+        rec.append({"name": name, "size": x.get("size"), "sha256": sha})
+    return r, rec, ([f"{'、'.join(bad)} 没传完、大小或哈希不对"] if bad else [])
+
+
+def local_shas(files: list, known: Optional[dict] = None) -> dict:
+    """{附件名: (路径, sha256)}。known 是 {路径: sha256}（清单里已经核过的），这些不再重读，只算清单外的（release.json、ClamAV 的文件）"""
+    known = known or {}
+    return {os.path.basename(p): (p, known.get(p) or release.download.sha256_file(p)) for p in files}
+
+
+def manifest_shas(out: str, manifest: dict) -> dict:
+    """清单里记着的 {路径: sha256}：checked_assets 刚按它们核过，上传前不用再读一遍几 GB 的包"""
+    known = {}
+    for item in manifest["items"].values():
+        if item.get("kind") in ("accessory", "engine", "hub"):
+            sub = "accessories" if item["kind"] == "accessory" else ("engine" if item["kind"] == "engine" else "")
+            for f in item["files"]:
+                known[os.path.join(out, sub, f["path"])] = f["sha256"]
+    for ins in (manifest.get("installers") or {}).values():
+        known[os.path.join(out, ins["file"])] = ins["sha256"]
+    return known
+
+
+def record_draft(tag: str, repo: str, files: list, index_text: Optional[str], env: Optional[dict],
+                 shas: Optional[dict] = None, tries: int = 4, wait: float = 20) -> None:
+    """草稿核一遍（check_draft）、记进 releases/<tag>/draft.json：草稿的 id、地址、各附件的大小和 sha256、要写的 ClamAV 索引原文。
+    转正（tools/release_finalize.py）照它核，守护进程从这里拿地址。刚传完 GitHub 偶尔还没就绪、接口偶尔出错：隔一会儿再看，几次都不对才停"""
+    shas = shas or local_shas(files)
+    for i in range(tries):
+        found = releases_by_tag(repo, tag, env, check=False)
+        r, rec, bad = check_draft(found, shas) if found is not None else (None, [], ["读不到发布列表"])
+        if not bad:
+            break
+        if i + 1 < tries:
+            log(f"草稿还没对上（{bad[0]}），{wait:g} 秒后再看")
+            time.sleep(wait)
+    else:
+        die(f"建完草稿核不上：{'；'.join(bad)}。去 {repo} 的发布页看一眼；重发 /release {tag} 时草稿对得上就接着用，"
+            f"不要了请负责人发 /release {tag} --discard")
+    data = {"tag": tag, "repo": repo, "id": r["id"], "url": r.get("html_url") or "", "created": time.time(), "assets": rec,
+            "clamav_index": index_text}
+    path = os.path.join(ROOT, "releases", tag, DRAFT_FILE)
+    with open(path + ".tmp", "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=1)
+    os.replace(path + ".tmp", path)
+    log(f"草稿建好了：{data['url']}，附件 {len(rec)} 个；负责人看过后发 /release {tag} --publish 转正")
+
+
+def publish(tag: str, pins: dict, apps: dict, reused: list, to_run: dict, note: str = "", reused_label: str = "上一版") -> None:
     beta = bool(re.fullmatch(r"beta\d+(\.\d+)?", tag))
     if not beta and not re.fullmatch(r"internal-\d{4}(-\d+)?", tag):
         die(f"{tag} 不是内部版（internal-MMDD[-n]）也不是 beta（betaN[.M]）的标签：公开发布不走这个脚本的上传（要先问负责人）")
@@ -1620,7 +1781,7 @@ def publish(tag: str, pins: dict, apps: dict, reused: list, to_run: dict, note: 
     notes = ([f"封闭测试版 {tag}。", ""] if beta else [f"团队内部用，测试者请装 beta。", ""]) + [
              f"{'测试版' if beta else '内部版'} {tag}（{time.strftime('%Y-%m-%d %H:%M')}）：螺壳 {tag}，{versions}，引擎 {engine}。",
              "钉住的提交：" + "、".join(f"{k} {v[:7]}" for k, v in sorted(pins.items())), "",
-             f"评测：重跑 {sum(len(v) for v in to_run.values())} 条，沿用上一版 {len(reused)} 条。" +
+             f"评测：重跑 {sum(len(v) for v in to_run.values())} 条，沿用{reused_label} {len(reused)} 条。" +
              (f"注意：{note}" if note else ""),
              *[n + "。" for _, n in sorted((TIMELINE.data.get("kept") or {}).items())],
              *[f"这一版没带 {r}（原因见流程报告）。" for r in sorted(TIMELINE.data.get("dropped") or {})],
@@ -1633,13 +1794,32 @@ def publish(tag: str, pins: dict, apps: dict, reused: list, to_run: dict, note: 
     notes_path = os.path.join(out, "notes.md")
     with open(notes_path, "w", encoding="utf-8") as f:
         f.write("\n".join(notes) + "\n")
-    if clamav and clamav["attach"]:
-        write_clamav_index(clamav["found"], gh_env)
+    # ClamAV 源码索引不在这里写：beta 建的是草稿，转正时才写（put_clamav_index）
+    index_text = clamav_source.render_index(clamav["found"]) if clamav and clamav["attach"] else None
     # 内部版标 Pre-release，beta 和正式版不标：GitHub 的 latest 只落在 beta / 正式版上，官网的 latest/download 链接才对（luoke-brand#6）
     repo = releases_repo(tag)
     title = f"螺壳 {tag}（封闭测试版）" if beta else f"螺壳 {tag}（内部版 · 团队用）"
-    run(["gh", "release", "create", tag, "--repo", repo] + ([] if beta else ["--prerelease"]) + ["--title", title,
-         "--notes-file", notes_path] + assets, env=gh_env)
+    if beta:
+        # beta 先建草稿（11-25）：负责人看过后发 /release <tag> --publish 转正（tools/release_finalize.py）。草稿不算 latest、
+        # 不触发 GitLab 镜像、应用内检查更新也不认，转正前对外什么都不变
+        draft_path = os.path.join(ROOT, "releases", tag, DRAFT_FILE)
+        if os.path.exists(draft_path):
+            os.remove(draft_path)
+        shas = local_shas(assets, manifest_shas(out, manifest))
+        old = releases_by_tag(repo, tag, gh_env)
+        if old:
+            if not check_draft(old, shas)[2]:
+                # 上次传完、核的时候出了错（接口一时不通）：草稿和这次要传的一模一样就接着用，不用负责人删了重传
+                log(f"{repo} 里已经有 {tag} 的草稿，附件和这次的一样：接着用，不重传")
+                record_draft(tag, repo, assets, index_text, gh_env, shas)
+                return
+            if not all(x.get("draft") for x in old):
+                die(f"{repo} 里的 {tag} 已经转正了，和这次要传的不一样：已发布的版不能删也不能换，换一个号出（比如 {tag}.1）")
+            die(f"{repo} 里已经有 {tag} 的草稿，和这次要传的不一样：草稿不要了请负责人先发 /release {tag} --discard 删掉，再重出")
+        run(["gh", "release", "create", tag, "--repo", repo, "--draft", "--title", title, "--notes-file", notes_path] + assets, env=gh_env)
+        record_draft(tag, repo, assets, index_text, gh_env, shas)
+        return
+    run(["gh", "release", "create", tag, "--repo", repo, "--prerelease", "--title", title, "--notes-file", notes_path] + assets, env=gh_env)
     r = run(["gh", "release", "view", tag, "--repo", repo, "--json", "assets,url", "-q", ".url, (.assets | length)"], quiet=True, env=gh_env)
     log("已发布：" + r.stdout.strip().replace("\n", "，附件 "))
     if not beta and INTERNAL_BRIDGE:
@@ -1669,6 +1849,7 @@ def main() -> None:
     ap.add_argument("--full-eval", action="store_true", help="不用金丝雀，全评（beta、公开版本来就全评）")
     ap.add_argument("--build-mail", action="store_true", help="不再用：邮件助手打进主控（ADR 0022）。留着是让还带这个参数的调用不出错")
     ap.add_argument("--accept", action="store_true", help="差异报告有回退也放行（内部版默认不放行）")
+    ap.add_argument("--reuse-rc", action="store_true", help="beta 沿用最近一个候选版的评测证据：逐格核过没变的才沿用，其余照旧评（默认不开，beta 全评）")
     ap.add_argument("--no-eval", action="store_true", help="不评测：整版沿用上一版真评过的证据和开关，不比差异、不做发布后复测（只给内部版）")
     ap.add_argument("--allow-deviation", default=None, metavar="理由", help="--pin 和 --from-top 的标签不一致时放行，理由写进发布说明")
     ap.add_argument("--only-tasks", default=None, help="只评这些任务（逗号分隔；试跑远端用）")
@@ -1694,6 +1875,8 @@ def main() -> None:
         die(f"{lab_config.PATH} 里没有 {'、'.join(t for t in tiers if t != '128' and t not in MACHINES)} 档的机器：只有 128 档在本机评")
     if a.no_eval and not no_eval_allowed(a.tag):
         die(f"{a.tag}：--no-eval 只给内部版（internal-MMDD[-N]），beta 和候选版一律全评")
+    if a.reuse_rc and not re.fullmatch(r"beta\d+(\.\d+)?", a.tag):
+        die(f"{a.tag}：--reuse-rc 只给 beta（betaN[.M]）")
     check_engine_eval(a.tag, a.template, a.no_eval)
     log(f"=== 内部版 {a.tag}：步骤 {','.join(steps)}，档 {','.join(tiers)}" + ("，不评测（--no-eval）" if a.no_eval else ""))
     IN_VM = vm_build.enabled(a.tag)
@@ -1722,7 +1905,8 @@ def main() -> None:
     prev = release.previous_release(a.tag, a.prev)
     reuse_from = a.reuse_from or prev
     if re.fullmatch(r"beta\d+(\.\d+)?(-rc\d+)?", a.tag):
-        # beta 和它的候选版（betaN-rcM）一律全评、全部现打：不沿用任何一版的证据和打好的应用（金丝雀本来就不给 beta 用，沿用证据也一样，luoke-top 10-26）
+        # beta 和它的候选版（betaN-rcM）默认全评、全部现打：不沿用任何一版的证据和打好的应用（金丝雀本来就不给 beta 用，沿用证据也一样，luoke-top 10-26）。
+        # 例外只有负责人开的 --reuse-rc：beta 的评测证据沿用它最近的候选版（下面的 eval_from），应用照旧现打
         reuse_from = None
     log("钉住：" + "、".join(f"{k} {v[:7]}" for k, v in sorted(pins.items())) + f"；差异对比：{prev}；证据沿用自：{reuse_from}")
     rec = os.path.join(ROOT, "releases", a.tag)
@@ -1744,6 +1928,20 @@ def main() -> None:
     def save_state():
         with open(pins_path, "w", encoding="utf-8") as f:
             json.dump(state, f, ensure_ascii=False, indent=1)
+
+    # 评测证据沿用自哪一版：平常就是 reuse_from。beta 默认全评（reuse_from 是 None）；负责人开了 --reuse-rc 才沿用它的候选版，
+    # 只沿用评测证据，配件 .app、引擎包照旧现打。记进 pins.json：--accept 续跑不带这个开关也接着沿用；不带开关重发就作废、全评（beta_eval_source）
+    eval_from = reuse_from
+    if re.fullmatch(r"beta\d+(\.\d+)?", a.tag):
+        eval_from = beta_eval_source(a.tag, own_state.get("reuse_rc"), a.reuse_rc, a.accept)
+        if eval_from:
+            state["reuse_rc"] = eval_from
+            save_state()
+            log(f"--reuse-rc：评测证据沿用候选版 {eval_from}（逐格核过没变的才沿用，其余照旧评；配件和引擎照旧现打）")
+        elif state.pop("reuse_rc", None):
+            save_state()
+            n = drop_reused(a.tag, own_state["reuse_rc"])
+            log(f"这次没带 --reuse-rc、也不是 --accept 续跑：不再沿用 {own_state['reuse_rc']}，删掉拷来的 {n} 条证据，全评")
 
     check_core(pins["luoke-core"])
     src = {repo: os.path.join(SRC, repo) for repo in ACCESSORIES if repo in pins}
@@ -1773,7 +1971,7 @@ def main() -> None:
         to_run, reused, deferred, canary = {}, [], [], {}
         canary_why = f"--no-eval，沿用 {reuse_from}"
     else:
-        to_run, reused, deferred, canary = plan_eval(a.tag, pins, src, reuse_from, a.template, tiers, evals,
+        to_run, reused, deferred, canary = plan_eval(a.tag, pins, src, eval_from, a.template, tiers, evals,
                                                      a.only_tasks.split(",") if a.only_tasks else None,
                                                      prev_led=support.previous(prev, ROOT), canary_ok=canary_ok)
     state["eval_mode"] = "none" if a.no_eval else "canary" if canary else "full"
@@ -1802,7 +2000,7 @@ def main() -> None:
     elif "eval" in steps:
         if to_run:
             vm_hold.drop()        # 评测不用 VM，可能要几个小时：这段时间 CI 照常跑
-        copy_reused(a.tag, reuse_from, reused)
+        copy_reused(a.tag, eval_from, reused)
         # 金丝雀对不上时这一档其余照旧全评，那几格也算进来（internal-1026-2：128 档金丝雀没对上、全评到 rerank，引擎没编）
         if "luoke-ime" in src and (any("luoke-ime.rerank" in v for v in to_run.values())
                                    or any(x == "luoke-ime.rerank" for c in canary.values() for x, _ in c["rest"])):
@@ -1831,7 +2029,7 @@ def main() -> None:
                         same, why = canary_matches(a.tag, tier, c["task"], c["old"])
                         log(f"金丝雀 {tier} GB 档 {c['task']}：{why}" + ("，其余沿用" if same else "，这一档其余照旧全评"))
                         if same:
-                            copy_reused(a.tag, reuse_from, [(tier, o) for _t, o in c["rest"]], canary=c["task"])
+                            copy_reused(a.tag, eval_from, [(tier, o) for _t, o in c["rest"]], canary=c["task"])
                         else:
                             run_tier(tier, [t for t, _ in c["rest"]])
             except BaseException as e:  # noqa: BLE001  （die() 抛 SystemExit：原因已经写进日志）
@@ -1954,7 +2152,8 @@ def main() -> None:
             if state.get("unevaluated_engine"):
                 ne_note = state["unevaluated_engine"] + "。" + ne_note
         step("publish", lambda: (check_core(pins["luoke-core"]),
-                                 publish(a.tag, pins, apps, reused, to_run, ("这一版档位变了：" + "；".join(flips) + "。" if flips else "") + ne_note + deviation_note)))
+                                 publish(a.tag, pins, apps, reused, to_run, ("这一版档位变了：" + "；".join(flips) + "。" if flips else "") + ne_note + deviation_note,
+                                         reused_label=f"候选版 {eval_from}" if state.get("reuse_rc") else "上一版")))
         if INTERNAL_TAG.fullmatch(a.tag):
             # 发出去了再删旧的工作副本；下一版默认拿来比、沿用的那版（release.previous_release）也留着
             try:
